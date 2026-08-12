@@ -30,6 +30,7 @@ An approved entry supersedes the corresponding baseline requirement or adds a go
 - Chapter 6.7 `src/config.js`: completed and verified on 2026-08-12. D-006 identity validation implemented for `tradeify-crypto` / `instant-funding`; valid Stage A configuration accepted; unsafe automatic execution and incorrect account identity rejected. Commit: `560db57`.
 - Chapter 6.8 `src/riskEngine.js`: completed and verified on 2026-08-12. Focused checks passed for daily and trailing floors, floor ratcheting/cap, payout lock, stages, consistency, daily controls, position sizing, and the shared risk gate. Commit: `e82368a`.
 - Chapter 6.9 `src/database.js`: completed and verified on 2026-08-12. Syntax and mocked PostgreSQL checks passed for pool settings, schema initialization, initial account state, numeric normalization, durable pause/resume data, daily ledger reads, event writes, health ping, and shutdown. Commit: `c3c7abc`.
+- Chapter 6.10 `src/tradeifyService.js`: completed and verified on 2026-08-12. Focused checks passed for status calculations, persistent pause, hashed two-step resume, incorrect/expired-code rejection, safety-halt preservation, Stage A flat instructions, and health reporting; no order-placement path exists. Commit: `60cfe0e`.
 - Chapters 7–27: not started.
 - Live trading: prohibited; simulation-only requirements remain in force.
 
