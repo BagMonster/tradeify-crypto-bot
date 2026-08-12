@@ -27,6 +27,7 @@ An approved entry supersedes the corresponding baseline requirement or adds a go
 - Chapter 6.4 `.env.example`: completed and verified on 2026-08-12. Commit: `3d44020`.
 - Chapter 6.5 `config/account.json`: completed and verified on 2026-08-12. D-006 approved; configuration commit: `18721ad`.
 - Chapter 6.6 `config/strategy.json`: completed and verified on 2026-08-12. Baseline approved as written; sequential trades within an account day are allowed when every gate passes, but only one position may be open at a time. Configuration commit: `ad66f32`.
+- Chapter 6.7 `src/config.js`: completed and verified on 2026-08-12. D-006 identity validation implemented for `tradeify-crypto` / `instant-funding`; valid Stage A configuration accepted; unsafe automatic execution and incorrect account identity rejected. Commit: `560db57`.
 - Chapters 7–27: not started.
 - Live trading: prohibited; simulation-only requirements remain in force.
 
