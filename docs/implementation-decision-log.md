@@ -23,7 +23,8 @@ An approved entry supersedes the corresponding baseline requirement or adds a go
 - Chapter 6.1 `package.json`: completed and verified on 2026-08-12. Commit: `dbb4354`.
 - Chapter 6.2 `Procfile`: completed and verified on 2026-08-12. Commit: `eae7169`.
 - Chapter 6.3 `.gitignore`: completed and verified on 2026-08-12. Commit: `bfebfe9`.
-- Chapter 6.4 `.env.example`: not started.
+- Chapter 6.4 `.env.example`: completed and verified on 2026-08-12. Commit: `3d44020`.
+- Chapter 6.5 `config/account.json`: awaiting account-rule change review.
 - Chapters 7–27: not started.
 - Live trading: prohibited; simulation-only requirements remain in force.
 
