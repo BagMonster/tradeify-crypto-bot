@@ -38,8 +38,9 @@ An approved entry supersedes the corresponding baseline requirement or adds a go
 - Chapter 6.14 `.github/workflows/test.yml`: completed and verified on 2026-08-12. YAML validation passed, and GitHub Actions push run #1 completed successfully under Node.js 22 with dependency installation, full JavaScript syntax checks, and all 13 risk tests. Commit: `76b3f82`.
 - Chapter 6.15 `README.md`: completed and verified on 2026-08-12. The Stage A feature summary, dual automatic-execution locks, Railway start command, eight operator commands, and simulation-only boundaries match the repository; the Chapter 4 file tree is complete; no embedded token, database credential, API key, password, or secret was found; GitHub Actions run #3 passed. Commit: `6dcb8a2`.
 - Chapter 7 GitHub Actions verification: completed on 2026-08-12. The newest completed `Test Tradeify Bot` workflow, run #4, finished successfully; the `test` job and every workflow step were green, and the cloud log reported 13 tests, 13 passes, and 0 failures.
+- Chapter 8 Telegram bot creation: completed and user-confirmed on 2026-08-12. The bot was created through the verified `@BotFather` account; its token was stored securely and not shared; group joining was disabled. No repository code, Railway deployment, DXtrade connection, or execution capability was added.
 - Chapter 28 final command reference: D-007 approved and added to the build manual on 2026-08-12; completion remains pending until the bot's final Telegram command and button set is implemented and verified.
-- Chapters 7–27: not started.
+- Chapters 9–27: not started.
 - Live trading: prohibited; simulation-only requirements remain in force.
 
 ## Next mandatory reminder
