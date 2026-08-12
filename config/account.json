@@ -1,0 +1,15 @@
+{
+  "provider": "tradeify-crypto",
+  "accountType": "instant-funding",
+  "startingBalance": 50000,
+  "dailyLossLimit": 1500,
+  "maxLossOffset": 3000,
+  "maxLossFloorCap": 50000,
+  "leverage": 2,
+  "maxNotional": 100000,
+  "consistencyMax": 0.2,
+  "minimumPayout": 100,
+  "profitSplit": 0.95,
+  "minimumHoldSeconds": 20,
+  "dailySnapshotUtc": "22:00"
+}
