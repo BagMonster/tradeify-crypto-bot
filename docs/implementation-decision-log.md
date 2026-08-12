@@ -21,7 +21,8 @@ An approved entry supersedes the corresponding baseline requirement or adds a go
 - Chapter 5 GitHub-repository creation: completed and verified on 2026-08-12. Repository: `BagMonster/tradeify-crypto-bot`; visibility: private; default branch: `main`; initial contents: `README.md` only; plugin access: admin/push confirmed.
 - Chapter 6 preliminary step required by D-005: `docs/implementation-decision-log.md` created and verified on 2026-08-12.
 - Chapter 6.1 `package.json`: completed and verified on 2026-08-12. Commit: `dbb4354`.
-- Chapter 6.2 `Procfile`: not started.
+- Chapter 6.2 `Procfile`: completed and verified on 2026-08-12. Commit: `eae7169`.
+- Chapter 6.3 `.gitignore`: not started.
 - Chapters 7–27: not started.
 - Live trading: prohibited; simulation-only requirements remain in force.
 
