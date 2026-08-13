@@ -42,3 +42,10 @@ npm start
 ```
 
 Use the project build manual for the exact GitHub, Railway, PostgreSQL, and Telegram setup sequence.
+
+## Project governance and future roadmap
+
+- [Implementation decision log](docs/implementation-decision-log.md)
+- [Post-Automation Addendum A - Owner-Only OpenAI Development Agent](docs/post-automation-development-agent-addendum.md)
+
+The development-agent addendum is approved future scope only. It begins after the current trading automation roadmap, stability gates, final Telegram command documentation, and a fresh security checkpoint are complete. It does not change Stage A or enable execution.
