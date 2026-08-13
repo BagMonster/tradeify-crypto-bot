@@ -39,8 +39,9 @@ An approved entry supersedes the corresponding baseline requirement or adds a go
 - Chapter 6.15 `README.md`: completed and verified on 2026-08-12. The Stage A feature summary, dual automatic-execution locks, Railway start command, eight operator commands, and simulation-only boundaries match the repository; the Chapter 4 file tree is complete; no embedded token, database credential, API key, password, or secret was found; GitHub Actions run #3 passed. Commit: `6dcb8a2`.
 - Chapter 7 GitHub Actions verification: completed on 2026-08-12. The newest completed `Test Tradeify Bot` workflow, run #4, finished successfully; the `test` job and every workflow step were green, and the cloud log reported 13 tests, 13 passes, and 0 failures.
 - Chapter 8 Telegram bot creation: completed and user-confirmed on 2026-08-12. The bot was created through the verified `@BotFather` account; its token was stored securely and not shared; group joining was disabled. No repository code, Railway deployment, DXtrade connection, or execution capability was added.
+- Chapter 9 Railway topology: completed and user-verified on 2026-08-13. Railway project `Tradeify Crypto Bot` contains one online `Postgres` service with its attached volume and one staged, undeployed `tradeify-crypto-bot` worker sourced from private repository `BagMonster/tradeify-crypto-bot` on `main`. No Redis, cron, public web service/domain, or second worker was added. The worker remains undeployed pending Chapter 10 variables and Chapter 11 deployment checks.
 - Chapter 28 final command reference: D-007 approved and added to the build manual on 2026-08-12; completion remains pending until the bot's final Telegram command and button set is implemented and verified.
-- Chapters 9–27: not started.
+- Chapters 10–27: not started.
 - Live trading: prohibited; simulation-only requirements remain in force.
 
 ## Next mandatory reminder
