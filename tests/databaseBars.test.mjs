@@ -332,3 +332,22 @@ test("8 - exact-range coverage is counted with aligned parameterized boundaries"
     endTimeExclusive: "2026-08-14T00:00:00.000Z"
   }), /UTC-aligned/i);
 });
+
+test("9 - indicator readiness is persisted with a parameterized fail-closed flag", async () => {
+  const calls = [];
+  const pool = {
+    async query(text, params) {
+      calls.push({ text, params });
+      return { rowCount: 1, rows: [{ indicators_warm: params[0] }] };
+    },
+    async end() {}
+  };
+  const database = databaseWithPool(pool);
+
+  assert.equal(await database.setIndicatorsWarm(false), false);
+  assert.equal(await database.setIndicatorsWarm(true), true);
+  assert.deepEqual(calls.map(({ params }) => params), [[false], [true]]);
+  assert.equal(calls.every(({ text }) => /UPDATE bot_state/i.test(text)), true);
+  assert.equal(calls.every(({ text }) => /indicators_warm = \$1/i.test(text)), true);
+  await assert.rejects(database.setIndicatorsWarm("true"), /boolean/i);
+});
