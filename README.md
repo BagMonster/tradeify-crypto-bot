@@ -10,7 +10,10 @@ This repository is the Stage A foundation for a Telegram-controlled Tradeify bot
 - PostgreSQL state that survives restarts
 - Persistent pause and confirmed resume flow
 - Tradeify dual-floor, daily-control, consistency, and position-sizing logic
-- Eighteen automated risk tests
+- Read-only DXtrade discovery client with no order methods
+- Completed, source-tagged PostgreSQL bar storage
+- Idempotent 12-month Binance `BTCUSDT` historical backfill for `15m`, `4h`, and `1d`
+- Automated risk, read-only-client, storage, and backfill tests
 - Automatic execution locked off
 
 ## Current safety state
@@ -20,7 +23,7 @@ The worker starts only when both of these settings are false:
 - Railway variable `AUTO_EXECUTE=false`
 - `config/strategy.json` value `execution.autoExecute=false`
 
-The Stage A foundation does not connect to DXtrade, create orders, or expose manual long/short commands.
+Stage A exposes no DXtrade order, modification, cancellation, close-position, or flatten method. Binance is public historical data only and cannot place or control Tradeify trades. The bot does not create orders or expose manual long/short commands.
 
 ## Railway start command
 
