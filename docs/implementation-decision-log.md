@@ -102,7 +102,8 @@ D-009 supersedes only the conflicting timing, strategy-research, validation, and
 - Chapter 15 PostgreSQL-table explanation checkpoint: completed and user-confirmed on 2026-08-13. The owner confirmed understanding of `bot_state` as the single current account/control row, `daily_ledger` as UTC daily realized-P&L history, and `events` as the timestamped audit trail; the schema remains created automatically by `src/database.js`, and no SQL or database mutation was required.
 - Chapter 28 final command reference: D-007 approved and added to the build manual on 2026-08-12; completion remains pending until the bot's final Telegram command and button set is implemented and verified.
 - Post-Automation Addendum A: D-008 approved for future scope on 2026-08-13 after the attached 73-page proposal was reviewed in full and checked against the live repository and current official OpenAI documentation. The governed addendum and README link are documentation-only. Implementation is deferred until the trading automation roadmap and D-007 are complete, stability is demonstrated, and a fresh security/architecture checkpoint passes.
-- Chapters 16–27: not started. Chapter 16 is next.
+- Chapter 16 risk-protection explanation checkpoint: completed and user-confirmed on 2026-08-13. The owner confirmed understanding of the independent daily and MLL floors, higher active floor, $750 floor safety margin, combined realized/unrealized daily controls, two-loss risk reduction, ATR/floor/daily/stage-constrained sizing, and the shared no-bypass entry gate. D-009 remains future implementation; Stage A runtime and both execution locks remain unchanged.
+- Chapters 17–27: not started. Chapter 17 is next.
 - Live trading: prohibited; simulation-only requirements remain in force.
 
 ## Next mandatory reminder
