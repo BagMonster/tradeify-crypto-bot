@@ -103,7 +103,8 @@ D-009 supersedes only the conflicting timing, strategy-research, validation, and
 - Chapter 28 final command reference: D-007 approved and added to the build manual on 2026-08-12; completion remains pending until the bot's final Telegram command and button set is implemented and verified.
 - Post-Automation Addendum A: D-008 approved for future scope on 2026-08-13 after the attached 73-page proposal was reviewed in full and checked against the live repository and current official OpenAI documentation. The governed addendum and README link are documentation-only. Implementation is deferred until the trading automation roadmap and D-007 are complete, stability is demonstrated, and a fresh security/architecture checkpoint passes.
 - Chapter 16 risk-protection explanation checkpoint: completed and user-confirmed on 2026-08-13. The owner confirmed understanding of the independent daily and MLL floors, higher active floor, $750 floor safety margin, combined realized/unrealized daily controls, two-loss risk reduction, ATR/floor/daily/stage-constrained sizing, and the shared no-bypass entry gate. D-009 remains future implementation; Stage A runtime and both execution locks remain unchanged.
-- Chapters 17–27: not started. Chapter 17 is next.
+- Chapter 17 GitHub-update-routine checkpoint: completed and user-confirmed on 2026-08-13. The owner confirmed the standard GitHub edit/commit → green Actions → matching Railway deployment → startup-log review → `/health` → `/status` validation sequence and the rule that any failed GitHub test is a stop sign. No code, Railway setting, Telegram setting, database schema, risk rule, or execution lock changed.
+- Chapters 18–27: not started. Chapter 18 is next.
 - Live trading: prohibited; simulation-only requirements remain in force.
 
 ## Next mandatory reminder
