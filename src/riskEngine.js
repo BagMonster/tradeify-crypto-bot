@@ -77,8 +77,41 @@ export function calculateConsistency(days, maxScore = 0.2) {
   };
 }
 
+function areFiniteNumbers(values) {
+  return values.every((value) => Number.isFinite(value));
+}
+
+function hasValidStage(stage) {
+  return stage === 1 || stage === 2;
+}
+
 export function evaluateDailyControl(input, strategy) {
+  if (!areFiniteNumbers([
+    input.realizedPnl,
+    input.unrealizedPnl,
+    input.lossesToday,
+    input.stage,
+    strategy.risk.dailyHardStop,
+    strategy.risk.dailySoftStop,
+    strategy.risk.stage1ProfitCeiling,
+    strategy.risk.stage2ProfitCeiling
+  ]) || !Number.isInteger(input.lossesToday) || input.lossesToday < 0 || !hasValidStage(input.stage)) {
+    return {
+      action: "NO_NEW_ENTRIES",
+      effectiveRiskMultiplier: 0,
+      reason: "Invalid daily-control input"
+    };
+  }
+
   const pnl = input.realizedPnl + input.unrealizedPnl;
+  if (!Number.isFinite(pnl)) {
+    return {
+      action: "NO_NEW_ENTRIES",
+      effectiveRiskMultiplier: 0,
+      reason: "Invalid daily-control input"
+    };
+  }
+
   const ceiling = stageProfitCeiling(input.stage, strategy);
   if (pnl <= strategy.risk.dailyHardStop) {
     return { action: "FLATTEN_AND_LOCK", effectiveRiskMultiplier: 0, reason: "Daily hard stop reached" };
@@ -96,18 +129,43 @@ export function evaluateDailyControl(input, strategy) {
 }
 
 function roundDownToIncrement(value, increment) {
-  if (increment <= 0) throw new Error("lot increment must be positive");
+  if (!Number.isFinite(value) || !Number.isFinite(increment) || increment <= 0) {
+    throw new Error("value and lot increment must be finite, and lot increment must be positive");
+  }
   const steps = Math.floor((value + Number.EPSILON) / increment);
   const decimals = Math.max(0, (increment.toString().split(".")[1] ?? "").length);
   return Number((steps * increment).toFixed(decimals));
 }
 
 export function computeSize(context) {
+  const numericInputs = [
+    context.price,
+    context.atr15m,
+    context.stopAtrMultiple,
+    context.dailyStopRemaining,
+    context.liveEquity,
+    context.activeFloor,
+    context.stageRiskCap,
+    context.maxNotional,
+    context.rules?.minLot,
+    context.rules?.lotIncrement
+  ];
+  if (!areFiniteNumbers(numericInputs)) return null;
+  if (
+    context.price <= 0 ||
+    context.atr15m <= 0 ||
+    context.stopAtrMultiple <= 0 ||
+    context.dailyStopRemaining <= 0 ||
+    context.stageRiskCap <= 0 ||
+    context.maxNotional <= 0 ||
+    context.rules.minLot <= 0 ||
+    context.rules.lotIncrement <= 0
+  ) return null;
+
   const stopDistance = context.atr15m * context.stopAtrMultiple;
   if (!Number.isFinite(stopDistance) || stopDistance <= 0) return null;
-  if (context.dailyStopRemaining <= 0) return null;
   const floorDistance = context.liveEquity - context.activeFloor;
-  if (floorDistance <= 0) return null;
+  if (!Number.isFinite(floorDistance) || floorDistance <= 0) return null;
   const risk = Math.min(
     context.dailyStopRemaining / 3,
     floorDistance / 12,
@@ -115,10 +173,12 @@ export function computeSize(context) {
   );
   if (!Number.isFinite(risk) || risk <= 0) return null;
   const qty = roundDownToIncrement(risk / stopDistance, context.rules.lotIncrement);
-  if (qty < context.rules.minLot) return null;
+  if (!Number.isFinite(qty) || qty <= 0 || qty < context.rules.minLot) return null;
   const notional = qty * context.price;
-  if (notional > context.maxNotional) return null;
-  return { qty, stopDistance, risk: qty * stopDistance, notional };
+  const sizedRisk = qty * stopDistance;
+  if (!Number.isFinite(notional) || notional <= 0 || notional > context.maxNotional) return null;
+  if (!Number.isFinite(sizedRisk) || sizedRisk <= 0) return null;
+  return { qty, stopDistance, risk: sizedRisk, notional };
 }
 
 export function currentDailyPnl(context) {
@@ -126,9 +186,27 @@ export function currentDailyPnl(context) {
 }
 
 export function riskGate(context, strategy) {
+  if (!areFiniteNumbers([
+    context.liveEquity,
+    context.activeFloor,
+    context.dailyRealizedPnl,
+    context.dailyUnrealizedPnl,
+    context.stage,
+    strategy.risk.dailyHardStop,
+    strategy.risk.dailySoftStop,
+    strategy.risk.stage1ProfitCeiling,
+    strategy.risk.stage2ProfitCeiling,
+    strategy.risk.floorSafetyMargin
+  ]) || !hasValidStage(context.stage)) {
+    return { ok: false, reason: "Invalid risk input" };
+  }
+
   const pnl = currentDailyPnl(context);
   const ceiling = stageProfitCeiling(context.stage, strategy);
   const floorDistance = context.liveEquity - context.activeFloor;
+  if (!Number.isFinite(pnl) || !Number.isFinite(ceiling) || !Number.isFinite(floorDistance)) {
+    return { ok: false, reason: "Invalid risk input" };
+  }
   if (context.lockedOut) return { ok: false, reason: "Account is locked out" };
   if (!context.indicatorsWarm) return { ok: false, reason: "Indicators are cold" };
   if (context.feedStale) return { ok: false, reason: "Market data feed is stale" };

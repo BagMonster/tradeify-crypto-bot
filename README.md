@@ -10,7 +10,7 @@ This repository is the Stage A foundation for a Telegram-controlled Tradeify bot
 - PostgreSQL state that survives restarts
 - Persistent pause and confirmed resume flow
 - Tradeify dual-floor, daily-control, consistency, and position-sizing logic
-- Thirteen automated risk tests
+- Eighteen automated risk tests
 - Automatic execution locked off
 
 ## Current safety state

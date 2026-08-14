@@ -88,6 +88,22 @@ function baseGate(overrides = {}) {
   };
 }
 
+function baseSize(overrides = {}) {
+  return {
+    instrument: "BTC/USD",
+    price: 65000,
+    atr15m: 200,
+    stopAtrMultiple: 1.5,
+    dailyStopRemaining: 1000,
+    liveEquity: 50000,
+    activeFloor: 47000,
+    stageRiskCap: 200,
+    maxNotional: 100000,
+    rules: { minLot: 0.001, lotIncrement: 0.001 },
+    ...overrides
+  };
+}
+
 test("1 - initial floors match the account rules", () => {
   const state = createInitialFloorState(account);
   assert.equal(state.mllFloor, 47000);
@@ -208,4 +224,72 @@ test("13 - daily control halves risk after two losses", () => {
   }, strategy);
   assert.equal(result.action, "HALVE_RISK");
   assert.equal(result.effectiveRiskMultiplier, 0.5);
+});
+
+test("14 - daily control blocks non-finite PnL", () => {
+  for (const invalidPnl of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    const result = evaluateDailyControl({
+      realizedPnl: invalidPnl,
+      unrealizedPnl: 0,
+      lossesToday: 0,
+      stage: 1
+    }, strategy);
+    assert.equal(result.action, "NO_NEW_ENTRIES");
+    assert.equal(result.effectiveRiskMultiplier, 0);
+    assert.match(result.reason, /invalid/i);
+  }
+});
+
+test("15 - daily control blocks invalid stage and loss count", () => {
+  for (const invalidInput of [
+    { realizedPnl: 0, unrealizedPnl: 0, lossesToday: -1, stage: 1 },
+    { realizedPnl: 0, unrealizedPnl: 0, lossesToday: 1.5, stage: 1 },
+    { realizedPnl: 0, unrealizedPnl: 0, lossesToday: 0, stage: 3 }
+  ]) {
+    const result = evaluateDailyControl(invalidInput, strategy);
+    assert.equal(result.action, "NO_NEW_ENTRIES");
+    assert.equal(result.effectiveRiskMultiplier, 0);
+    assert.match(result.reason, /invalid/i);
+  }
+});
+
+test("16 - risk gate blocks non-finite runtime values", () => {
+  for (const overrides of [
+    { liveEquity: Number.NaN },
+    { activeFloor: Number.POSITIVE_INFINITY },
+    { dailyRealizedPnl: Number.NEGATIVE_INFINITY },
+    { dailyUnrealizedPnl: Number.NaN },
+    { stage: Number.NaN }
+  ]) {
+    const result = riskGate(baseGate(overrides), strategy);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /invalid/i);
+  }
+});
+
+test("17 - sizing rejects non-finite runtime values", () => {
+  for (const context of [
+    baseSize({ price: Number.NaN }),
+    baseSize({ atr15m: Number.POSITIVE_INFINITY }),
+    baseSize({ dailyStopRemaining: Number.NEGATIVE_INFINITY }),
+    baseSize({ liveEquity: Number.NaN }),
+    baseSize({ activeFloor: Number.POSITIVE_INFINITY }),
+    baseSize({ rules: { minLot: 0.001, lotIncrement: Number.NaN } })
+  ]) {
+    assert.equal(computeSize(context), null);
+  }
+});
+
+test("18 - sizing rejects invalid positive-only inputs", () => {
+  for (const context of [
+    baseSize({ price: 0 }),
+    baseSize({ atr15m: -1 }),
+    baseSize({ stopAtrMultiple: 0 }),
+    baseSize({ stageRiskCap: -1 }),
+    baseSize({ maxNotional: 0 }),
+    baseSize({ rules: { minLot: 0, lotIncrement: 0.001 } }),
+    baseSize({ rules: { minLot: 0.001, lotIncrement: 0 } })
+  ]) {
+    assert.equal(computeSize(context), null);
+  }
 });

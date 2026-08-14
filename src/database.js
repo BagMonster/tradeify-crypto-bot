@@ -2,21 +2,34 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-function toNumber(value) {
-  return typeof value === "number" ? value : Number(value);
+function toFiniteNumber(name, value) {
+  const number = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(number)) throw new Error(`${name} must be finite`);
+  return number;
+}
+
+function toNonNegativeInteger(name, value) {
+  const number = toFiniteNumber(name, value);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return number;
 }
 
 function normalizeState(row) {
   return {
     ...row,
-    balance: toNumber(row.balance),
-    equity: toNumber(row.equity),
-    prev_day_close: toNumber(row.prev_day_close),
-    high_water: toNumber(row.high_water),
-    mll_floor: toNumber(row.mll_floor),
-    daily_realized_pnl: toNumber(row.daily_realized_pnl),
-    daily_unrealized_pnl: toNumber(row.daily_unrealized_pnl),
-    losses_today: Number(row.losses_today)
+    balance: toFiniteNumber("bot_state.balance", row.balance),
+    equity: toFiniteNumber("bot_state.equity", row.equity),
+    prev_day_close: toFiniteNumber("bot_state.prev_day_close", row.prev_day_close),
+    high_water: toFiniteNumber("bot_state.high_water", row.high_water),
+    mll_floor: toFiniteNumber("bot_state.mll_floor", row.mll_floor),
+    daily_realized_pnl: toFiniteNumber("bot_state.daily_realized_pnl", row.daily_realized_pnl),
+    daily_unrealized_pnl: toFiniteNumber(
+      "bot_state.daily_unrealized_pnl",
+      row.daily_unrealized_pnl
+    ),
+    losses_today: toNonNegativeInteger("bot_state.losses_today", row.losses_today)
   };
 }
 
@@ -131,7 +144,7 @@ export function createDatabase(environment) {
     );
     return result.rows.map((row) => ({
       dateUtc: new Date(row.date_utc).toISOString().slice(0, 10),
-      realizedPnl: toNumber(row.realized_pnl)
+      realizedPnl: toFiniteNumber("daily_ledger.realized_pnl", row.realized_pnl)
     }));
   }
 
