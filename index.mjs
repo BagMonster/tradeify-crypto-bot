@@ -1,6 +1,7 @@
 import { loadConfiguration } from "./src/config.js";
 import { createDatabase } from "./src/database.js";
 import { backfillBinanceHistory } from "./src/binanceBackfill.js";
+import { refreshStoredIndicatorSnapshot } from "./src/indicators.js";
 import { createTradeifyService } from "./src/tradeifyService.js";
 import { startTelegramBot } from "./src/telegramBot.js";
 
@@ -16,6 +17,36 @@ try {
   console.log(`Binance BTCUSDT historical coverage ready (${counts}).`);
 } catch (error) {
   console.error(`Binance historical backfill is not ready: ${error.message}`);
+  console.error("Signals and execution remain blocked; the Stage A worker will continue safely.");
+}
+
+try {
+  const indicators = await refreshStoredIndicatorSnapshot({
+    database,
+    strategy: configuration.strategy
+  });
+  if (indicators.warm) {
+    console.log(
+      `Indicators warm from completed Binance BTCUSDT bars ` +
+      `(15m=${indicators.counts["15m"]}, 4h=${indicators.counts["4h"]}, ` +
+      `1d=${indicators.counts["1d"]}).`
+    );
+  } else {
+    const missing = Object.entries(indicators.missing)
+      .map(([timeframe, count]) => `${timeframe}=${count}`)
+      .join(", ");
+    console.error(`Indicators remain cold; missing completed bars (${missing}).`);
+  }
+} catch (error) {
+  try {
+    await database.setIndicatorsWarm(false);
+  } catch (persistenceError) {
+    throw new Error(
+      `Cannot enforce the cold indicator state: ${persistenceError.message}`,
+      { cause: error }
+    );
+  }
+  console.error(`Indicator calculation is not ready: ${error.message}`);
   console.error("Signals and execution remain blocked; the Stage A worker will continue safely.");
 }
 
