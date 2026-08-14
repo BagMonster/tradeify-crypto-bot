@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node index.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check index.mjs && node --check src/config.js && node --check src/database.js && node --check src/riskEngine.js && node --check src/tradeifyService.js && node --check src/telegramBot.js"
+    "check": "node --check index.mjs && node --check src/config.js && node --check src/database.js && node --check src/dxtradeClient.js && node --check src/riskEngine.js && node --check src/tradeifyService.js && node --check src/telegramBot.js"
   },
   "dependencies": {
     "dotenv": "17.4.2",
