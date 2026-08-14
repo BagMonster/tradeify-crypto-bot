@@ -15,7 +15,8 @@ This repository is the Stage A foundation for a Telegram-controlled Tradeify bot
 - Idempotent 12-month Binance `BTCUSDT` historical backfill for `15m`, `4h`, and `1d`
 - Deterministic Bollinger, RSI, ATR, and ADX calculations with fail-closed warm-up checks
 - Deterministic Bollinger/RSI candidate evaluation with fail-closed regime checks
-- Automated risk, read-only-client, storage, backfill, indicator, and signal tests
+- Simulation-only Telegram signal-alert formatting with sanitized audit evidence
+- Automated risk, read-only-client, storage, backfill, indicator, signal, and alert tests
 - Automatic execution locked off
 
 ## Current safety state
@@ -25,7 +26,9 @@ The worker starts only when both of these settings are false:
 - Railway variable `AUTO_EXECUTE=false`
 - `config/strategy.json` value `execution.autoExecute=false`
 
-Stage A exposes no DXtrade order, modification, cancellation, close-position, or flatten method. Binance is public historical data only and cannot place or control Tradeify trades. A calculated signal candidate does not make the live feed fresh, persist regime permission, bypass the shared risk gate, or authorize an order or position. The bot does not create orders or expose manual long/short commands.
+Stage A exposes no DXtrade order, modification, cancellation, close-position, or flatten method. Binance is public historical data only and cannot place or control Tradeify trades. A calculated signal candidate or simulation alert does not make the live feed fresh, persist regime permission, bypass the shared risk gate, or authorize an order or position. Exact DXtrade size remains blocked until instrument lot rules are verified. The bot does not create orders or expose manual long/short commands.
+
+The Chapter 25 alert publisher is a tested capability and is not called by the current worker. Live owner alerts begin only after a later chapter supplies a fresh validated feed and controlled evaluation loop; this checkpoint sends no production alert and places no order.
 
 ## Railway start command
 
