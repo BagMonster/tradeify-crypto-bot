@@ -282,6 +282,20 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     );
   }
 
+  async function setIndicatorsWarm(warm) {
+    if (typeof warm !== "boolean") throw new Error("indicators warm state must be boolean");
+    const result = await pool.query(
+      `UPDATE bot_state
+       SET indicators_warm = $1,
+           updated_at = NOW()
+       WHERE id = 1
+       RETURNING indicators_warm`,
+      [warm]
+    );
+    if (result.rowCount !== 1) throw new Error("bot_state row is missing");
+    return result.rows[0].indicators_warm === true;
+  }
+
   async function getDailyLedger() {
     const result = await pool.query(
       "SELECT date_utc, realized_pnl FROM daily_ledger ORDER BY date_utc"
@@ -518,6 +532,7 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     setOperatorKilled,
     setResumeChallenge,
     clearResumeChallenge,
+    setIndicatorsWarm,
     getDailyLedger,
     addEvent,
     upsertBar,
