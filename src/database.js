@@ -355,10 +355,49 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const stored = [];
-      for (const bar of bars) stored.push(await writeBar(client, bar));
+      const parameters = [];
+      const rowsSql = bars.map((bar, rowIndex) => {
+        const offset = rowIndex * 10;
+        parameters.push(
+          bar.source,
+          bar.symbol,
+          bar.timeframe,
+          bar.openTime,
+          bar.closeTime,
+          bar.open,
+          bar.high,
+          bar.low,
+          bar.close,
+          bar.volume
+        );
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, ` +
+          `$${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, ` +
+          `$${offset + 9}, $${offset + 10}, TRUE)`;
+      });
+      const result = await client.query(
+        `INSERT INTO bars (
+           source, symbol, timeframe, open_time, close_time,
+           open, high, low, close, volume, is_closed
+         ) VALUES ${rowsSql.join(", ")}
+         ON CONFLICT (source, symbol, timeframe, open_time)
+         DO UPDATE SET
+           close_time = EXCLUDED.close_time,
+           open = EXCLUDED.open,
+           high = EXCLUDED.high,
+           low = EXCLUDED.low,
+           close = EXCLUDED.close,
+           volume = EXCLUDED.volume,
+           is_closed = TRUE,
+           updated_at = NOW()
+         RETURNING source, symbol, timeframe, open_time, close_time,
+                   open, high, low, close, volume, is_closed`,
+        parameters
+      );
+      if (result.rowCount !== bars.length) {
+        throw new Error("bars batch upsert did not return every row");
+      }
       await client.query("COMMIT");
-      return stored;
+      return result.rows.map(normalizeStoredBar);
     } catch (error) {
       try {
         await client.query("ROLLBACK");
@@ -418,6 +457,52 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     return Object.freeze(counts);
   }
 
+  async function getBarCoverage({
+    source,
+    symbol,
+    timeframe,
+    startTime,
+    endTimeExclusive
+  }) {
+    const normalizedSource = requiredText("source", source, 64);
+    const normalizedSymbol = requiredText("symbol", symbol, 64);
+    const normalizedTimeframe = requiredText("timeframe", timeframe, 8);
+    const intervalMs = BAR_INTERVAL_MS[normalizedTimeframe];
+    if (!intervalMs) throw new Error("timeframe must be 15m, 4h, or 1d");
+
+    const normalizedStart = toDate("startTime", startTime);
+    const normalizedEnd = toDate("endTimeExclusive", endTimeExclusive);
+    if (normalizedStart.getTime() % intervalMs !== 0 ||
+        normalizedEnd.getTime() % intervalMs !== 0) {
+      throw new Error("coverage boundaries must be UTC-aligned to the timeframe");
+    }
+    if (normalizedStart.getTime() >= normalizedEnd.getTime()) {
+      throw new Error("startTime must be before endTimeExclusive");
+    }
+
+    const result = await pool.query(
+      `SELECT COUNT(*)::BIGINT AS bar_count,
+              MIN(open_time) AS first_open_time,
+              MAX(close_time) AS last_close_time
+       FROM bars
+       WHERE source = $1
+         AND symbol = $2
+         AND timeframe = $3
+         AND is_closed = TRUE
+         AND open_time >= $4
+         AND close_time <= $5`,
+      [normalizedSource, normalizedSymbol, normalizedTimeframe, normalizedStart, normalizedEnd]
+    );
+    if (result.rowCount !== 1) throw new Error("bar coverage query did not return one row");
+    const row = result.rows[0];
+    const count = toNonNegativeInteger("bars.bar_count", row.bar_count);
+    return Object.freeze({
+      count,
+      firstOpenTime: count === 0 ? null : toDate("bars.first_open_time", row.first_open_time).toISOString(),
+      lastCloseTime: count === 0 ? null : toDate("bars.last_close_time", row.last_close_time).toISOString()
+    });
+  }
+
   async function ping() {
     const result = await pool.query("SELECT NOW() AS now");
     return result.rows[0].now;
@@ -439,6 +524,7 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     upsertBars,
     getBars,
     getBarCounts,
+    getBarCoverage,
     ping,
     close
   };

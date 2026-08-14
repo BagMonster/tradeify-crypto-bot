@@ -166,8 +166,7 @@ test("5 - a batch is validated first and committed atomically", async () => {
       if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") {
         return { rowCount: 0, rows: [] };
       }
-      const matching = inputs.find((bar) => new Date(bar.openTime).getTime() === params[3].getTime());
-      return { rowCount: 1, rows: [storedRow(matching)] };
+      return { rowCount: inputs.length, rows: inputs.map(storedRow) };
     },
     release() {
       released = true;
@@ -189,7 +188,9 @@ test("5 - a batch is validated first and committed atomically", async () => {
   assert.equal(stored.length, 2);
   assert.deepEqual(calls.map((call) => call.text === "BEGIN" || call.text === "COMMIT"
     ? call.text
-    : "UPSERT"), ["BEGIN", "UPSERT", "UPSERT", "COMMIT"]);
+    : "BULK UPSERT"), ["BEGIN", "BULK UPSERT", "COMMIT"]);
+  assert.equal(calls[1].params.length, 20);
+  assert.match(calls[1].text, /\$20/);
   assert.equal(released, true);
 
   await assert.rejects(
@@ -204,16 +205,12 @@ test("5 - a batch is validated first and committed atomically", async () => {
 
 test("6 - a failed batch rolls back and releases the client", async () => {
   const calls = [];
-  let upserts = 0;
   let released = false;
   const client = {
     async query(text) {
       calls.push(text);
-      if (/INSERT INTO bars/i.test(text) && ++upserts === 2) {
-        throw new Error("simulated PostgreSQL failure");
-      }
       if (/INSERT INTO bars/i.test(text)) {
-        return { rowCount: 1, rows: [storedRow()] };
+        throw new Error("simulated PostgreSQL failure");
       }
       return { rowCount: 0, rows: [] };
     },
@@ -289,4 +286,49 @@ test("7 - reads return chronological bars and warm-up counts", async () => {
     database.getBars({ source: "binance", symbol: "BTCUSDT", timeframe: "15m", limit: 5001 }),
     /limit/i
   );
+});
+
+test("8 - exact-range coverage is counted with aligned parameterized boundaries", async () => {
+  const calls = [];
+  const pool = {
+    async query(text, params) {
+      calls.push({ text, params });
+      return {
+        rowCount: 1,
+        rows: [{
+          bar_count: "96",
+          first_open_time: "2026-08-13T00:00:00.000Z",
+          last_close_time: "2026-08-14T00:00:00.000Z"
+        }]
+      };
+    },
+    async end() {}
+  };
+  const database = databaseWithPool(pool);
+
+  const coverage = await database.getBarCoverage({
+    source: "binance",
+    symbol: "BTCUSDT",
+    timeframe: "15m",
+    startTime: Date.parse("2026-08-13T00:00:00.000Z"),
+    endTimeExclusive: Date.parse("2026-08-14T00:00:00.000Z")
+  });
+
+  assert.deepEqual(coverage, {
+    count: 96,
+    firstOpenTime: "2026-08-13T00:00:00.000Z",
+    lastCloseTime: "2026-08-14T00:00:00.000Z"
+  });
+  assert.deepEqual(calls[0].params.slice(0, 3), ["binance", "BTCUSDT", "15m"]);
+  assert.equal(calls[0].params[3].toISOString(), "2026-08-13T00:00:00.000Z");
+  assert.equal(calls[0].params[4].toISOString(), "2026-08-14T00:00:00.000Z");
+  assert.match(calls[0].text, /open_time >= \$4[\s\S]*close_time <= \$5/i);
+
+  await assert.rejects(database.getBarCoverage({
+    source: "binance",
+    symbol: "BTCUSDT",
+    timeframe: "15m",
+    startTime: "2026-08-13T00:01:00.000Z",
+    endTimeExclusive: "2026-08-14T00:00:00.000Z"
+  }), /UTC-aligned/i);
 });
