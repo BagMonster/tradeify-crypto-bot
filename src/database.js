@@ -98,20 +98,30 @@ export function normalizeBar(input) {
 }
 
 function normalizeStoredBar(row) {
-  if (row.is_closed !== true) throw new Error("bars row must be completed");
+  const bar = normalizeBar({
+    source: row.source,
+    symbol: row.symbol,
+    timeframe: row.timeframe,
+    openTime: row.open_time,
+    closeTime: row.close_time,
+    open: row.open,
+    high: row.high,
+    low: row.low,
+    close: row.close,
+    volume: row.volume,
+    isClosed: row.is_closed
+  });
   return Object.freeze({
-    source: requiredText("bars.source", row.source, 64),
-    symbol: requiredText("bars.symbol", row.symbol, 64),
-    timeframe: requiredText("bars.timeframe", row.timeframe, 8),
-    openTime: toDate("bars.open_time", row.open_time).toISOString(),
-    closeTime: toDate("bars.close_time", row.close_time).toISOString(),
-    open: toPositiveNumber("bars.open", row.open),
-    high: toPositiveNumber("bars.high", row.high),
-    low: toPositiveNumber("bars.low", row.low),
-    close: toPositiveNumber("bars.close", row.close),
-    volume: row.volume === null || row.volume === undefined
-      ? null
-      : toFiniteNumber("bars.volume", row.volume),
+    source: bar.source,
+    symbol: bar.symbol,
+    timeframe: bar.timeframe,
+    openTime: bar.openTime.toISOString(),
+    closeTime: bar.closeTime.toISOString(),
+    open: bar.open,
+    high: bar.high,
+    low: bar.low,
+    close: bar.close,
+    volume: bar.volume,
     isClosed: true
   });
 }
@@ -219,7 +229,7 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
           OR
           (timeframe = '1d'
             AND MOD(EXTRACT(EPOCH FROM open_time), 86400) = 0
-            AND close_time = open_time + INTERVAL '1 day')
+            AND close_time = open_time + INTERVAL '24 hours')
         )
       )
     `);
@@ -332,6 +342,7 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     if (!Array.isArray(inputs) || inputs.length === 0) {
       throw new Error("bars must be a non-empty array");
     }
+    if (inputs.length > 5000) throw new Error("bars batch may contain at most 5000 rows");
 
     const bars = inputs.map(normalizeBar);
     const keys = new Set();

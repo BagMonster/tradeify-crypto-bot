@@ -196,6 +196,10 @@ test("5 - a batch is validated first and committed atomically", async () => {
     database.upsertBars([inputs[0], { ...inputs[0] }]),
     /duplicate key/i
   );
+  await assert.rejects(
+    database.upsertBars(Array(5001).fill(inputs[0])),
+    /at most 5000/i
+  );
 });
 
 test("6 - a failed batch rolls back and releases the client", async () => {
