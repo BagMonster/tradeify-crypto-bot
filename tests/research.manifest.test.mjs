@@ -4,6 +4,7 @@ import {
   BARS_PER_TWELFTH,
   CONTRACT_VERSION,
   EXPECTED_BAR_COUNTS,
+  buildFreezeRecord,
   buildManifest,
   computePartitions,
   partitionForCloseTime,
@@ -185,4 +186,122 @@ test("10 - buildManifest rejects malformed hashes, commit, and seed", () => {
   assert.throws(() => buildManifest({ ...base, accountConfigHash: "not-a-hash" }), /SHA-256/);
   assert.throws(() => buildManifest({ ...base, gitCommit: "" }), /gitCommit/);
   assert.throws(() => buildManifest({ ...base, monteCarloSeed: 1.5 }), /integer/);
+});
+
+function freezeRecordSlots(slot4Overrides = {}) {
+  return {
+    slot1: Object.freeze({ strategyId: "donchian-breakout", channelPeriod: 20 }),
+    slot2: Object.freeze({ strategyId: "ts-momentum", lookback: 90 }),
+    slot3: Object.freeze({ strategyId: "mean-reversion" }),
+    slot4: Object.freeze({ id: "L10-N20", breakoutPeriod: 10, percentile: 20, ...slot4Overrides })
+  };
+}
+
+function slot4Variants({ selectedId = "L10-N20" } = {}) {
+  const ids = ["L10-N20", "L10-N40", "L30-N20", "L30-N40"];
+  return ids.map((variantId, index) => Object.freeze({
+    variantId,
+    rank: variantId === selectedId ? 1 : index + 2,
+    aggregate: Object.freeze({ netPnl: variantId === selectedId ? 500 : 100 * index })
+  }));
+}
+
+test("11 - buildFreezeRecord assembles a complete, deterministic freeze record", () => {
+  const input = {
+    slots: freezeRecordSlots(),
+    slot4Variants: slot4Variants(),
+    strategyConfigHash: sha256Hex("strategy-config"),
+    accountConfigHash: sha256Hex("account-config"),
+    gitCommit: "abc1234",
+    timestamp: "2026-08-15T00:00:00.000Z"
+  };
+
+  const first = buildFreezeRecord(input);
+  const second = buildFreezeRecord(input);
+  assert.deepEqual(first, second);
+  assert.equal(first.contractVersion, CONTRACT_VERSION);
+  assert.equal(first.freezeStep, "26.6");
+  assert.equal(first.selectedSlot4VariantId, "L10-N20");
+  assert.equal(first.slots.slot4.id, "L10-N20");
+  assert.equal(first.slot4Variants.length, 4);
+  assert.ok(Object.isFrozen(first));
+  assert.ok(Object.isFrozen(first.slots));
+  assert.ok(Object.isFrozen(first.slots.slot1));
+  assert.ok(Object.isFrozen(first.slot4Variants));
+  assert.ok(Object.isFrozen(first.slot4Variants[0]));
+});
+
+test("12 - buildFreezeRecord rejects a slots object missing a required slot", () => {
+  const base = {
+    slot4Variants: slot4Variants(),
+    strategyConfigHash: sha256Hex("strategy-config"),
+    accountConfigHash: sha256Hex("account-config"),
+    gitCommit: "abc1234",
+    timestamp: "2026-08-15T00:00:00.000Z"
+  };
+  const { slot1, slot2, slot3, slot4 } = freezeRecordSlots();
+  assert.throws(
+    () => buildFreezeRecord({ ...base, slots: { slot1, slot2, slot3 } }),
+    /slots must have exactly these keys/
+  );
+  assert.throws(
+    () => buildFreezeRecord({ ...base, slots: { slot1, slot2, slot3, slot4, slot5: {} } }),
+    /slots must have exactly these keys/
+  );
+  assert.throws(
+    () => buildFreezeRecord({ ...base, slots: { slot1, slot2, slot3, slot4: "nope" } }),
+    /slots\.slot4 must be an object/
+  );
+});
+
+test("13 - buildFreezeRecord requires exactly one rank-1 slot4Variants entry", () => {
+  const base = {
+    slots: freezeRecordSlots(),
+    strategyConfigHash: sha256Hex("strategy-config"),
+    accountConfigHash: sha256Hex("account-config"),
+    gitCommit: "abc1234",
+    timestamp: "2026-08-15T00:00:00.000Z"
+  };
+
+  const noWinner = slot4Variants().map((entry) => Object.freeze({ ...entry, rank: entry.rank + 1 }));
+  assert.throws(
+    () => buildFreezeRecord({ ...base, slot4Variants: noWinner }),
+    /exactly one entry with rank 1/
+  );
+
+  const twoWinners = slot4Variants().map((entry, index) =>
+    Object.freeze({ ...entry, rank: index < 2 ? 1 : entry.rank }));
+  assert.throws(
+    () => buildFreezeRecord({ ...base, slot4Variants: twoWinners }),
+    /exactly one entry with rank 1/
+  );
+});
+
+test("14 - buildFreezeRecord requires slots.slot4.id to match the rank-1 variant", () => {
+  const base = {
+    slots: freezeRecordSlots({ id: "L30-N40" }),
+    slot4Variants: slot4Variants({ selectedId: "L10-N20" }),
+    strategyConfigHash: sha256Hex("strategy-config"),
+    accountConfigHash: sha256Hex("account-config"),
+    gitCommit: "abc1234",
+    timestamp: "2026-08-15T00:00:00.000Z"
+  };
+  assert.throws(() => buildFreezeRecord(base), /slots\.slot4\.id must match/);
+});
+
+test("15 - buildFreezeRecord rejects malformed hashes, commit, and timestamp", () => {
+  const base = {
+    slots: freezeRecordSlots(),
+    slot4Variants: slot4Variants(),
+    strategyConfigHash: sha256Hex("strategy-config"),
+    accountConfigHash: sha256Hex("account-config"),
+    gitCommit: "abc1234",
+    timestamp: "2026-08-15T00:00:00.000Z"
+  };
+
+  assert.throws(() => buildFreezeRecord({ ...base, strategyConfigHash: "not-a-hash" }), /SHA-256/);
+  assert.throws(() => buildFreezeRecord({ ...base, accountConfigHash: "not-a-hash" }), /SHA-256/);
+  assert.throws(() => buildFreezeRecord({ ...base, gitCommit: "" }), /gitCommit/);
+  assert.throws(() => buildFreezeRecord({ ...base, timestamp: "not-a-date" }), /timestamp/);
+  assert.throws(() => buildFreezeRecord({ ...base, timestamp: undefined }), /timestamp/);
 });

@@ -6,6 +6,17 @@ const ENTRY_PERIOD = 20;
 const EXIT_PERIOD = 10;
 
 /**
+ * Purely-additive exports (Step 26.6) of this module's already-fixed
+ * parameters, so a freeze record (src/research/manifest.js's
+ * buildFreezeRecord) can cite the single source of truth instead of a
+ * hand-copied duplicate that could silently drift from this file. No
+ * existing behavior changes - ENTRY_PERIOD/EXIT_PERIOD are still used
+ * exactly as before everywhere else in this module.
+ */
+export const DONCHIAN_ENTRY_PERIOD = ENTRY_PERIOD;
+export const DONCHIAN_EXIT_PERIOD = EXIT_PERIOD;
+
+/**
  * The bare minimum trailing 15m history this module's OWN math needs to
  * produce a first value: the larger of the entry channel's 20-bar window
  * and production's own indicator warm-up floor

@@ -6,6 +6,17 @@ const MOMENTUM_LOOKBACK = 96; // 24 hours of 15m bars
 const EMA_PERIOD = 20;
 
 /**
+ * Purely-additive exports (Step 26.6) of this module's already-fixed
+ * parameters, so a freeze record (src/research/manifest.js's
+ * buildFreezeRecord) can cite the single source of truth instead of a
+ * hand-copied duplicate that could silently drift from this file. No
+ * existing behavior changes - MOMENTUM_LOOKBACK/EMA_PERIOD are still used
+ * exactly as before everywhere else in this module.
+ */
+export const TS_MOMENTUM_LOOKBACK = MOMENTUM_LOOKBACK;
+export const TS_MOMENTUM_EMA_PERIOD = EMA_PERIOD;
+
+/**
  * Standalone-computability floor for this module (see donchian.js's longer
  * note on the same pattern): the larger of the momentum lookback (needs
  * `lookback + 1` closes) and production's own indicator warm-up floor,

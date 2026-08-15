@@ -276,3 +276,115 @@ export function buildManifest({
     monteCarloSeed
   });
 }
+
+const REQUIRED_SLOT_KEYS = Object.freeze(["slot1", "slot2", "slot3", "slot4"]);
+
+function requireConfigHash(name, value) {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+    throw new Error(`${name} must be a 64-character SHA-256 hex digest`);
+  }
+  return value;
+}
+
+/**
+ * Section 6.2 step 2's freeze record: "every parameter, the selected
+ * variant, the config hashes, the git commit, the timestamp" - written and
+ * committed AFTER folds 1-4 select the single Slot 4 variant and BEFORE
+ * folds 5-6 run, per Section 6.2's non-negotiable ordering. No parameter
+ * may change after this record is written; this function only assembles
+ * and validates the record, it does not enforce that ordering itself (the
+ * caller - scripts/run-backtest.mjs - is what decides when to call it).
+ *
+ * `slots` carries the frozen parameter definition for all four slots
+ * (Section 3's Slot 1-4), keyed slot1..slot4, so the record is a complete
+ * strategy freeze - not just the Slot 4 selection evidence. `slots.slot4`
+ * is expected to be the selected variant's own parameter object (e.g.
+ * COMPRESSION_VARIANTS' {id, breakoutPeriod, percentile}), separate from
+ * `slot4Variants` below, which carries the FULL walkForward.js
+ * rankSlot4Variants(...) comparison - every variant, not just the winner -
+ * so the freeze record shows the losing variants' evidence too, not only
+ * the outcome.
+ */
+export function buildFreezeRecord({
+  contractVersion = CONTRACT_VERSION,
+  slots,
+  slot4Variants,
+  strategyConfigHash,
+  accountConfigHash,
+  gitCommit,
+  timestamp
+}) {
+  if (typeof contractVersion !== "string" || contractVersion.trim() === "") {
+    throw new Error("contractVersion must be a non-empty string");
+  }
+  if (!slots || typeof slots !== "object" || Array.isArray(slots)) {
+    throw new Error("slots must be an object");
+  }
+  const slotKeys = Object.keys(slots).sort();
+  if (slotKeys.length !== REQUIRED_SLOT_KEYS.length ||
+      !REQUIRED_SLOT_KEYS.every((key, index) => slotKeys[index] === key)) {
+    throw new Error(`slots must have exactly these keys: ${REQUIRED_SLOT_KEYS.join(", ")}`);
+  }
+  REQUIRED_SLOT_KEYS.forEach((key) => {
+    if (!slots[key] || typeof slots[key] !== "object" || Array.isArray(slots[key])) {
+      throw new Error(`slots.${key} must be an object`);
+    }
+  });
+
+  if (!Array.isArray(slot4Variants) || slot4Variants.length === 0) {
+    throw new Error("slot4Variants must be a non-empty array");
+  }
+  let selectedCount = 0;
+  let selectedSlot4VariantId = null;
+  slot4Variants.forEach((entry, index) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error(`slot4Variants[${index}] must be an object`);
+    }
+    if (typeof entry.variantId !== "string" || entry.variantId.trim() === "") {
+      throw new Error(`slot4Variants[${index}].variantId must be a non-empty string`);
+    }
+    if (!Number.isInteger(entry.rank) || entry.rank < 1) {
+      throw new Error(`slot4Variants[${index}].rank must be a positive integer`);
+    }
+    if (!entry.aggregate || typeof entry.aggregate !== "object") {
+      throw new Error(`slot4Variants[${index}].aggregate must be an object`);
+    }
+    if (entry.rank === 1) {
+      selectedCount += 1;
+      selectedSlot4VariantId = entry.variantId;
+    }
+  });
+  if (selectedCount !== 1) {
+    throw new Error("slot4Variants must contain exactly one entry with rank 1");
+  }
+  if (slots.slot4.id !== undefined && slots.slot4.id !== selectedSlot4VariantId) {
+    throw new Error("slots.slot4.id must match the rank-1 entry in slot4Variants");
+  }
+
+  requireConfigHash("strategyConfigHash", strategyConfigHash);
+  requireConfigHash("accountConfigHash", accountConfigHash);
+  if (typeof gitCommit !== "string" || gitCommit.trim() === "") {
+    throw new Error("gitCommit must be a non-empty string");
+  }
+  const timestampMs = Date.parse(timestamp);
+  if (typeof timestamp !== "string" || !Number.isFinite(timestampMs)) {
+    throw new Error("timestamp must be a valid ISO timestamp string");
+  }
+
+  return Object.freeze({
+    contractVersion,
+    freezeStep: "26.6",
+    slots: Object.freeze({
+      slot1: Object.freeze({ ...slots.slot1 }),
+      slot2: Object.freeze({ ...slots.slot2 }),
+      slot3: Object.freeze({ ...slots.slot3 }),
+      slot4: Object.freeze({ ...slots.slot4 })
+    }),
+    slot4Variants: Object.freeze(slot4Variants.map((entry) => Object.freeze({ ...entry }))),
+    selectedSlot4VariantId,
+    strategyConfigHash,
+    accountConfigHash,
+    gitCommit: gitCommit.trim(),
+    timestamp
+  });
+}
