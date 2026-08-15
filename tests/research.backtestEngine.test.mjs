@@ -577,3 +577,126 @@ test("17 - defaults are exported and match the frozen contract's Section 8/9.1 a
   assert.deepEqual(DEFAULT_LOT_RULES, { minLot: 0.001, lotIncrement: 0.001 });
   assert.equal(RESEARCH_STAGE_RISK_CAP, 100);
 });
+
+// --- Step 26.5 additions: dynamicExitFns / pendingExit (Donchian channel
+// exit, TS-momentum EMA cross exit) ---------------------------------------
+
+test("18 - a dynamic exit condition confirmed at a bar's close fills at the NEXT bar's open, not that bar's own close", () => {
+  const START = Date.parse("2025-06-02T00:00:00.000Z");
+  const bars15m = buildBars15m(START, [
+    { open: 49000, high: 49100, low: 48900, close: 49050 }, // 0
+    { open: 49050, high: 49150, low: 48950, close: 49100 }, // 1 - candidate fires
+    { open: 50000, high: 50100, low: 49900, close: 50050 }, // 2 - fill bar, entry LONG at open=50000
+    { open: 50050, high: 50100, low: 50000, close: 50060 }, // 3 - dynamic exit condition trips on THIS bar's close
+    { open: 50070, high: 50120, low: 50040, close: 50080 }, // 4 - fills here, at THIS bar's open
+    { open: 50080, high: 50120, low: 50040, close: 50080 }  // 5 - padding, satisfies the endIndex bound
+  ]);
+  const signalFn = scriptedSignal({
+    1: candidate("LONG", { stopReference: 40000, targetReference: 60000, stopDistance: STOP_DISTANCE })
+  });
+  // Mocked dynamic-exit checker: fires exactly once, at decisionIndex 3.
+  const dynamicExitFns = {
+    "test-strategy": ({ decisionIndex }) => ({ exit: decisionIndex === 3 })
+  };
+
+  const result = runBacktest({
+    bars15m, bars4h: [], bars1d: [], signalFn, strategy: STRATEGY, account: ACCOUNT,
+    startIndex: 1, endIndex: 4, dynamicExitFns
+  });
+
+  assert.equal(result.trades.length, 1);
+  const trade = result.trades[0];
+  assert.equal(trade.exitReason, "DYNAMIC_EXIT");
+  assert.equal(trade.exitBarIndex, 4, "must resolve one bar after the condition tripped, not on bar 3 itself");
+  assert.equal(trade.requestedExitPrice, bars15m[4].open);
+});
+
+test("19 - without a dynamicExitFns entry for the position's strategy, behavior is exactly as in Step 26.3", () => {
+  const START = Date.parse("2025-06-02T00:00:00.000Z");
+  const bars15m = buildBars15m(START, [
+    { open: 49000, high: 49100, low: 48900, close: 49050 },
+    { open: 49050, high: 49150, low: 48950, close: 49100 },
+    { open: 50000, high: 50100, low: 49900, close: 50050 },
+    { open: 50050, high: 50100, low: 50000, close: 50060 },
+    { open: 50070, high: 50120, low: 50040, close: 50080 },
+    { open: 50080, high: 50120, low: 50040, close: 50080 }
+  ]);
+  const signalFn = scriptedSignal({
+    1: candidate("LONG", { stopReference: 40000, targetReference: 60000, stopDistance: STOP_DISTANCE })
+  });
+
+  const withoutFns = runBacktest({
+    bars15m, bars4h: [], bars1d: [], signalFn, strategy: STRATEGY, account: ACCOUNT,
+    startIndex: 1, endIndex: 4
+  });
+  const withEmptyFns = runBacktest({
+    bars15m, bars4h: [], bars1d: [], signalFn, strategy: STRATEGY, account: ACCOUNT,
+    startIndex: 1, endIndex: 4, dynamicExitFns: {}
+  });
+  const withUnrelatedFn = runBacktest({
+    bars15m, bars4h: [], bars1d: [], signalFn, strategy: STRATEGY, account: ACCOUNT,
+    startIndex: 1, endIndex: 4, dynamicExitFns: { "some-other-strategy": () => ({ exit: true }) }
+  });
+
+  assert.deepEqual(withEmptyFns.trades, withoutFns.trades);
+  assert.deepEqual(withUnrelatedFn.trades, withoutFns.trades);
+  assert.equal(withoutFns.trades[0].exitReason, "END_OF_DATA");
+});
+
+test("20 - a dynamic exit confirmed on the very last permitted bar still resolves safely via END_OF_DATA, never before its own entry", () => {
+  const START = Date.parse("2025-06-02T00:00:00.000Z");
+  const bars15m = buildBars15m(START, [
+    { open: 49000, high: 49100, low: 48900, close: 49050 }, // 0
+    { open: 49050, high: 49150, low: 48950, close: 49100 }, // 1 - candidate fires
+    { open: 50000, high: 50100, low: 49900, close: 50050 }, // 2 - fill bar, entry
+    { open: 50050, high: 50100, low: 50000, close: 50060 }, // 3 - endIndex: dynamic exit condition trips here
+    { open: 50060, high: 50100, low: 50000, close: 50060 }  // 4 - padding, never visited (loop stops at endIndex 3)
+  ]);
+  const signalFn = scriptedSignal({
+    1: candidate("LONG", { stopReference: 40000, targetReference: 60000, stopDistance: STOP_DISTANCE })
+  });
+  const dynamicExitFns = {
+    "test-strategy": ({ decisionIndex }) => ({ exit: decisionIndex === 3 })
+  };
+
+  const result = runBacktest({
+    bars15m, bars4h: [], bars1d: [], signalFn, strategy: STRATEGY, account: ACCOUNT,
+    startIndex: 1, endIndex: 3, dynamicExitFns
+  });
+
+  assert.equal(result.trades.length, 1);
+  const trade = result.trades[0];
+  assert.equal(trade.exitReason, "END_OF_DATA", "the loop never reaches bar 4 to fill the pending dynamic exit, so it falls through to the normal end-of-data close");
+  assert.equal(trade.exitBarIndex, 3);
+  assert.ok(trade.exitBarIndex >= trade.entryBarIndex);
+});
+
+test("21 - a pending dynamic exit takes precedence over that same bar's other exit conditions", () => {
+  const START = Date.parse("2025-06-02T00:00:00.000Z");
+  const stopReference = 49250;
+  const bars15m = buildBars15m(START, [
+    { open: 49000, high: 49100, low: 48900, close: 49050 }, // 0
+    { open: 49050, high: 49150, low: 48950, close: 49100 }, // 1 - candidate fires
+    { open: 50000, high: 50100, low: 49900, close: 50050 }, // 2 - fill bar, entry
+    { open: 50050, high: 50100, low: 50000, close: 50060 }, // 3 - dynamic exit condition trips on THIS bar's close
+    { open: 49000, high: 49050, low: 48800, close: 48900 }, // 4 - ALSO gaps through the stop; pendingExit must win
+    { open: 48900, high: 48950, low: 48850, close: 48900 }  // 5 - padding, satisfies the endIndex bound
+  ]);
+  const signalFn = scriptedSignal({
+    1: candidate("LONG", { stopReference, targetReference: 60000, stopDistance: STOP_DISTANCE })
+  });
+  const dynamicExitFns = {
+    "test-strategy": ({ decisionIndex }) => ({ exit: decisionIndex === 3 })
+  };
+
+  const result = runBacktest({
+    bars15m, bars4h: [], bars1d: [], signalFn, strategy: STRATEGY, account: ACCOUNT,
+    startIndex: 1, endIndex: 4, dynamicExitFns
+  });
+
+  assert.equal(result.trades.length, 1);
+  const trade = result.trades[0];
+  assert.equal(trade.exitReason, "DYNAMIC_EXIT", "the already-pending dynamic exit must resolve, not the gap-through-stop on the same bar");
+  assert.equal(trade.exitBarIndex, 4);
+  assert.equal(trade.requestedExitPrice, bars15m[4].open);
+});

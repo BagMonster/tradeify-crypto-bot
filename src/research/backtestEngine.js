@@ -76,11 +76,9 @@ function updateExcursion(position, bar) {
 /**
  * Section 7's exit precedence, generalized for a static bracket (fixed stop
  * + target + time-stop set at entry) — the shape Slot 3's evaluateSignal
- * output provides. Slots 1/2/4 (Step 26.4) use dynamic channel/EMA exits
- * that must be recomputed every bar; that is out of this step's scope and
- * is not modelled here.
+ * output provides. Order: pending dynamic exit -> hard-flat -> protective
+ * stop -> target hit -> time stop -> hold.
  *
- * Order: hard-flat -> protective stop -> target hit -> time stop -> hold.
  * "Gap through stop: filled at the bar open, not the stop price" (Section
  * 7) is implemented for the protective stop. No equivalent rule is stated
  * for a favorable gap through the target, so — matching the contract's
@@ -92,8 +90,41 @@ function updateExcursion(position, bar) {
  * open") — the only exit condition in Section 7 that is schedule- rather
  * than price-triggered, same as time-stop. [INTERPRETATION, flagged to the
  * owner].
+ *
+ * Step 26.5 addition — dynamic exits (Slot 1's channel exit, Slot 2's EMA
+ * cross): `dynamicExitFns` maps a strategyId to a function shaped exactly
+ * like strategies/donchian.js's checkDonchianChannelExit /
+ * strategies/tsMomentum.js's checkTsMomentumEmaCrossExit:
+ * ({bars15m, decisionIndex, direction}) => {exit: boolean}. These
+ * conditions are confirmed by a completed bar's CLOSE, the same as an
+ * entry signal — so, by direct analogy to Section 7's entry rule ("Fill:
+ * At the open of the next 15m bar"), a dynamic exit confirmed at bar t's
+ * close fills at bar (t+1)'s open, not at bar t's own close.
+ * [INTERPRETATION, flagged to the owner] This is why it is a two-step
+ * process: the bar whose close trips the condition only sets
+ * `position.pendingExit = true` (the position is still open and still
+ * marked-to-market that bar); the NEXT bar's call to resolveOpenPosition
+ * sees `pendingExit` and fills at THAT bar's open, exactly mirroring how
+ * tryEnter fills a signal confirmed at decisionIndex's close using
+ * bars15m[decisionIndex + 1].open. A pending dynamic exit is checked
+ * before everything else in this function, because by the time this bar
+ * is being evaluated the decision to exit was already final as of the
+ * prior bar's close — nothing this bar's own price action does can undo
+ * it. Static-bracket strategies (Slot 3, Slot 4) never populate
+ * `dynamicExitFns` for their own strategyId, so this branch never fires
+ * for them and their behavior is unchanged from Step 26.3.
  */
-function resolveOpenPosition({ position, bar, barIndex, strategy, costMultiplier, exitCommissionPct, slippagePct }) {
+function resolveOpenPosition({
+  position,
+  bar,
+  barIndex,
+  bars15m,
+  strategy,
+  costMultiplier,
+  exitCommissionPct,
+  slippagePct,
+  dynamicExitFns = {}
+}) {
   const excursion = updateExcursion(position, bar);
   const carried = { ...position, ...excursion };
   const openTimeMs = Date.parse(bar.openTime);
@@ -102,7 +133,10 @@ function resolveOpenPosition({ position, bar, barIndex, strategy, costMultiplier
   let requestedExitPrice = null;
   let exitReason = null;
 
-  if (isAtOrAfterHardFlat(openTimeMs, strategy.execution.hardFlatUtc)) {
+  if (position.pendingExit) {
+    requestedExitPrice = bar.open;
+    exitReason = "DYNAMIC_EXIT";
+  } else if (isAtOrAfterHardFlat(openTimeMs, strategy.execution.hardFlatUtc)) {
     requestedExitPrice = bar.open;
     exitReason = "HARD_FLAT";
   } else if (position.direction === "LONG") {
@@ -136,11 +170,19 @@ function resolveOpenPosition({ position, bar, barIndex, strategy, costMultiplier
   }
 
   if (requestedExitPrice === null) {
+    const dynamicExitFn = dynamicExitFns[position.strategyId];
+    const dynamicCheck = dynamicExitFn
+      ? dynamicExitFn({ bars15m, decisionIndex: barIndex, direction: position.direction })
+      : null;
     const markPrice = bar.close;
     const unrealizedPnl = position.direction === "LONG"
       ? (markPrice - position.entryPrice) * position.quantity
       : (position.entryPrice - markPrice) * position.quantity;
-    return { exited: false, position: carried, unrealizedPnl };
+    return {
+      exited: false,
+      position: dynamicCheck?.exit ? { ...carried, pendingExit: true } : carried,
+      unrealizedPnl
+    };
   }
 
   const modelledExitPrice = applySlippage(requestedExitPrice, position.direction, "EXIT", scaledSlippage);
@@ -253,7 +295,8 @@ function tryEnter({
       timeStopBarIndex: fillBarIndex + candidate.timeStopBars,
       maxFavorableExcursion: 0,
       maxAdverseExcursion: 0,
-      holdTimeUnprovable: false
+      holdTimeUnprovable: false,
+      pendingExit: false
     }
   };
 }
@@ -301,13 +344,21 @@ function forceCloseAtClose({ position, bar, barIndex, costMultiplier, exitCommis
 }
 
 /**
- * Section 7's bar loop for a single static-bracket strategy (Slot 3 in Step
- * 26.3). signalFn must match strategies/meanReversion.js's
+ * Section 7's bar loop. signalFn must match strategies/meanReversion.js's
  * evaluateMeanReversion shape: ({bars15m, bars4h, bars1d, decisionIndex,
- * strategy}) => an evaluateSignal-shaped result. One open position across
- * the whole call (Section 7's router-wide one-position rule); this function
- * does not itself route between multiple strategies — that is router.js
- * (Step 26.5).
+ * strategy}) => an evaluateSignal-shaped result (status/direction/
+ * stopReference/targetReference/stopDistance/timeStopBars/strategyId). One
+ * open position across the whole call (Section 7's router-wide one-position
+ * rule).
+ *
+ * This function does not itself decide WHICH strategy or regime a candidate
+ * comes from - that selection is router.js's job (Step 26.5). router.js
+ * passes runBacktest a single combined signalFn (evaluating every enabled
+ * strategy and choosing at most one candidate per decisionIndex) and, for
+ * any strategy with a dynamic exit, a `dynamicExitFns` entry - see
+ * resolveOpenPosition's doc comment above for exactly how a dynamic exit is
+ * resolved and why it fills one bar later than the condition that triggered
+ * it, mirroring how an entry signal fills one bar after it is confirmed.
  *
  * On a detected account failure (Section 9.2), any open position is forced
  * flat at that bar's close and the run halts immediately rather than
@@ -328,7 +379,8 @@ export function runBacktest({
   entryCommissionPct = DEFAULT_ENTRY_COMMISSION_PCT,
   exitCommissionPct = DEFAULT_EXIT_COMMISSION_PCT,
   slippagePct = strategy.execution.slippageCapPct,
-  routeLabel = "meanReversion"
+  routeLabel = "meanReversion",
+  dynamicExitFns = {}
 }) {
   if (!Array.isArray(bars15m) || bars15m.length < 2) {
     throw new Error("bars15m must contain at least 2 bars");
@@ -364,10 +416,12 @@ export function runBacktest({
         position,
         bar: decisionBar,
         barIndex: decisionIndex,
+        bars15m,
         strategy,
         costMultiplier,
         exitCommissionPct,
-        slippagePct
+        slippagePct,
+        dynamicExitFns
       });
       if (outcome.exited) {
         state = recordTradeClose(state, account, { realizedPnl: outcome.trade.netPnl });
