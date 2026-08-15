@@ -414,3 +414,123 @@ export async function refreshStoredIndicatorSnapshot({
   await database.setIndicatorsWarm(snapshot.warm);
   return snapshot;
 }
+
+// ---------------------------------------------------------------------------
+// Chapter 26 research additions (frozen contract Section 4.1). Everything
+// above this line is byte-for-byte unchanged: INDICATOR_WARMUP_REQUIREMENTS,
+// calculateBollingerBands, calculateRsi, calculateAtr, calculateAdx,
+// assessIndicatorReadiness, calculateIndicatorSnapshot, and
+// refreshStoredIndicatorSnapshot are untouched, and index.mjs's Stage A
+// readiness contract is unaffected. A diff against the pre-Chapter-26 file
+// must show additions only, at the end of the file.
+// ---------------------------------------------------------------------------
+
+/**
+ * Standard EMA, seeded with the SMA of the first `period` values of
+ * `values`, then the usual alpha = 2/(period+1) recursion (Section 3, Slot
+ * 2: "EMA20 seeded with the SMA of the first 20 available bars ... Seeding
+ * must be explicit or the series is not reproducible"). EMA is recursive -
+ * unlike calculateBollingerBands/calculateAtr its value depends on every
+ * prior point back to the seed, not just a trailing window - so this
+ * returns the full causal series (one entry per input value) rather than a
+ * single "latest" snapshot: callers that need two consecutive points (as
+ * Slot 2's EMA-reclaim rule does) read two adjacent indices of one series
+ * computed once, instead of re-seeding twice from two different windows.
+ * Entries before the seed point (index < period - 1) are null.
+ */
+export function ema(values, period) {
+  const normalizedPeriod = requirePositiveInteger("period", period);
+  const series = normalizeCloses(values, normalizedPeriod, "values");
+  const alpha = 2 / (normalizedPeriod + 1);
+  const result = new Array(series.length).fill(null);
+  const seed = series.slice(0, normalizedPeriod)
+    .reduce((sum, value) => sum + value, 0) / normalizedPeriod;
+  result[normalizedPeriod - 1] = seed;
+  let previous = seed;
+  for (let index = normalizedPeriod; index < series.length; index += 1) {
+    previous += (series[index] - previous) * alpha;
+    result[index] = previous;
+  }
+  return Object.freeze({ period: normalizedPeriod, alpha, values: Object.freeze(result) });
+}
+
+/**
+ * Section 3, Slot 1: highest high / lowest low over the trailing `period`
+ * bars in `bars` - the same "pass a window, read the latest point" shape as
+ * calculateBollingerBands/calculateAtr. Callers pass the PRIOR N bars
+ * (current bar excluded) to get "highest high of the prior 20 completed 15m
+ * bars (current bar excluded)"; this function does not exclude anything
+ * itself, it windows whatever it is given. 15m-only, matching Section 3's
+ * "Timeframe: 15m" for every slot that uses this.
+ */
+export function donchianChannel(bars, period) {
+  const normalizedPeriod = requirePositiveInteger("period", period);
+  const normalizedBars = normalizeBars(bars, "15m");
+  if (normalizedBars.length < normalizedPeriod) {
+    throw new Error(`15m bars must contain at least ${normalizedPeriod} values for the Donchian channel`);
+  }
+  const window = normalizedBars.slice(-normalizedPeriod);
+  return Object.freeze({
+    period: normalizedPeriod,
+    highestHigh: Math.max(...window.map((bar) => bar.high)),
+    lowestLow: Math.min(...window.map((bar) => bar.low))
+  });
+}
+
+/**
+ * Section 3, Slot 2: sign(close[t] - close[t-lookback]). Non-recursive - the
+ * result depends only on two fixed points, not a running series - so unlike
+ * ema() this evaluates the LATEST point in `closes`, matching the
+ * calculateBollingerBands/calculateAtr calling convention.
+ */
+export function timeSeriesMomentum(closes, lookback) {
+  const normalizedLookback = requirePositiveInteger("lookback", lookback);
+  const series = normalizeCloses(closes, normalizedLookback + 1, "closes");
+  const current = series.at(-1);
+  const past = series.at(-1 - normalizedLookback);
+  const change = current - past;
+  return Object.freeze({
+    lookback: normalizedLookback,
+    current,
+    past,
+    change,
+    direction: change > 0 ? "LONG" : (change < 0 ? "SHORT" : "FLAT")
+  });
+}
+
+/**
+ * Section 3, Slot 4: the Nth percentile of the trailing `window` Bollinger
+ * bandwidth values, using the nearest-rank method (no interpolation) for a
+ * deterministic, unambiguous threshold - the contract specifies "the Nth
+ * percentile" without naming a method, so nearest-rank is this file's
+ * explicit, documented choice. `bandwidths` must already be
+ * (upper - lower) / middle values computed elsewhere (this function does not
+ * compute Bollinger bands itself); callers pass the PRIOR `window`
+ * bandwidths (the current bar's own bandwidth excluded), matching "the
+ * prior 480 completed bars."
+ */
+export function bollingerBandwidthPercentile(bandwidths, window, percentile) {
+  const normalizedWindow = requirePositiveInteger("window", window);
+  const normalizedPercentile = requireFiniteNumber("percentile", percentile);
+  if (normalizedPercentile < 0 || normalizedPercentile > 100) {
+    throw new Error("percentile must be between 0 and 100");
+  }
+  if (!Array.isArray(bandwidths) || bandwidths.length < normalizedWindow) {
+    throw new Error(`bandwidths must contain at least ${normalizedWindow} values`);
+  }
+  const values = bandwidths.map((value, index) => {
+    const number = requireFiniteNumber(`bandwidths[${index}]`, value);
+    if (number < 0) throw new Error(`bandwidths[${index}] must be non-negative`);
+    return number;
+  });
+  const sorted = values.slice(-normalizedWindow).sort((left, right) => left - right);
+  const rank = Math.min(
+    sorted.length,
+    Math.max(1, Math.ceil((normalizedPercentile / 100) * sorted.length))
+  );
+  return Object.freeze({
+    window: normalizedWindow,
+    percentile: normalizedPercentile,
+    value: sorted[rank - 1]
+  });
+}
