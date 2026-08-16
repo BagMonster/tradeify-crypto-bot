@@ -55,5 +55,6 @@ Use the project build manual for the exact GitHub, Railway, PostgreSQL, and Tele
 
 - [Implementation decision log](docs/implementation-decision-log.md)
 - [Post-Automation Addendum A - Owner-Only OpenAI Development Agent](docs/post-automation-development-agent-addendum.md)
+- [DXtrade API endpoint reference](docs/dxtrade-api-endpoint-reference.md) - research-only survey of the DXtrade Developer Portal (REST + Push APIs); read this before any future DXtrade credential, authentication, client, session, or order-routing work, which remains gated behind the D-004 Codex Security checkpoint and the appropriate approved chapter.
 
 The development-agent addendum is approved future scope only. It begins after the current trading automation roadmap, stability gates, final Telegram command documentation, and a fresh security checkpoint are complete. It does not change Stage A or enable execution.
