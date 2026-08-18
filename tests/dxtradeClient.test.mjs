@@ -196,11 +196,13 @@ test("5 - public surface contains no trading or raw-request methods", () => {
     "constructor",
     "getAccountMetrics",
     "getAccountPortfolio",
+    "getHistoricalCandles",
     "getInstrumentDetails",
     "getOpenOrders",
     "getOpenPositions",
     "getSessionInfo",
     "getUser",
+    "listInstruments",
     "login",
     "logout",
     "ping",
@@ -306,4 +308,83 @@ test("7 - Push API rejects are reported without exposing the session", async () 
   assert.equal(errors.length, 1);
   assert.equal(errors[0].apiCode, 34);
   assert.equal(errors[0].message.includes("session-token-123"), false);
+});
+
+test("8 - listInstruments queries by symbol wildcard or type, never by account", async () => {
+  const calls = [];
+  const client = new DxtradeReadOnlyClient({
+    ...BASE_CONFIG,
+    fetchImpl: queuedFetch([
+      jsonResponse({ sessionToken: "session-token-123", timeout: "PT30M" }),
+      jsonResponse({ instruments: [{ symbol: "BTC/USD", type: "CRYPTO" }] }),
+      jsonResponse({ instruments: [] })
+    ], calls)
+  });
+
+  await client.login();
+  await client.listInstruments({ symbol: "BTC*" });
+  await client.listInstruments({ type: "CRYPTO" });
+
+  assert.equal(calls[1].url, "https://dx.tradeifycrypto.co/dxsca-web/instruments/BTC*");
+  assert.equal(calls[1].options.method, "GET");
+  assert.equal(calls[2].url, "https://dx.tradeifycrypto.co/dxsca-web/instruments/type/CRYPTO");
+
+  assert.throws(() => client.listInstruments({}), TypeError);
+  assert.throws(() => client.listInstruments({ symbol: "BTC*", type: "CRYPTO" }), TypeError);
+});
+
+test("9 - getHistoricalCandles posts a validated Candle request and rejects unknown candleType", async () => {
+  const calls = [];
+  const client = new DxtradeReadOnlyClient({
+    ...BASE_CONFIG,
+    fetchImpl: queuedFetch([
+      jsonResponse({ sessionToken: "session-token-123", timeout: "PT30M" }),
+      jsonResponse({ events: [{ type: "Candle", candleType: "15m", symbol: "BTC/USD" }] })
+    ], calls)
+  });
+
+  await client.login();
+  await client.getHistoricalCandles({
+    symbols: ["BTC/USD"],
+    candleType: "15m",
+    fromTime: "2026-08-01T00:00:00Z",
+    toTime: "2026-08-02T00:00:00Z",
+    count: 100
+  });
+
+  assert.equal(calls[1].url, "https://dx.tradeifycrypto.co/dxsca-web/marketdata");
+  assert.equal(calls[1].options.method, "POST");
+  assert.equal(calls[1].options.headers.authorization, "DXAPI session-token-123");
+  assert.deepEqual(JSON.parse(calls[1].options.body), {
+    eventTypes: [{
+      type: "Candle",
+      candleType: "15m",
+      fromTime: "2026-08-01T00:00:00Z",
+      toTime: "2026-08-02T00:00:00Z",
+      count: 100
+    }],
+    symbols: "BTC/USD"
+  });
+
+  await assert.rejects(
+    client.getHistoricalCandles({ symbols: ["BTC/USD"], candleType: "3m" }),
+    TypeError
+  );
+  await assert.rejects(
+    client.getHistoricalCandles({ symbols: [], candleType: "15m" }),
+    TypeError
+  );
+  await assert.rejects(
+    client.getHistoricalCandles({ symbols: ["BTC/USD"], candleType: "15m", count: 0 }),
+    TypeError
+  );
+
+  const unauthenticated = new DxtradeReadOnlyClient({
+    ...BASE_CONFIG,
+    fetchImpl: async () => jsonResponse(null)
+  });
+  await assert.rejects(
+    unauthenticated.getHistoricalCandles({ symbols: ["BTC/USD"], candleType: "15m" }),
+    /not authenticated/i
+  );
 });

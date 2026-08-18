@@ -1,5 +1,7 @@
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MIN_KEEPALIVE_MS = 15_000;
+const CANDLE_TYPES = Object.freeze(["m", "5m", "15m", "30m", "h", "2h", "4h", "d", "w", "mo"]);
+const MAX_CANDLE_COUNT = 5_000;
 
 function requiredString(value, label) {
   if (typeof value !== "string" || value.trim() === "") {
@@ -233,6 +235,71 @@ export class DxtradeReadOnlyClient {
       path: `/accounts/${encodedPathSegment(accountCode, "DXtrade account code")}`
         + `/instruments/${encodedPathSegment(symbol, "DXtrade instrument symbol")}`
     });
+  }
+
+  /**
+   * Read-only, account-independent instrument discovery. Supports a single
+   * symbol (with DXtrade's own wildcard, e.g. "BTC*") or an instrument type
+   * (e.g. "CRYPTO"). Unlike getInstrumentDetails, this needs no account code
+   * - it is the general Reference Data endpoint, not the account-specific
+   * one - so it can be used to discover the exact instrument symbol before
+   * DXTRADE_ACCOUNT_CODE is even known.
+   */
+  async listInstruments({ symbol, type } = {}) {
+    if (symbol !== undefined && type !== undefined) {
+      throw new TypeError("DXtrade listInstruments accepts a symbol or a type, not both.");
+    }
+    if (symbol !== undefined) {
+      return this.#requestJson({
+        method: "GET",
+        path: `/instruments/${encodedPathSegment(symbol, "DXtrade instrument symbol")}`
+      });
+    }
+    if (type !== undefined) {
+      return this.#requestJson({
+        method: "GET",
+        path: `/instruments/type/${encodedPathSegment(type, "DXtrade instrument type")}`
+      });
+    }
+    throw new TypeError("DXtrade listInstruments requires a symbol or a type.");
+  }
+
+  /**
+   * Read-only historical Candle (OHLC) or current Quote data via DXtrade's
+   * REST market-data endpoint. This is a query, not a mutation - it never
+   * touches /orders or any account-order path, and account is optional
+   * (only relevant for multi-account commission/pricing setups). Used for
+   * research/backtesting bar export, analogous to the existing Binance
+   * export script, never by index.mjs or any live signal/order path.
+   */
+  async getHistoricalCandles({ symbols, candleType, fromTime, toTime, count, account } = {}) {
+    this.#requireSession();
+    if (!Array.isArray(symbols) || symbols.length === 0) {
+      throw new TypeError("DXtrade candle symbols must be a non-empty array.");
+    }
+    const normalizedSymbols = symbols.map((symbol) =>
+      requiredString(symbol, "DXtrade instrument symbol")
+    );
+    const normalizedCandleType = requiredString(candleType, "DXtrade candleType");
+    if (!CANDLE_TYPES.includes(normalizedCandleType)) {
+      throw new TypeError(`DXtrade candleType must be one of: ${CANDLE_TYPES.join(", ")}`);
+    }
+    if (count !== undefined && (!Number.isInteger(count) || count <= 0 || count > MAX_CANDLE_COUNT)) {
+      throw new TypeError(`DXtrade candle count must be an integer from 1 to ${MAX_CANDLE_COUNT}.`);
+    }
+
+    const eventType = { type: "Candle", candleType: normalizedCandleType };
+    if (fromTime !== undefined) eventType.fromTime = requiredString(fromTime, "DXtrade candle fromTime");
+    if (toTime !== undefined) eventType.toTime = requiredString(toTime, "DXtrade candle toTime");
+    if (count !== undefined) eventType.count = count;
+
+    const body = {
+      eventTypes: [eventType],
+      symbols: normalizedSymbols.join(",")
+    };
+    if (account !== undefined) body.account = requiredString(account, "DXtrade account code");
+
+    return this.#requestJson({ method: "POST", path: "/marketdata", body });
   }
 
   subscribeQuotes({
