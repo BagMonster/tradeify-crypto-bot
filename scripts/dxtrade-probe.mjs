@@ -9,19 +9,18 @@
  *   3. Measure daily ("d") retention depth.
  *   4. Find the practical per-request candle ceiling.
  *   5. Write findings to artifacts/dxtrade-probe-findings.json
- *      (never paste the account code or secrets into chat).
  *
- * Still 100% read-only. Places no orders. Does not touch strategy or account config.
+ * Still 100% read-only. Places no orders.
  *
  * Required local .env variables:
  *   DXTRADE_REST_BASE_URL
- *   DXTRADE_MARKETDATA_WS_URL   (still required by DxtradeReadOnlyClient constructor)
+ *   DXTRADE_MARKETDATA_WS_URL
  *   DXTRADE_USERNAME
  *   DXTRADE_DOMAIN
  *   DXTRADE_PASSWORD
  *
  * Optional:
- *   DXTRADE_ACCOUNT_CODE        (if already known; otherwise we try to discover what we can)
+ *   DXTRADE_ACCOUNT_CODE
  *
  * Usage (from repo root):
  *   node scripts/dxtrade-probe.mjs
@@ -35,7 +34,6 @@ import { DxtradeReadOnlyClient } from "../src/dxtradeClient.js";
 const ARTIFACTS_DIR = path.join(process.cwd(), "artifacts");
 const FINDINGS_PATH = path.join(ARTIFACTS_DIR, "dxtrade-probe-findings.json");
 
-// How far back we are willing to search (in days). Binary search stays within this.
 const MAX_LOOKBACK_DAYS_5M = 400;
 const MAX_LOOKBACK_DAYS_DAILY = 600;
 
@@ -70,7 +68,6 @@ function extractInstrumentList(response) {
 }
 
 function extractCandleEvents(response) {
-  // Defensive: DXtrade marketdata responses have varied shapes in the wild.
   if (!response) return [];
   if (Array.isArray(response)) return response;
   if (Array.isArray(response.events)) return response.events;
@@ -86,34 +83,84 @@ function isoDaysAgo(days) {
   return d.toISOString();
 }
 
+function isoNow() {
+  return new Date().toISOString();
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
- * Binary-search how far back candles of a given type exist for a symbol.
- * Returns approximate retention in days (or null if we could not measure).
+ * Prefer real tradable pairs over currency-only symbols like BTC$.
+ */
+function pickPrimarySymbol(instruments) {
+  const normalized = instruments
+    .map((item) => ({
+      symbol: item.symbol ?? item.id ?? null,
+      type: item.type ?? item.instrumentType ?? null
+    }))
+    .filter((i) => typeof i.symbol === "string" && i.symbol.length > 0);
+
+  // Prefer BTC/USD style pairs
+  const btcUsd = normalized.find(
+    (i) => i.symbol.toUpperCase() === "BTC/USD" || i.symbol.toUpperCase() === "BTCUSD"
+  );
+  if (btcUsd) return btcUsd.symbol;
+
+  // Next: any symbol that looks like a BTC pair
+  const btcPair = normalized.find(
+    (i) =>
+      i.symbol.toUpperCase().includes("BTC") &&
+      (i.symbol.includes("/") || i.type === "FOREX" || i.type === "CRYPTO")
+  );
+  if (btcPair) return btcPair.symbol;
+
+  // Fallback: first instrument
+  return normalized[0]?.symbol ?? null;
+}
+
+/**
+ * DXtrade requires fromTime for Candle requests.
+ * Always send a proper time window.
+ */
+async function requestCandles(client, { symbol, candleType, fromTime, toTime, count, account }) {
+  return client.getHistoricalCandles({
+    symbols: [symbol],
+    candleType,
+    fromTime,
+    toTime,
+    count,
+    account: account || undefined
+  });
+}
+
+/**
+ * Binary-search how far back candles exist.
  */
 async function measureRetention(client, { symbol, candleType, maxDays, account }) {
   console.log(`\nMeasuring ${candleType} retention for ${symbol} (up to ${maxDays} days)...`);
 
-  let low = 0;          // days ago that definitely have data (or 0)
-  let high = maxDays;   // days ago we are testing
+  let low = 0;
+  let high = maxDays;
   let best = null;
 
-  // First, quick check that recent data exists at all
+  // Recent smoke test: last 3 days
   try {
-    const recent = await client.getHistoricalCandles({
-      symbols: [symbol],
+    const recent = await requestCandles(client, {
+      symbol,
       candleType,
-      count: 3,
-      account: account || undefined
+      fromTime: isoDaysAgo(3),
+      toTime: isoNow(),
+      count: 20,
+      account
     });
     const events = extractCandleEvents(recent);
     if (events.length === 0) {
       console.log(`  No recent ${candleType} candles returned — retention unknown / possibly zero.`);
       return { days: null, note: "no recent candles" };
     }
+    console.log(`  Recent window OK (${events.length} bars)`);
   } catch (err) {
     console.log(`  Recent candle request failed: ${err.message}`);
     return { days: null, note: `recent request failed: ${err.message}` };
@@ -126,35 +173,36 @@ async function measureRetention(client, { symbol, candleType, maxDays, account }
 
     const fromTime = isoDaysAgo(mid);
     try {
-      const resp = await client.getHistoricalCandles({
-        symbols: [symbol],
+      const resp = await requestCandles(client, {
+        symbol,
         candleType,
         fromTime,
-        count: 5,
-        account: account || undefined
+        toTime: isoNow(),
+        count: 10,
+        account
       });
       const events = extractCandleEvents(resp);
       if (events.length > 0) {
         best = mid;
-        low = mid;           // can go further back
-        console.log(`  ${mid} days ago → data present`);
+        low = mid;
+        console.log(`  ${mid} days ago → data present (${events.length} bars)`);
       } else {
-        high = mid;          // too far
+        high = mid;
         console.log(`  ${mid} days ago → empty`);
       }
     } catch (err) {
       high = mid;
       console.log(`  ${mid} days ago → error (${err.message})`);
     }
-    await sleep(400); // be polite to the API
+    await sleep(400);
   }
 
   return { days: best, note: best != null ? `approx ${best} days` : "could not establish" };
 }
 
 /**
- * Find a practical per-request count ceiling by asking for increasing counts
- * until the response stops growing or the API rejects.
+ * Find practical per-request count ceiling.
+ * Always include a time window so the API accepts the request.
  */
 async function measureCountCeiling(client, { symbol, candleType, account }) {
   console.log(`\nMeasuring per-request count ceiling for ${candleType} on ${symbol}...`);
@@ -162,13 +210,19 @@ async function measureCountCeiling(client, { symbol, candleType, account }) {
   let lastGood = null;
   let lastCount = 0;
 
+  // Use a moderately long window so large counts have room to fill
+  const fromTime = isoDaysAgo(candleType === "d" ? 400 : 60);
+  const toTime = isoNow();
+
   for (const count of candidates) {
     try {
-      const resp = await client.getHistoricalCandles({
-        symbols: [symbol],
+      const resp = await requestCandles(client, {
+        symbol,
         candleType,
+        fromTime,
+        toTime,
         count,
-        account: account || undefined
+        account
       });
       const events = extractCandleEvents(resp);
       const got = events.length;
@@ -177,11 +231,9 @@ async function measureCountCeiling(client, { symbol, candleType, account }) {
         lastGood = count;
         lastCount = got;
       } else {
-        // Response stopped growing — we hit a soft ceiling
         break;
       }
       if (got < count) {
-        // Server truncated us
         lastGood = got;
         break;
       }
@@ -208,8 +260,6 @@ async function main() {
   const findings = {
     probedAt: new Date().toISOString(),
     accountCodePresentInEnv: Boolean(hasRealAccount),
-    // We deliberately do NOT store the actual account code in the findings file
-    // that might be shared. Owner can fill it locally if needed.
     instruments: [],
     primarySymbol: null,
     retention: {},
@@ -222,27 +272,28 @@ async function main() {
     console.log("\nDiscovering instruments...");
     let instruments = [];
 
-    try {
-      const byType = await client.listInstruments({ type: "CRYPTO" });
-      instruments = extractInstrumentList(byType);
-      console.log(`  listInstruments(type=CRYPTO) → ${instruments.length} items`);
-    } catch (err) {
-      console.log(`  type=CRYPTO failed: ${err.message}`);
-      findings.notes.push(`listInstruments(type=CRYPTO) failed: ${err.message}`);
-    }
+    // Try a few discovery strategies
+    const strategies = [
+      { label: "type=FOREX", fn: () => client.listInstruments({ type: "FOREX" }) },
+      { label: "type=CRYPTO", fn: () => client.listInstruments({ type: "CRYPTO" }) },
+      { label: "symbol=BTC*", fn: () => client.listInstruments({ symbol: "BTC*" }) },
+      { label: "symbol=*", fn: () => client.listInstruments({ symbol: "*" }) }
+    ];
 
-    if (instruments.length === 0) {
+    for (const strategy of strategies) {
       try {
-        const byBtc = await client.listInstruments({ symbol: "BTC*" });
-        instruments = extractInstrumentList(byBtc);
-        console.log(`  listInstruments(symbol=BTC*) → ${instruments.length} items`);
+        const resp = await strategy.fn();
+        const list = extractInstrumentList(resp);
+        console.log(`  ${strategy.label} → ${list.length} items`);
+        if (list.length > instruments.length) {
+          instruments = list;
+        }
       } catch (err) {
-        console.log(`  symbol=BTC* failed: ${err.message}`);
-        findings.notes.push(`listInstruments(symbol=BTC*) failed: ${err.message}`);
+        console.log(`  ${strategy.label} failed: ${err.message}`);
+        findings.notes.push(`${strategy.label} failed: ${err.message}`);
       }
     }
 
-    // Normalise and store a safe summary
     findings.instruments = instruments.map((item) => ({
       symbol: item.symbol ?? item.id ?? null,
       type: item.type ?? item.instrumentType ?? null,
@@ -254,30 +305,26 @@ async function main() {
       console.log(`  ${inst.symbol}  (type=${inst.type})`);
     }
 
-    // Prefer a BTC-like symbol for the retention / ceiling tests
-    const btcLike = findings.instruments.find(
-      (i) => typeof i.symbol === "string" && i.symbol.toUpperCase().includes("BTC")
-    );
-    const primary = btcLike || findings.instruments[0];
-    if (!primary?.symbol) {
+    const primarySymbol = pickPrimarySymbol(findings.instruments);
+    if (!primarySymbol) {
       findings.notes.push("No usable instrument symbol found — cannot measure retention/ceiling.");
       console.log("\nNo usable symbol found. Stopping measurement phase.");
     } else {
-      findings.primarySymbol = primary.symbol;
-      console.log(`\nUsing primary symbol for measurements: ${primary.symbol}`);
+      findings.primarySymbol = primarySymbol;
+      console.log(`\nUsing primary symbol for measurements: ${primarySymbol}`);
 
       const account = hasRealAccount ? accountFromEnv : undefined;
 
       // ---------- 2. Retention ----------
       findings.retention["5m"] = await measureRetention(client, {
-        symbol: primary.symbol,
+        symbol: primarySymbol,
         candleType: "5m",
         maxDays: MAX_LOOKBACK_DAYS_5M,
         account
       });
 
       findings.retention["d"] = await measureRetention(client, {
-        symbol: primary.symbol,
+        symbol: primarySymbol,
         candleType: "d",
         maxDays: MAX_LOOKBACK_DAYS_DAILY,
         account
@@ -285,13 +332,13 @@ async function main() {
 
       // ---------- 3. Count ceiling ----------
       findings.countCeiling["5m"] = await measureCountCeiling(client, {
-        symbol: primary.symbol,
+        symbol: primarySymbol,
         candleType: "5m",
         account
       });
 
       findings.countCeiling["d"] = await measureCountCeiling(client, {
-        symbol: primary.symbol,
+        symbol: primarySymbol,
         candleType: "d",
         account
       });
