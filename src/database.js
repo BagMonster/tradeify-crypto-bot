@@ -1,4 +1,6 @@
 import pg from "pg";
+import { createPostgresGridStateStore } from "./state/gridState.js";
+import { createExecutionLedger } from "./state/executionLedger.js";
 
 const { Pool } = pg;
 
@@ -151,6 +153,9 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000
   });
+  const query = (text, params = []) => pool.query(text, params);
+  const gridState = createPostgresGridStateStore({ query });
+  const executionLedger = createExecutionLedger({ query });
 
   async function init(account) {
     await pool.query(`
@@ -241,12 +246,107 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
        ON CONFLICT (id) DO NOTHING`,
       [account.startingBalance, account.startingBalance - account.maxLossOffset]
     );
+
+    await gridState.init();
+    await executionLedger.init();
   }
 
   async function getState() {
     const result = await pool.query("SELECT * FROM bot_state WHERE id = 1");
     if (result.rowCount !== 1) throw new Error("bot_state row is missing");
     return normalizeState(result.rows[0]);
+  }
+
+  async function getPersistedPeakClosedBalance() {
+    return (await getState()).high_water;
+  }
+
+  async function syncAccountSnapshot(snapshot, account) {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+      throw new Error("account snapshot must be an object");
+    }
+    const balance = toFiniteNumber("account snapshot balance", snapshot.balance);
+    const equity = toFiniteNumber("account snapshot equity", snapshot.equity);
+    const previousDayClosingBalance = toFiniteNumber(
+      "account snapshot previousDayClosingBalance",
+      snapshot.previousDayClosingBalance
+    );
+    const peakClosedBalance = Math.max(
+      account.startingBalance,
+      toFiniteNumber("account snapshot peakClosedBalance", snapshot.peakClosedBalance)
+    );
+    const dayClosedPl = toFiniteNumber("account snapshot dayClosedPl", snapshot.dayClosedPl);
+    const openPl = toFiniteNumber("account snapshot openPl", snapshot.openPl);
+    const openPositionsCount = toNonNegativeInteger(
+      "account snapshot openPositionsCount",
+      snapshot.openPositionsCount
+    );
+    const invariantError = snapshot.invariantError == null
+      ? null
+      : requiredText("account snapshot invariantError", snapshot.invariantError, 300);
+
+    const current = await getState();
+    const highWater = Math.max(current.high_water, peakClosedBalance, balance);
+    const mllFloor = current.payout_taken
+      ? account.startingBalance
+      : Math.min(account.startingBalance, highWater - account.maxLossOffset);
+
+    const result = await pool.query(
+      `UPDATE bot_state
+          SET balance = $1,
+              equity = $2,
+              prev_day_close = $3,
+              high_water = $4,
+              mll_floor = $5,
+              daily_realized_pnl = $6,
+              daily_unrealized_pnl = $7,
+              has_open_position = $8,
+              safety_halt = CASE WHEN $9::text IS NULL THEN safety_halt ELSE TRUE END,
+              halt_reason = CASE
+                WHEN $9::text IS NULL THEN halt_reason
+                WHEN safety_halt AND halt_reason IS NOT NULL THEN halt_reason
+                ELSE $9::text
+              END,
+              updated_at = NOW()
+        WHERE id = 1
+        RETURNING *`,
+      [
+        balance,
+        equity,
+        previousDayClosingBalance,
+        highWater,
+        mllFloor,
+        dayClosedPl,
+        openPl,
+        openPositionsCount > 0,
+        invariantError
+      ]
+    );
+    if (result.rowCount !== 1) throw new Error("bot_state row is missing");
+    return normalizeState(result.rows[0]);
+  }
+
+  async function setFeedStale(stale) {
+    if (typeof stale !== "boolean") throw new Error("feed stale state must be boolean");
+    const result = await pool.query(
+      `UPDATE bot_state SET feed_stale = $1, updated_at = NOW() WHERE id = 1 RETURNING feed_stale`,
+      [stale]
+    );
+    if (result.rowCount !== 1) throw new Error("bot_state row is missing");
+    return result.rows[0].feed_stale === true;
+  }
+
+  async function setSafetyHalt(reason) {
+    const normalizedReason = requiredText("safety halt reason", reason, 300);
+    const result = await pool.query(
+      `UPDATE bot_state
+          SET safety_halt = TRUE, halt_reason = $1, updated_at = NOW()
+        WHERE id = 1
+        RETURNING safety_halt, halt_reason`,
+      [normalizedReason]
+    );
+    if (result.rowCount !== 1) throw new Error("bot_state row is missing");
+    return Object.freeze({ safetyHalt: result.rows[0].safety_halt === true, reason: result.rows[0].halt_reason });
   }
 
   async function setOperatorKilled(killed) {
@@ -529,6 +629,10 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
   return {
     init,
     getState,
+    getPersistedPeakClosedBalance,
+    syncAccountSnapshot,
+    setFeedStale,
+    setSafetyHalt,
     setOperatorKilled,
     setResumeChallenge,
     clearResumeChallenge,
@@ -540,6 +644,8 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     getBars,
     getBarCounts,
     getBarCoverage,
+    gridState,
+    executionLedger,
     ping,
     close
   };
