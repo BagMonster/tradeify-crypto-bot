@@ -26,5 +26,5 @@ function classify(error) {
 export function formatDxtradeAccountDiagnostic(error) {
   const status = Number.isInteger(error?.status) ? String(error.status) : "NONE";
   const apiCode = safeApiCode(error?.apiCode);
-  return `category=${classify(error)} http=${status} api=${apiCode}`;
+  return `\nDXtrade diagnostic: category=${classify(error)} http=${status} api=${apiCode}`;
 }
