@@ -84,6 +84,13 @@ export function createGridRuntime({
   const executor = requireExecution(execution);
   const holdSeconds = requireMinimumHoldSeconds(minimumHoldSeconds);
   const audit = requireFunction("addEvent", addEvent);
+  let lastRepeatedAuditKey = null;
+
+  async function auditRepeatedOnce(key, level, kind, payload) {
+    if (lastRepeatedAuditKey === key) return;
+    lastRepeatedAuditKey = key;
+    await audit(level, kind, payload);
+  }
 
   async function initialize(referencePrice) {
     if (typeof referencePrice !== "number" || !Number.isFinite(referencePrice) || referencePrice <= 0) {
@@ -120,13 +127,16 @@ export function createGridRuntime({
     if (risk.protectiveAction === "FLATTEN_AND_LOCK") {
       const result = await executor.executeProtectiveFlatten({ reason: risk.reason });
       if (result.status !== "FILLED") {
-        await audit("ERROR", "GRID_PROTECTIVE_ACTION_UNCONFIRMED", {
-          reason: risk.reason,
-          result: result.status
-        });
+        await auditRepeatedOnce(
+          `protective:${state.version}:${risk.reason}:${result.status}`,
+          "ERROR",
+          "GRID_PROTECTIVE_ACTION_UNCONFIRMED",
+          { reason: risk.reason, result: result.status }
+        );
         return Object.freeze({ status: "PROTECTIVE_PENDING", risk, state, intent: null });
       }
 
+      lastRepeatedAuditKey = null;
       const nextState = resetGridAfterProtectiveFlatten(state, {
         fillPrice: result.fillPrice,
         filledAt: result.filledAt
@@ -141,31 +151,50 @@ export function createGridRuntime({
     }
 
     if (!intent) {
+      lastRepeatedAuditKey = null;
       return Object.freeze({ status: "NO_INTENT", risk, state, intent: null });
     }
 
     if (!risk.allowNewGridAction) {
-      await audit("INFO", "GRID_INTENT_BLOCKED", {
-        tag: intent.tag,
-        side: intent.side,
-        reason: risk.reason,
-        stateVersion: state.version
-      });
+      await auditRepeatedOnce(
+        `blocked:${state.version}:${intent.tag}:${risk.reason}`,
+        "INFO",
+        "GRID_INTENT_BLOCKED",
+        { tag: intent.tag, side: intent.side, reason: risk.reason, stateVersion: state.version }
+      );
       return Object.freeze({ status: "BLOCKED", risk, state, intent });
     }
 
     const hold = entryHoldStatus(state, trade.tradeTime, holdSeconds);
     if (!hold.allowed) {
       const reason = `Minimum ${holdSeconds}-second grid-entry hold is still active`;
-      await audit("INFO", "GRID_INTENT_BLOCKED_MIN_HOLD", {
-        tag: intent.tag,
-        side: intent.side,
-        stateVersion: state.version,
-        remainingMs: hold.remainingMs
-      });
+      await auditRepeatedOnce(
+        `hold:${state.version}:${intent.tag}`,
+        "INFO",
+        "GRID_INTENT_BLOCKED_MIN_HOLD",
+        { tag: intent.tag, side: intent.side, stateVersion: state.version, remainingMs: hold.remainingMs }
+      );
       return Object.freeze({ status: "BLOCKED", risk, state, intent, reason });
     }
 
+    if (typeof executor.isEnabled === "function" && !executor.isEnabled()) {
+      await auditRepeatedOnce(
+        `shadow:${state.version}:${intent.tag}`,
+        "INFO",
+        "GRID_SHADOW_INTENT",
+        {
+          tag: intent.tag,
+          side: intent.side,
+          cashQuantity: intent.usd,
+          observedPrice: intent.observedPrice,
+          referencePrice: intent.referencePrice,
+          stateVersion: state.version
+        }
+      );
+      return Object.freeze({ status: "SHADOW_INTENT", risk, state, intent });
+    }
+
+    lastRepeatedAuditKey = null;
     const result = await executor.executeGridIntent({ intent });
     if (result.status !== "FILLED") {
       await audit("WARN", "GRID_INTENT_NOT_FILLED", {
