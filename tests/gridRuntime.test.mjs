@@ -35,11 +35,15 @@ const BASE_RISK = Object.freeze({
 });
 
 function trade(price, minute = 0) {
+  return tradeAt(price, `2026-08-23T08:${String(minute).padStart(2, "0")}:00.000Z`);
+}
+
+function tradeAt(price, tradeTime) {
   return Object.freeze({
     source: "binance",
     symbol: "BTCUSDT",
     price,
-    tradeTime: `2026-08-23T08:${String(minute).padStart(2, "0")}:00.000Z`
+    tradeTime
   });
 }
 
@@ -90,6 +94,30 @@ test("grid state advances only after a confirmed fill", async () => {
   assert.equal(state.referencePrice, 67_200);
   assert.equal(state.buyCount, 1);
   assert.equal(state.sellCount, 0);
+});
+
+test("25-second hold blocks another grid fill but never delays protective flatten", async () => {
+  const store = createMemoryStore();
+  let breach = false;
+  const runtime = createGridRuntime({
+    stateStore: store,
+    getRiskSnapshot: async () => breach ? { ...BASE_RISK, liveEquity: 46_900 } : BASE_RISK,
+    execution: liveExecution(),
+    minimumHoldSeconds: 25
+  });
+  await runtime.initialize(70_000);
+  assert.equal((await runtime.processTrade(trade(67_200, 1))).status, "FILLED");
+
+  const oppositeTrigger = 67_200 * 1.0375;
+  const tooSoon = await runtime.processTrade(tradeAt(oppositeTrigger, "2026-08-23T08:01:40.000Z"));
+  assert.equal(tooSoon.status, "BLOCKED");
+  assert.match(tooSoon.reason, /25-second/i);
+  assert.equal((await store.load()).version, 1);
+
+  breach = true;
+  const protection = await runtime.processTrade(tradeAt(oppositeTrigger, "2026-08-23T08:01:41.000Z"));
+  assert.equal(protection.status, "PROTECTIVE_FILLED");
+  assert.equal((await store.load()).lastFillSide, "PROTECTIVE_FLAT");
 });
 
 test("unconfirmed broker result leaves reference and counters unchanged", async () => {
