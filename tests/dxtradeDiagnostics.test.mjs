@@ -47,3 +47,12 @@ test("classifies DNS failures", () => {
     "\nDXtrade diagnostic: category=DNS_ERROR http=NONE api=NONE"
   );
 });
+
+test("classifies nested fetch causes", () => {
+  const lowLevel = new Error("unexpected redirect to https://secret.example/path");
+  const fetchError = new TypeError("fetch failed", { cause: lowLevel });
+  const wrapped = new Error("DXtrade request failed", { cause: fetchError });
+  const diagnostic = formatDxtradeAccountDiagnostic(wrapped);
+  assert.equal(diagnostic, "\nDXtrade diagnostic: category=REDIRECT_BLOCKED http=NONE api=NONE");
+  assert.equal(diagnostic.includes("secret.example"), false);
+});

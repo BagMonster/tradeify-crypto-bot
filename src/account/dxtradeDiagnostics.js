@@ -4,23 +4,34 @@ function safeApiCode(value) {
   return /^[A-Za-z0-9._-]+$/.test(text) ? text : "REDACTED";
 }
 
-function classifyNetworkCause(error) {
-  const cause = error?.cause;
-  const causeCode = typeof cause?.code === "string" ? cause.code.toUpperCase() : "";
-  const causeMessage = typeof cause?.message === "string" ? cause.message : "";
-
-  if (/unexpected redirect/i.test(causeMessage)) return "REDIRECT_BLOCKED";
-  if (["ENOTFOUND", "EAI_AGAIN"].includes(causeCode)) return "DNS_ERROR";
-  if (["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH"].includes(causeCode)) return "CONNECTION_ERROR";
-  if (["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(causeCode)) {
-    return "TIMEOUT";
+function networkCauseChain(error) {
+  const chain = [];
+  let current = error;
+  for (let depth = 0; depth < 6 && current; depth += 1) {
+    chain.push(current);
+    current = current.cause;
   }
-  if (
-    causeCode.startsWith("ERR_TLS") ||
-    causeCode.startsWith("CERT_") ||
-    ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN"].includes(causeCode)
-  ) {
-    return "TLS_ERROR";
+  return chain;
+}
+
+function classifyNetworkCause(error) {
+  for (const item of networkCauseChain(error)) {
+    const causeCode = typeof item?.code === "string" ? item.code.toUpperCase() : "";
+    const causeMessage = typeof item?.message === "string" ? item.message : "";
+
+    if (/unexpected redirect/i.test(causeMessage)) return "REDIRECT_BLOCKED";
+    if (["ENOTFOUND", "EAI_AGAIN"].includes(causeCode)) return "DNS_ERROR";
+    if (["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH"].includes(causeCode)) return "CONNECTION_ERROR";
+    if (["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(causeCode)) {
+      return "TIMEOUT";
+    }
+    if (
+      causeCode.startsWith("ERR_TLS") ||
+      causeCode.startsWith("CERT_") ||
+      ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN"].includes(causeCode)
+    ) {
+      return "TLS_ERROR";
+    }
   }
   return "NETWORK_ERROR";
 }
