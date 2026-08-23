@@ -1,4 +1,5 @@
 {
+  "strategyId": "sol-statistical-grid-pending",
   "strategyStatus": "pending-solana-statistical-grid",
   "instruments": {
     "BTC/USD": {
