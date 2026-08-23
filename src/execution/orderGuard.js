@@ -88,9 +88,8 @@ export function createGuardedExecution({
     return envLock && strategyLock;
   }
 
-  async function executeGridIntent({ intent, quantity }) {
+  async function executeGridIntent({ intent }) {
     const normalized = normalizeIntent(intent);
-    const qty = requirePositiveFinite("order quantity", quantity);
     const orderCode = gridOrderCode(normalized);
 
     if (!isEnabled()) {
@@ -114,7 +113,7 @@ export function createGuardedExecution({
         orderCode,
         instrument: EXECUTION_INSTRUMENT,
         side: normalized.side,
-        quantity: qty,
+        cashQuantity: normalized.usd,
         tag: normalized.tag,
         stateVersion: normalized.stateVersion
       });
@@ -124,14 +123,18 @@ export function createGuardedExecution({
         instrument: EXECUTION_INSTRUMENT,
         type: "MARKET",
         side: normalized.side,
-        quantity: qty,
+        cashQuantity: normalized.usd,
         intent: normalized
       }));
       const confirmed = normalizeConfirmedFill(result, orderCode);
 
       if (!confirmed) {
-        await audit("WARN", "GRID_ORDER_NOT_CONFIRMED", { orderCode });
-        return Object.freeze({ status: "NOT_CONFIRMED", orderCode, reason: "Broker fill was not confirmed" });
+        await audit("WARN", "GRID_ORDER_NOT_CONFIRMED", { orderCode, brokerStatus: result?.status ?? null });
+        return Object.freeze({
+          status: result?.status === "PARTIAL" ? "PARTIAL" : "NOT_CONFIRMED",
+          orderCode,
+          reason: result?.reason ?? "Broker fill was not confirmed"
+        });
       }
 
       await audit("INFO", "GRID_ORDER_FILL_CONFIRMED", {
