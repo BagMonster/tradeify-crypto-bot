@@ -55,3 +55,18 @@ test("Postgres grid store uses optimistic versioning to reject stale writers", a
   const store = createPostgresGridStateStore({ query });
   await assert.rejects(store.save(0, next), GridStateConflictError);
 });
+
+test("grid transition reset explicitly removes the old asset reference", async () => {
+  let deleted = false;
+  const store = createPostgresGridStateStore({
+    query: async (sql) => {
+      if (sql === "DELETE FROM grid_state WHERE id = 1") {
+        deleted = true;
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  });
+  assert.equal(await store.clearForStrategyTransition(), true);
+  assert.equal(deleted, true);
+});
