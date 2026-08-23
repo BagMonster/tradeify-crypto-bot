@@ -285,10 +285,12 @@ export class DxtradeExecutionClient {
     });
   }
 
-  async getAccountMetrics() {
+  async getAccountMetrics({ includePositions = true } = {}) {
+    if (typeof includePositions !== "boolean") throw new TypeError("includePositions must be boolean");
     return this.#requestJson({
       method: "GET",
-      path: `/accounts/${encoded(this.#accountCode, "DXtrade account code")}/metrics`
+      path: `/accounts/${encoded(this.#accountCode, "DXtrade account code")}/metrics`,
+      query: { "include-positions": includePositions ? "true" : "false" }
     });
   }
 
