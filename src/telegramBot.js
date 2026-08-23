@@ -24,6 +24,7 @@ const HELP_TEXT = [
   "",
   "/status - show account, floors, risk, and readiness",
   "/health - confirm the worker and PostgreSQL are reachable",
+  "/dxpreflight - validate BTC order sizes without placing an order",
   "/kill - pause the bot and persist the pause",
   "/resume - request a 6-digit resume code",
   "/confirmresume CODE - confirm the restart",
@@ -78,6 +79,11 @@ export async function startTelegramBot({ environment, service }) {
 
   bot.onText(/^\/health(?:@\w+)?$/i, withAuthorization(async (message) => {
     await bot.sendMessage(message.chat.id, await service.healthText());
+  }));
+
+  bot.onText(/^\/dxpreflight(?:@\w+)?$/i, withAuthorization(async (message) => {
+    await bot.sendMessage(message.chat.id, "Running DXtrade validation-only preflight. No order will be placed.");
+    await bot.sendMessage(message.chat.id, await service.dxPreflightText());
   }));
 
   bot.onText(/^\/kill(?:@\w+)?$/i, withAuthorization(async (message) => {
@@ -140,6 +146,7 @@ export async function startTelegramBot({ environment, service }) {
   await bot.setMyCommands([
     { command: "status", description: "Show bot and risk status" },
     { command: "health", description: "Check worker and database" },
+    { command: "dxpreflight", description: "Validate BTC sizes without an order" },
     { command: "kill", description: "Pause the bot" },
     { command: "resume", description: "Request a resume code" },
     { command: "flat", description: "Show flattening instructions" },
