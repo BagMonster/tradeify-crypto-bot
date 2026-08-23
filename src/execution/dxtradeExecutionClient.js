@@ -1,7 +1,7 @@
 const REQUIRED_HOSTNAME = "dx.tradeifycrypto.co";
 const REQUIRED_PATH = "/dxsca-web";
 const DEFAULT_TIMEOUT_MS = 10_000;
-const BTC_INSTRUMENT = "BTC/USD";
+const DEFAULT_INSTRUMENT = "BTC/USD";
 
 function requiredString(value, label, maxLength = 256) {
   if (typeof value !== "string" || value.trim() === "") {
@@ -9,6 +9,14 @@ function requiredString(value, label, maxLength = 256) {
   }
   const normalized = value.trim();
   if (normalized.length > maxLength) throw new TypeError(`${label} is too long`);
+  return normalized;
+}
+
+function instrumentSymbol(value) {
+  const normalized = requiredString(value, "DXtrade instrument", 64);
+  if (!/^[A-Z0-9]+\/[A-Z0-9]+$/.test(normalized)) {
+    throw new TypeError("DXtrade instrument must look like BASE/QUOTE");
+  }
   return normalized;
 }
 
@@ -104,7 +112,7 @@ function orderHistoryParts(payload, clientOrderId) {
   const currentStatus = requiredString(order.status, "DXtrade order status", 32).toUpperCase();
   const isFinal = order.finalStatus === true;
   const leg = Array.isArray(order.legs) && order.legs.length === 1 ? order.legs[0] : null;
-  if (!leg) throw new Error("DXtrade single BTC order must contain exactly one order leg");
+  if (!leg) throw new Error("DXtrade single-instrument order must contain exactly one order leg");
   const execution = latestPositiveExecution(order);
   const averagePrice = finiteNumberOrNull(leg.averagePrice);
   const executionAverage = finiteNumberOrNull(execution?.averagePrice);
@@ -210,6 +218,7 @@ export class DxtradeExecutionClient {
   #domain;
   #password;
   #accountCode;
+  #instrument;
   #fetch;
   #timeoutMs;
   #sessionToken = null;
@@ -220,6 +229,7 @@ export class DxtradeExecutionClient {
     domain,
     password,
     accountCode,
+    instrument = DEFAULT_INSTRUMENT,
     fetchImpl = globalThis.fetch,
     timeoutMs = DEFAULT_TIMEOUT_MS
   }) {
@@ -228,6 +238,7 @@ export class DxtradeExecutionClient {
     this.#domain = requiredString(domain, "DXtrade domain");
     this.#password = requiredString(password, "DXtrade password");
     this.#accountCode = requiredString(accountCode, "DXtrade account code", 128);
+    this.#instrument = instrumentSymbol(instrument);
     if (typeof fetchImpl !== "function") throw new TypeError("A fetch implementation is required");
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60_000) {
       throw new TypeError("DXtrade timeout must be an integer from 1000 to 60000 milliseconds");
@@ -238,6 +249,10 @@ export class DxtradeExecutionClient {
 
   getSessionInfo() {
     return Object.freeze({ authenticated: Boolean(this.#sessionToken) });
+  }
+
+  getInstrument() {
+    return this.#instrument;
   }
 
   async login() {
@@ -268,7 +283,7 @@ export class DxtradeExecutionClient {
     return {
       orderCode: orderCode(clientOrderId),
       type: "MARKET",
-      instrument: BTC_INSTRUMENT,
+      instrument: this.#instrument,
       cashQuantity: positive("cashQuantity", cashQuantity),
       side: side(orderSide)
     };
@@ -278,7 +293,7 @@ export class DxtradeExecutionClient {
     return {
       orderCode: orderCode(clientOrderId),
       type: "MARKET",
-      instrument: BTC_INSTRUMENT,
+      instrument: this.#instrument,
       quantity: positive("quantity", quantity),
       positionEffect: "CLOSE",
       positionCode: positionCode(requestedPositionCode),
@@ -358,6 +373,14 @@ export class DxtradeExecutionClient {
     });
   }
 
+  async getAccountInstrumentSettings(instrument = this.#instrument) {
+    const symbol = instrumentSymbol(instrument);
+    return this.#requestJson({
+      method: "GET",
+      path: `/accounts/${encoded(this.#accountCode, "DXtrade account code")}/instruments/${encoded(symbol, "DXtrade instrument")}`
+    });
+  }
+
   #requireSession() {
     if (!this.#sessionToken) throw new DxtradeExecutionError("DXtrade execution session is not authenticated");
   }
@@ -423,5 +446,5 @@ export class DxtradeExecutionClient {
 export const DXTRADE_EXECUTION_IDENTITY = Object.freeze({
   hostname: REQUIRED_HOSTNAME,
   restPath: REQUIRED_PATH,
-  instrument: BTC_INSTRUMENT
+  instrument: DEFAULT_INSTRUMENT
 });
