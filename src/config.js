@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { readFile } from "node:fs/promises";
+import { resolveInstrumentProfile } from "./instrumentProfile.js";
 
 function requireText(name, value) {
   if (typeof value !== "string" || value.trim() === "") {
@@ -71,6 +72,10 @@ export async function loadStrategyConfig(path = "config/strategy.json") {
   const strategy = await readJson(path);
   if (!strategy.instruments?.["BTC/USD"] || !strategy.instruments?.["SOL/USD"]) {
     throw new Error("strategy must define BTC/USD and SOL/USD");
+  }
+  resolveInstrumentProfile(strategy);
+  if (strategy.strategyStatus !== undefined) {
+    requireText("strategy.strategyStatus", strategy.strategyStatus);
   }
 
   const numericValues = {
@@ -162,5 +167,6 @@ export async function loadConfiguration() {
   if (strategy.execution.autoExecute) {
     throw new Error("config/strategy.json execution.autoExecute must remain false");
   }
-  return { account, strategy, environment };
+  const instrument = resolveInstrumentProfile(strategy);
+  return { account, strategy, environment, instrument };
 }
