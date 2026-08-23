@@ -179,28 +179,47 @@ export function createTradeifyService({ database, account, environment, dxtradeC
       source: "telegram",
       instrument: result.instrument,
       smallestPassingCash: result.smallestPassingCash,
-      gridBuy250: result.gridBuy.ok,
-      gridSell250: result.gridSell.ok,
+      gridBuy250: result.gridBuy?.ok ?? false,
+      gridSell250: result.gridSell?.ok ?? false,
+      validationEndpointAvailable: result.validationEndpointAvailable,
+      instrumentSettingsAvailable: result.instrumentSettingsAvailable,
       validationOnly: true
     });
 
     const lines = [
       "DXTRADE BTC PREFLIGHT",
       "",
-      "VALIDATION ONLY — no order was placed.",
+      "READ-ONLY / VALIDATION ONLY — no order was placed.",
       `Instrument: ${result.instrument}`,
       "",
-      "BUY cash-size probes:"
+      `Account instrument settings: ${result.instrumentSettingsAvailable ? "AVAILABLE" : "UNAVAILABLE"}`
     ];
 
-    for (const probe of result.probes) {
-      lines.push(preflightValidationLine(money(probe.amount), probe));
+    if (result.instrumentHints.length > 0) {
+      lines.push("Minimum-size metadata:");
+      for (const hint of result.instrumentHints) {
+        lines.push(`${hint.path}: ${hint.value}`);
+      }
+    } else if (result.instrumentSettingsAvailable) {
+      lines.push("Minimum-size metadata: no numeric minimum-size field found in the response.");
     }
 
     lines.push("");
-    lines.push(`Smallest passing BUY probe: ${result.smallestPassingCash === null ? "NONE" : money(result.smallestPassingCash)}`);
-    lines.push(preflightValidationLine("Grid $250 BUY", result.gridBuy));
-    lines.push(preflightValidationLine("Grid $250 SELL", result.gridSell));
+
+    if (!result.validationEndpointAvailable) {
+      lines.push("Order-validation endpoint: UNAVAILABLE (HTTP 405)");
+      lines.push("Cash-size probing stopped after the first 405 instead of repeating the same unsupported request.");
+    } else {
+      lines.push("BUY cash-size probes:");
+      for (const probe of result.probes) {
+        lines.push(preflightValidationLine(money(probe.amount), probe));
+      }
+      lines.push("");
+      lines.push(`Smallest passing BUY probe: ${result.smallestPassingCash === null ? "NONE" : money(result.smallestPassingCash)}`);
+      lines.push(preflightValidationLine("Grid $250 BUY", result.gridBuy));
+      lines.push(preflightValidationLine("Grid $250 SELL", result.gridSell));
+    }
+
     lines.push("");
     lines.push("Auto-execution remains OFF. This command never calls the order-placement endpoint.");
 

@@ -1,3 +1,5 @@
+import { createPinnedDxtradeFetch } from "./pinnedDxtradeFetch.js";
+
 const BTC_INSTRUMENT = "BTC/USD";
 const CASH_PROBES = Object.freeze([0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250]);
 const GRID_FIRST_CASH = 250;
@@ -29,6 +31,11 @@ function validationPayloadFailure(payload) {
     return safeCode(payload.errorCode ?? payload.rejectCode ?? "VALIDATION_REJECTED");
   }
 
+  if (typeof payload.validationResult === "string" && payload.validationResult !== "NOT_RESTRICTED") {
+    const first = Array.isArray(payload.failedValidationResults) ? payload.failedValidationResults[0] : null;
+    return safeCode(first?.validationDescriptor ?? first?.validationDescriptorCode ?? "VALIDATION_REJECTED");
+  }
+
   for (const key of ["errors", "violations", "rejects"]) {
     if (Array.isArray(payload[key]) && payload[key].length > 0) {
       const first = payload[key][0];
@@ -44,7 +51,7 @@ function validationPayloadFailure(payload) {
 }
 
 function collectMinimumHints(value, path = [], results = [], depth = 0) {
-  if (depth > 6 || value === null || value === undefined) return results;
+  if (depth > 8 || value === null || value === undefined) return results;
 
   if (Array.isArray(value)) {
     value.forEach((item, index) => collectMinimumHints(item, [...path, String(index)], results, depth + 1));
@@ -96,54 +103,130 @@ async function validateCash({ client, amount, side, nonce }) {
   }
 }
 
-export async function runDxtradePreflight({ client, wait = defaultWait } = {}) {
+function requiredEnv(name) {
+  const value = process.env[name];
+  if (typeof value !== "string" || value.trim() === "") throw new Error(`${name} is unavailable`);
+  return value.trim();
+}
+
+async function jsonResponse(response) {
+  const text = await response.text();
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new Error(`DXtrade metadata request returned non-JSON HTTP ${response.status}`);
+    }
+  }
+  if (!response.ok) throw new Error(`DXtrade metadata request returned HTTP ${response.status}`);
+  return payload;
+}
+
+async function defaultInstrumentReader(symbol) {
+  const baseUrl = requiredEnv("DXTRADE_REST_BASE_URL").replace(/\/+$/, "");
+  const username = requiredEnv("DXTRADE_USERNAME");
+  const domain = requiredEnv("DXTRADE_DOMAIN");
+  const password = requiredEnv("DXTRADE_PASSWORD");
+  const accountCode = requiredEnv("DXTRADE_ACCOUNT_CODE");
+  const request = createPinnedDxtradeFetch();
+
+  const loginResponse = await request(`${baseUrl}/login`, {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ username, domain, password }),
+    cache: "no-store"
+  });
+  const loginPayload = await jsonResponse(loginResponse);
+  const sessionToken = loginPayload?.sessionToken;
+  if (typeof sessionToken !== "string" || sessionToken.length < 8) {
+    throw new Error("DXtrade metadata login did not return a session token");
+  }
+
+  try {
+    const instrumentUrl = `${baseUrl}/accounts/${encodeURIComponent(accountCode)}/instruments/${encodeURIComponent(symbol)}`;
+    const response = await request(instrumentUrl, {
+      method: "GET",
+      headers: { accept: "application/json", authorization: `DXAPI ${sessionToken}` },
+      cache: "no-store"
+    });
+    return await jsonResponse(response);
+  } finally {
+    try {
+      await request(`${baseUrl}/logout`, {
+        method: "POST",
+        headers: { accept: "application/json", authorization: `DXAPI ${sessionToken}` },
+        cache: "no-store"
+      });
+    } catch {
+      // Preflight metadata is read-only; logout failure must not mask the result.
+    }
+  }
+}
+
+export async function runDxtradePreflight({
+  client,
+  wait = defaultWait,
+  instrumentReader = defaultInstrumentReader
+} = {}) {
   if (!client || typeof client !== "object") throw new TypeError("DXtrade client is required");
   if (typeof client.login !== "function") throw new TypeError("DXtrade client.login is required");
   if (typeof client.validateMarketCashOrder !== "function") {
     throw new TypeError("DXtrade client.validateMarketCashOrder is required");
   }
   if (typeof wait !== "function") throw new TypeError("wait must be a function");
+  if (typeof instrumentReader !== "function") throw new TypeError("instrumentReader must be a function");
 
   await client.login();
 
   let instrumentHints = [];
   let instrumentSettingsAvailable = false;
-  if (typeof client.getAccountInstrumentSettings === "function") {
-    try {
-      const settings = await client.getAccountInstrumentSettings(BTC_INSTRUMENT);
-      instrumentSettingsAvailable = true;
-      instrumentHints = collectMinimumHints(settings).slice(0, 6);
-    } catch {
-      instrumentSettingsAvailable = false;
-    }
+  try {
+    const settings = await instrumentReader(BTC_INSTRUMENT);
+    instrumentSettingsAvailable = true;
+    instrumentHints = collectMinimumHints(settings).slice(0, 10);
+  } catch {
+    instrumentSettingsAvailable = false;
   }
 
   const nonce = Date.now().toString(36);
   const buyResults = [];
   let smallestPassingCash = null;
+  let validationEndpointAvailable = true;
 
   for (const amount of CASH_PROBES) {
     if (buyResults.length > 0) await wait(VALIDATION_DELAY_MS);
     const result = await validateCash({ client, amount, side: "BUY", nonce });
     buyResults.push(result);
+
+    if (result.http === 405) {
+      validationEndpointAvailable = false;
+      break;
+    }
     if (result.ok) {
       smallestPassingCash = amount;
       break;
     }
   }
 
-  let gridBuy = buyResults.find((item) => item.amount === GRID_FIRST_CASH) ?? null;
-  if (!gridBuy) {
-    if (buyResults.length > 0) await wait(VALIDATION_DELAY_MS);
-    gridBuy = await validateCash({ client, amount: GRID_FIRST_CASH, side: "BUY", nonce });
-  }
+  let gridBuy = null;
+  let gridSell = null;
 
-  await wait(VALIDATION_DELAY_MS);
-  const gridSell = await validateCash({ client, amount: GRID_FIRST_CASH, side: "SELL", nonce });
+  if (validationEndpointAvailable) {
+    gridBuy = buyResults.find((item) => item.amount === GRID_FIRST_CASH) ?? null;
+    if (!gridBuy) {
+      if (buyResults.length > 0) await wait(VALIDATION_DELAY_MS);
+      gridBuy = await validateCash({ client, amount: GRID_FIRST_CASH, side: "BUY", nonce });
+    }
+
+    await wait(VALIDATION_DELAY_MS);
+    gridSell = await validateCash({ client, amount: GRID_FIRST_CASH, side: "SELL", nonce });
+  }
 
   return Object.freeze({
     instrument: BTC_INSTRUMENT,
     validationOnly: true,
+    validationEndpointAvailable,
     instrumentSettingsAvailable,
     instrumentHints: Object.freeze(instrumentHints),
     probes: Object.freeze(buyResults),
