@@ -10,6 +10,6 @@
   "consistencyMax": 0.2,
   "minimumPayout": 100,
   "profitSplit": 0.95,
-  "minimumHoldSeconds": 20,
+  "minimumHoldSeconds": 25,
   "dailySnapshotUtc": "22:00"
 }

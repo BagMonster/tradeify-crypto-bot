@@ -61,6 +61,9 @@ export async function loadAccountConfig(path = "config/account.json") {
   if (account.maxLossFloorCap !== account.startingBalance) {
     throw new Error("account.maxLossFloorCap must equal account.startingBalance");
   }
+  if (account.minimumHoldSeconds < 25) {
+    throw new Error("account.minimumHoldSeconds must be at least 25 seconds for the production grid");
+  }
   return account;
 }
 
@@ -131,16 +134,23 @@ export function loadEnvironment() {
     databaseSsl: parseBoolean("DATABASE_SSL", process.env.DATABASE_SSL, false),
     appMode: process.env.APP_MODE ?? "stage-a",
     autoExecute: parseBoolean("AUTO_EXECUTE", process.env.AUTO_EXECUTE, false),
-    nodeEnv: process.env.NODE_ENV ?? "production"
+    nodeEnv: process.env.NODE_ENV ?? "production",
+    dxtrade: Object.freeze({
+      restBaseUrl: requireText("DXTRADE_REST_BASE_URL", process.env.DXTRADE_REST_BASE_URL),
+      username: requireText("DXTRADE_USERNAME", process.env.DXTRADE_USERNAME),
+      domain: requireText("DXTRADE_DOMAIN", process.env.DXTRADE_DOMAIN),
+      password: requireText("DXTRADE_PASSWORD", process.env.DXTRADE_PASSWORD),
+      accountCode: requireText("DXTRADE_ACCOUNT_CODE", process.env.DXTRADE_ACCOUNT_CODE)
+    })
   };
 
   if (environment.appMode !== "stage-a") {
-    throw new Error("This foundation only permits APP_MODE=stage-a");
+    throw new Error("The production grid remains in APP_MODE=stage-a until the final live activation decision");
   }
   if (environment.autoExecute) {
-    throw new Error("AUTO_EXECUTE must remain false until Stage B is approved");
+    throw new Error("AUTO_EXECUTE must remain false until the final D-038 live activation approval");
   }
-  return environment;
+  return Object.freeze(environment);
 }
 
 export async function loadConfiguration() {
