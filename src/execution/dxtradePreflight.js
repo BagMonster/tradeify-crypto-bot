@@ -22,6 +22,27 @@ function validationFailure(error) {
   });
 }
 
+function validationPayloadFailure(payload) {
+  if (!payload || typeof payload !== "object") return null;
+
+  if (payload.valid === false || payload.isValid === false || payload.success === false || payload.accepted === false) {
+    return safeCode(payload.errorCode ?? payload.rejectCode ?? "VALIDATION_REJECTED");
+  }
+
+  for (const key of ["errors", "violations", "rejects"]) {
+    if (Array.isArray(payload[key]) && payload[key].length > 0) {
+      const first = payload[key][0];
+      return safeCode(first?.errorCode ?? first?.rejectCode ?? first?.code ?? "VALIDATION_REJECTED");
+    }
+  }
+
+  if (payload.rejectReason || payload.rejectCode || payload.errorCode) {
+    return safeCode(payload.errorCode ?? payload.rejectCode ?? "VALIDATION_REJECTED");
+  }
+
+  return null;
+}
+
 function collectMinimumHints(value, path = [], results = [], depth = 0) {
   if (depth > 6 || value === null || value === undefined) return results;
 
@@ -60,11 +81,15 @@ function orderCode(amount, side, nonce) {
 
 async function validateCash({ client, amount, side, nonce }) {
   try {
-    await client.validateMarketCashOrder({
+    const payload = await client.validateMarketCashOrder({
       clientOrderId: orderCode(amount, side, nonce),
       orderSide: side,
       cashQuantity: amount
     });
+    const api = validationPayloadFailure(payload);
+    if (api !== null) {
+      return Object.freeze({ amount, side, ok: false, http: 200, api });
+    }
     return Object.freeze({ amount, side, ok: true, http: 200, api: "NONE" });
   } catch (error) {
     return Object.freeze({ amount, side, ...validationFailure(error) });
