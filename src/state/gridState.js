@@ -1,5 +1,8 @@
 import { normalizeGridState } from "../strategies/grid.js";
 
+const DEFAULT_STRATEGY_ID = "btc-progressive-reference-reset-grid-v1";
+const DEFAULT_INSTRUMENT = "BTC/USD";
+
 export class GridStateConflictError extends Error {
   constructor(message = "Grid state changed before the update could be saved") {
     super(message);
@@ -10,6 +13,8 @@ export class GridStateConflictError extends Error {
 export const GRID_STATE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS grid_state (
   id SMALLINT PRIMARY KEY CHECK (id = 1),
+  strategy_id TEXT NOT NULL,
+  instrument TEXT NOT NULL,
   state_version BIGINT NOT NULL CHECK (state_version >= 0),
   reference_price NUMERIC(30,12) NOT NULL CHECK (reference_price > 0),
   buy_count SMALLINT NOT NULL CHECK (buy_count BETWEEN 0 AND 3),
@@ -29,9 +34,31 @@ CREATE TABLE IF NOT EXISTS grid_state (
   )
 )`;
 
+const GRID_STATE_MIGRATION_SQL = Object.freeze([
+  "ALTER TABLE grid_state ADD COLUMN IF NOT EXISTS strategy_id TEXT",
+  "ALTER TABLE grid_state ADD COLUMN IF NOT EXISTS instrument TEXT",
+  `UPDATE grid_state SET strategy_id = '${DEFAULT_STRATEGY_ID}' WHERE strategy_id IS NULL`,
+  `UPDATE grid_state SET instrument = '${DEFAULT_INSTRUMENT}' WHERE instrument IS NULL`,
+  "ALTER TABLE grid_state ALTER COLUMN strategy_id SET NOT NULL",
+  "ALTER TABLE grid_state ALTER COLUMN instrument SET NOT NULL"
+]);
+
 function requireQuery(query) {
   if (typeof query !== "function") throw new TypeError("query must be a function");
   return query;
+}
+
+function requiredText(name, value, maxLength = 128) {
+  if (typeof value !== "string" || value.trim() === "") throw new TypeError(`${name} must be a non-empty string`);
+  const text = value.trim();
+  if (text.length > maxLength) throw new TypeError(`${name} is too long`);
+  return text;
+}
+
+function instrumentSymbol(value) {
+  const instrument = requiredText("grid instrument", value, 64);
+  if (!/^[A-Z0-9]+\/[A-Z0-9]+$/.test(instrument)) throw new TypeError("grid instrument must look like BASE/QUOTE");
+  return instrument;
 }
 
 function stateFromRow(row) {
@@ -64,11 +91,18 @@ function stateParameters(state) {
   ];
 }
 
-export function createPostgresGridStateStore({ query }) {
+export function createPostgresGridStateStore({
+  query,
+  strategyId = DEFAULT_STRATEGY_ID,
+  instrument = DEFAULT_INSTRUMENT
+}) {
   const run = requireQuery(query);
+  const activeStrategyId = requiredText("grid strategyId", strategyId, 128);
+  const activeInstrument = instrumentSymbol(instrument);
 
   async function init() {
     await run(GRID_STATE_SCHEMA_SQL);
+    for (const statement of GRID_STATE_MIGRATION_SQL) await run(statement);
   }
 
   async function load() {
@@ -78,18 +112,36 @@ export function createPostgresGridStateStore({ query }) {
     }
     if (result.rowCount === 0) return null;
     if (result.rowCount !== 1) throw new Error("grid_state must contain at most one active row");
-    return stateFromRow(result.rows[0]);
+    const row = result.rows[0];
+    const storedStrategy = row.strategy_id == null ? DEFAULT_STRATEGY_ID : String(row.strategy_id);
+    const storedInstrument = row.instrument == null ? DEFAULT_INSTRUMENT : String(row.instrument);
+    if (storedStrategy !== activeStrategyId || storedInstrument !== activeInstrument) return null;
+    return stateFromRow(row);
   }
 
   async function initializeIfMissing(state) {
     const params = stateParameters(state);
     await run(
       `INSERT INTO grid_state (
-         id, state_version, reference_price, buy_count, buy_ptr,
+         id, strategy_id, instrument, state_version, reference_price, buy_count, buy_ptr,
          sell_count, sell_ptr, last_fill_at, last_fill_side, last_fill_price
-       ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (id) DO NOTHING`,
-      params
+       ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       ON CONFLICT (id) DO UPDATE
+         SET strategy_id = EXCLUDED.strategy_id,
+             instrument = EXCLUDED.instrument,
+             state_version = EXCLUDED.state_version,
+             reference_price = EXCLUDED.reference_price,
+             buy_count = EXCLUDED.buy_count,
+             buy_ptr = EXCLUDED.buy_ptr,
+             sell_count = EXCLUDED.sell_count,
+             sell_ptr = EXCLUDED.sell_ptr,
+             last_fill_at = EXCLUDED.last_fill_at,
+             last_fill_side = EXCLUDED.last_fill_side,
+             last_fill_price = EXCLUDED.last_fill_price,
+             updated_at = NOW()
+       WHERE grid_state.strategy_id <> EXCLUDED.strategy_id
+          OR grid_state.instrument <> EXCLUDED.instrument`,
+      [activeStrategyId, activeInstrument, ...params]
     );
     const stored = await load();
     if (!stored) throw new Error("grid state initialization failed");
@@ -117,9 +169,9 @@ export function createPostgresGridStateStore({ query }) {
               last_fill_side = $8,
               last_fill_price = $9,
               updated_at = NOW()
-        WHERE id = 1 AND state_version = $10
+        WHERE id = 1 AND strategy_id = $10 AND instrument = $11 AND state_version = $12
         RETURNING *`,
-      [...params, expectedVersion]
+      [...params, activeStrategyId, activeInstrument, expectedVersion]
     );
     if (result?.rowCount !== 1) throw new GridStateConflictError();
     return stateFromRow(result.rows[0]);
@@ -133,5 +185,9 @@ export function createPostgresGridStateStore({ query }) {
     return result.rowCount === 1;
   }
 
-  return Object.freeze({ init, load, initializeIfMissing, save, clearForStrategyTransition });
+  function getIdentity() {
+    return Object.freeze({ strategyId: activeStrategyId, instrument: activeInstrument });
+  }
+
+  return Object.freeze({ init, load, initializeIfMissing, save, clearForStrategyTransition, getIdentity });
 }
