@@ -64,7 +64,6 @@ test("runtime initializes once and does nothing when no level is crossed", async
   const runtime = createGridRuntime({
     stateStore: store,
     getRiskSnapshot: async () => BASE_RISK,
-    quantityForIntent: async ({ intent, trade: market }) => intent.usd / market.price,
     execution: liveExecution()
   });
 
@@ -80,7 +79,6 @@ test("grid state advances only after a confirmed fill", async () => {
   const runtime = createGridRuntime({
     stateStore: store,
     getRiskSnapshot: async () => BASE_RISK,
-    quantityForIntent: async ({ intent, trade: market }) => intent.usd / market.price,
     execution: liveExecution()
   });
   await runtime.initialize(70_000);
@@ -99,7 +97,6 @@ test("unconfirmed broker result leaves reference and counters unchanged", async 
   const runtime = createGridRuntime({
     stateStore: store,
     getRiskSnapshot: async () => BASE_RISK,
-    quantityForIntent: async ({ intent, trade: market }) => intent.usd / market.price,
     execution: {
       async executeGridIntent() { return Object.freeze({ status: "NOT_CONFIRMED" }); },
       async executeProtectiveFlatten() { return Object.freeze({ status: "NOT_CONFIRMED" }); }
@@ -120,7 +117,6 @@ test("deterministic replay exercises three buys and opposite-side reset without 
   const runtime = createGridRuntime({
     stateStore: store,
     getRiskSnapshot: async () => BASE_RISK,
-    quantityForIntent: async ({ intent, trade: market }) => intent.usd / market.price,
     execution: liveExecution()
   });
   await runtime.initialize(70_000);
@@ -145,7 +141,6 @@ test("daily or maximum-loss floor takes protective precedence even with no grid 
   const runtime = createGridRuntime({
     stateStore: store,
     getRiskSnapshot: async () => ({ ...BASE_RISK, liveEquity: 46_900 }),
-    quantityForIntent: async ({ intent, trade: market }) => intent.usd / market.price,
     execution: liveExecution()
   });
   await runtime.initialize(70_000);
