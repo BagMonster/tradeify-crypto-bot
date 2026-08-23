@@ -12,9 +12,18 @@ import { createTradeifyService } from "./src/tradeifyService.js";
 import { startTelegramBot } from "./src/telegramBot.js";
 
 const configuration = await loadConfiguration();
-const { account, strategy, environment } = configuration;
+const { account, strategy, environment, instrument } = configuration;
+const strategyPending = typeof strategy.strategyStatus === "string" && strategy.strategyStatus.startsWith("pending-");
+const strategyId = typeof strategy.strategyId === "string" && strategy.strategyId.trim()
+  ? strategy.strategyId.trim()
+  : strategyPending
+    ? strategy.strategyStatus
+    : null;
+if (!strategyId) throw new Error("strategy.strategyId is required before a production strategy can run");
+
 const database = createDatabase(environment);
 await database.init(account);
+database.gridState.setIdentity({ strategyId, instrument: instrument.dxtradeSymbol });
 
 const dxtradeClient = new DxtradeExecutionClient({
   restBaseUrl: environment.dxtrade.restBaseUrl,
@@ -22,21 +31,25 @@ const dxtradeClient = new DxtradeExecutionClient({
   domain: environment.dxtrade.domain,
   password: environment.dxtrade.password,
   accountCode: environment.dxtrade.accountCode,
+  instrument: instrument.dxtradeSymbol,
   fetchImpl: createPinnedDxtradeFetch()
 });
 
 const dxtradeOrderAdapter = createDxtradeOrderAdapter({
   client: dxtradeClient,
-  ledger: database.executionLedger
+  ledger: database.executionLedger,
+  instrument: instrument.dxtradeSymbol
 });
 
 const guardedExecution = createGuardedExecution({
   autoExecute: environment.autoExecute,
   strategyAutoExecute: strategy.execution.autoExecute,
+  instrument: instrument.dxtradeSymbol,
+  marketSymbol: instrument.binanceSymbol,
+  orderCodePrefix: `${instrument.asset}GRID`,
   placeMarketOrder: dxtradeOrderAdapter.placeMarketOrder,
-  // D-038 permits building the write path now, but this deployment remains
-  // impossible to activate because config.js rejects either execution lock.
-  // A broker-verified automatic protective flatten is added before canary/live approval.
+  // The strategy transition remains locked. A broker-verified automatic
+  // protective flatten is still required before any later canary/live approval.
   flattenPosition: async () => {
     throw new Error("Automatic protective flatten is not enabled in the locked production build");
   },
@@ -47,6 +60,7 @@ let accountErrorLogged = false;
 const accountMonitor = createDxtradeAccountMonitor({
   client: dxtradeClient,
   startingBalance: account.startingBalance,
+  instrument: instrument.dxtradeSymbol,
   getPersistedPeakClosedBalance: database.getPersistedPeakClosedBalance,
   onSnapshot: async (snapshot) => {
     accountErrorLogged = false;
@@ -73,8 +87,31 @@ let liveFeedState = Object.freeze({
 let persistedFeedStale = true;
 let runtimeErrorLatched = false;
 
-const gridRuntime = createGridRuntime({
+async function loadActiveGridStrategy() {
+  if (strategyPending) return null;
+  const module = instrument.asset === "BTC"
+    ? await import("./src/strategies/grid.js")
+    : await import("./src/strategies/solanaGrid.js");
+  const definition = module.GRID_DEFINITION ?? module.FROZEN_GRID;
+  if (!definition || definition.strategyId !== strategyId) {
+    throw new Error("active grid strategy definition does not match strategy.strategyId");
+  }
+  for (const name of [
+    "createInitialGridState",
+    "evaluateGridIntent",
+    "applyConfirmedGridFill",
+    "resetGridAfterProtectiveFlatten"
+  ]) {
+    if (typeof module[name] !== "function") throw new Error(`active grid strategy is missing ${name}`);
+  }
+  return Object.freeze({ module, definition });
+}
+
+const activeGrid = await loadActiveGridStrategy();
+const gridRuntime = activeGrid ? createGridRuntime({
   stateStore: database.gridState,
+  marketSymbol: instrument.binanceSymbol,
+  gridStrategy: activeGrid.module,
   minimumHoldSeconds: account.minimumHoldSeconds,
   execution: guardedExecution,
   addEvent: database.addEvent,
@@ -99,30 +136,30 @@ const gridRuntime = createGridRuntime({
       accountLocked: snapshot?.accountLocked ?? true,
       feedHealthy: liveFeedState.connected === true && liveFeedState.stale === false,
       accountDataFresh: accountStatus.fresh === true,
-      // Netting mode was owner-verified before the production-grid build.
       nettingConfirmed: true
     });
   }
-});
+}) : null;
 
 let pendingTrade = null;
 let drainingTrades = false;
 let existingPositionHaltLatched = false;
 
 async function processLatestTrade(trade) {
+  if (!gridRuntime) return;
   const existingGridState = await database.gridState.load();
   if (!existingGridState) {
     const accountStatus = accountMonitor.getSnapshot();
     if (!accountStatus.healthy || !accountStatus.snapshot) return;
 
-    if (accountStatus.snapshot.btcPosition) {
+    if (accountStatus.snapshot.instrumentPosition) {
       if (!existingPositionHaltLatched) {
         existingPositionHaltLatched = true;
         await database.setSafetyHalt(
-          "BTC position existed before the production grid reference was initialized; owner reconciliation required"
+          `${instrument.dxtradeSymbol} position existed before the production grid reference was initialized; owner reconciliation required`
         );
         await database.addEvent("ERROR", "GRID_INITIALIZATION_BLOCKED_EXISTING_POSITION", {
-          symbol: "BTC/USD"
+          symbol: instrument.dxtradeSymbol
         });
       }
       return;
@@ -132,6 +169,8 @@ async function processLatestTrade(trade) {
     await database.addEvent("INFO", "GRID_REFERENCE_ANCHORED_FROM_BINANCE", {
       source: trade.source,
       symbol: trade.symbol,
+      instrument: instrument.dxtradeSymbol,
+      strategyId,
       referencePrice: initialized.referencePrice,
       stateVersion: initialized.version,
       tradeTime: trade.tradeTime
@@ -143,7 +182,7 @@ async function processLatestTrade(trade) {
 }
 
 async function drainLatestTrades() {
-  if (drainingTrades) return;
+  if (drainingTrades || !gridRuntime) return;
   drainingTrades = true;
   try {
     while (pendingTrade) {
@@ -157,7 +196,7 @@ async function drainLatestTrades() {
       console.error("Production grid runtime error; new grid actions are being halted.");
       try {
         await database.setSafetyHalt("Production grid runtime error; owner review required");
-        await database.addEvent("ERROR", "GRID_RUNTIME_ERROR", { action: "SAFETY_HALT" });
+        await database.addEvent("ERROR", "GRID_RUNTIME_ERROR", { action: "SAFETY_HALT", strategyId });
       } catch {
         console.error("Could not persist the production grid safety halt.");
       }
@@ -169,7 +208,9 @@ async function drainLatestTrades() {
 }
 
 const binanceFeed = createBinanceLiveFeed({
+  symbol: instrument.binanceSymbol,
   onPrice: (trade) => {
+    if (!gridRuntime) return;
     pendingTrade = trade;
     if (!drainingTrades && !runtimeErrorLatched) void drainLatestTrades();
   },
@@ -184,8 +225,7 @@ const binanceFeed = createBinanceLiveFeed({
     }
   },
   onError: () => {
-    // Detailed remote payloads are intentionally not logged here.
-    console.error("Binance BTCUSDT live-feed message was rejected; feed freshness controls remain active.");
+    console.error(`Binance ${instrument.binanceSymbol} live-feed message was rejected; feed freshness controls remain active.`);
   }
 });
 
@@ -197,7 +237,8 @@ const service = createTradeifyService({
   account,
   strategy,
   environment,
-  dxtradeClient
+  dxtradeClient,
+  gridDefinition: activeGrid?.definition
 });
 
 const telegramBot = await startTelegramBot({
@@ -205,9 +246,13 @@ const telegramBot = await startTelegramBot({
   service
 });
 
-console.log("Production BTC grid runtime started in locked Stage A mode.");
-console.log("Market source: Binance BTCUSDT. Account source: DXtrade.");
-console.log("Auto-execution is locked OFF by both configuration gates.");
+if (strategyPending) {
+  console.log(`${instrument.asset} transition worker started in locked Stage A mode; strategy is pending.`);
+} else {
+  console.log(`Production ${instrument.asset} grid runtime started in locked Stage A mode.`);
+}
+console.log(`Market source: Binance ${instrument.binanceSymbol}. Account source: DXtrade ${instrument.dxtradeSymbol}.`);
+console.log("Automatic execution remains OFF; both execution settings remain false.");
 
 let shuttingDown = false;
 async function shutdown(signal) {
