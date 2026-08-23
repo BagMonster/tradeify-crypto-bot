@@ -45,6 +45,10 @@ function canonicalTime(name, value) {
   return value;
 }
 
+function triggerTolerance(referencePrice) {
+  return Math.max(1, Math.abs(referencePrice)) * 1e-12;
+}
+
 export function normalizeGridState(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new TypeError("grid state must be an object");
@@ -95,43 +99,49 @@ export function createInitialGridState(referencePrice) {
 export function evaluateGridIntent(inputState, observedPrice) {
   const state = normalizeGridState(inputState);
   const price = requirePositiveFinite("observedPrice", observedPrice);
-  const change = (price - state.referencePrice) / state.referencePrice;
+  const tolerance = triggerTolerance(state.referencePrice);
 
-  if (change < 0 && state.buyCount < FROZEN_GRID.maxConsecutive) {
+  if (price < state.referencePrice && state.buyCount < FROZEN_GRID.maxConsecutive) {
     const level = FROZEN_GRID.buyLevels[state.buyPtr];
-    if (level && -change >= level.movePct) {
-      return Object.freeze({
-        strategyId: GRID_STRATEGY_ID,
-        source: GRID_SOURCE_SYMBOL.source,
-        symbol: GRID_SOURCE_SYMBOL.symbol,
-        side: "BUY",
-        tag: `BUY${state.buyPtr + 1}`,
-        levelIndex: state.buyPtr,
-        movePct: level.movePct,
-        usd: level.usd,
-        observedPrice: price,
-        referencePrice: state.referencePrice,
-        stateVersion: state.version
-      });
+    if (level) {
+      const triggerPrice = state.referencePrice * (1 - level.movePct);
+      if (price <= triggerPrice + tolerance) {
+        return Object.freeze({
+          strategyId: GRID_STRATEGY_ID,
+          source: GRID_SOURCE_SYMBOL.source,
+          symbol: GRID_SOURCE_SYMBOL.symbol,
+          side: "BUY",
+          tag: `BUY${state.buyPtr + 1}`,
+          levelIndex: state.buyPtr,
+          movePct: level.movePct,
+          usd: level.usd,
+          observedPrice: price,
+          referencePrice: state.referencePrice,
+          stateVersion: state.version
+        });
+      }
     }
   }
 
-  if (change > 0 && state.sellCount < FROZEN_GRID.maxConsecutive) {
+  if (price > state.referencePrice && state.sellCount < FROZEN_GRID.maxConsecutive) {
     const level = FROZEN_GRID.sellLevels[state.sellPtr];
-    if (level && change >= level.movePct) {
-      return Object.freeze({
-        strategyId: GRID_STRATEGY_ID,
-        source: GRID_SOURCE_SYMBOL.source,
-        symbol: GRID_SOURCE_SYMBOL.symbol,
-        side: "SELL",
-        tag: `SELL${state.sellPtr + 1}`,
-        levelIndex: state.sellPtr,
-        movePct: level.movePct,
-        usd: level.usd,
-        observedPrice: price,
-        referencePrice: state.referencePrice,
-        stateVersion: state.version
-      });
+    if (level) {
+      const triggerPrice = state.referencePrice * (1 + level.movePct);
+      if (price >= triggerPrice - tolerance) {
+        return Object.freeze({
+          strategyId: GRID_STRATEGY_ID,
+          source: GRID_SOURCE_SYMBOL.source,
+          symbol: GRID_SOURCE_SYMBOL.symbol,
+          side: "SELL",
+          tag: `SELL${state.sellPtr + 1}`,
+          levelIndex: state.sellPtr,
+          movePct: level.movePct,
+          usd: level.usd,
+          observedPrice: price,
+          referencePrice: state.referencePrice,
+          stateVersion: state.version
+        });
+      }
     }
   }
 
