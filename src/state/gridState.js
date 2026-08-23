@@ -125,5 +125,13 @@ export function createPostgresGridStateStore({ query }) {
     return stateFromRow(result.rows[0]);
   }
 
-  return Object.freeze({ init, load, initializeIfMissing, save });
+  async function clearForStrategyTransition() {
+    const result = await run("DELETE FROM grid_state WHERE id = 1");
+    if (!result || !Number.isInteger(result.rowCount) || result.rowCount > 1) {
+      throw new Error("grid state transition reset returned an invalid result");
+    }
+    return result.rowCount === 1;
+  }
+
+  return Object.freeze({ init, load, initializeIfMissing, save, clearForStrategyTransition });
 }
