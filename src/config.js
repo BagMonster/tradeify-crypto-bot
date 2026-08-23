@@ -68,14 +68,36 @@ export async function loadAccountConfig(path = "config/account.json") {
   return account;
 }
 
+function validateExecution(strategy) {
+  if (!strategy.execution || typeof strategy.execution !== "object" || Array.isArray(strategy.execution)) {
+    throw new Error("strategy.execution is required");
+  }
+  requireNumber("execution.minHoldSeconds", strategy.execution.minHoldSeconds);
+  if (strategy.execution.minHoldSeconds < 25) {
+    throw new Error("execution.minHoldSeconds must be at least 25");
+  }
+  if (typeof strategy.execution.autoExecute !== "boolean") {
+    throw new Error("execution.autoExecute must be boolean");
+  }
+  if (strategy.execution.slippageCapPct !== undefined) {
+    requireNumber("execution.slippageCapPct", strategy.execution.slippageCapPct);
+  }
+}
+
 export async function loadStrategyConfig(path = "config/strategy.json") {
   const strategy = await readJson(path);
   if (!strategy.instruments?.["BTC/USD"] || !strategy.instruments?.["SOL/USD"]) {
     throw new Error("strategy must define BTC/USD and SOL/USD");
   }
   resolveInstrumentProfile(strategy);
-  if (strategy.strategyStatus !== undefined) {
-    requireText("strategy.strategyStatus", strategy.strategyStatus);
+  if (strategy.strategyStatus !== undefined) requireText("strategy.strategyStatus", strategy.strategyStatus);
+  if (strategy.strategyType !== undefined) requireText("strategy.strategyType", strategy.strategyType);
+
+  validateExecution(strategy);
+
+  if (strategy.strategyType === "reference-reset-grid") {
+    requireText("strategy.strategyId", strategy.strategyId);
+    return strategy;
   }
 
   const numericValues = {
@@ -102,7 +124,6 @@ export async function loadStrategyConfig(path = "config/strategy.json") {
     "risk.stage2ProfitCeiling": strategy.risk?.stage2ProfitCeiling,
     "risk.maxNotional": strategy.risk?.maxNotional,
     "risk.floorSafetyMargin": strategy.risk?.floorSafetyMargin,
-    "execution.minHoldSeconds": strategy.execution?.minHoldSeconds,
     "execution.slippageCapPct": strategy.execution?.slippageCapPct
   };
   for (const [name, value] of Object.entries(numericValues)) requireNumber(name, value);
@@ -110,18 +131,12 @@ export async function loadStrategyConfig(path = "config/strategy.json") {
   if (typeof strategy.signal.requireCloseInsideBand !== "boolean") {
     throw new Error("signal.requireCloseInsideBand must be boolean");
   }
-  if (typeof strategy.execution.autoExecute !== "boolean") {
-    throw new Error("execution.autoExecute must be boolean");
-  }
   requireText("execution.hardFlatUtc", strategy.execution.hardFlatUtc);
   if (strategy.risk.dailyHardStop >= strategy.risk.dailySoftStop) {
     throw new Error("dailyHardStop must be more negative than dailySoftStop");
   }
   if (strategy.regime.adxStandDown <= strategy.regime.adxMax) {
     throw new Error("adxStandDown must be greater than adxMax");
-  }
-  if (strategy.execution.minHoldSeconds < 25) {
-    throw new Error("execution.minHoldSeconds must be at least 25");
   }
   return strategy;
 }
@@ -153,7 +168,7 @@ export function loadEnvironment() {
     throw new Error("The production grid remains in APP_MODE=stage-a until the final live activation decision");
   }
   if (environment.autoExecute) {
-    throw new Error("AUTO_EXECUTE must remain false until the final D-038 live activation approval");
+    throw new Error("AUTO_EXECUTE must remain false until the final live activation approval");
   }
   return Object.freeze(environment);
 }
