@@ -6,6 +6,7 @@ import {
 } from "node:crypto";
 import { calculateAccountFloors } from "./risk/accountRules.js";
 import { FROZEN_GRID } from "./strategies/grid.js";
+import { runDxtradePreflight } from "./execution/dxtradePreflight.js";
 
 function money(value) {
   return new Intl.NumberFormat("en-US", {
@@ -46,7 +47,12 @@ function nextLevelText(gridState, side) {
   return `${isBuy ? "BUY" : "SELL"}${pointer + 1} ${sign}${(level.movePct * 100).toFixed(2)}% @ ~${price(trigger)} for ${money(level.usd)}`;
 }
 
-export function createTradeifyService({ database, account, environment }) {
+function preflightValidationLine(label, result) {
+  if (result?.ok) return `${label}: PASS`;
+  return `${label}: REJECTED (HTTP ${result?.http ?? "NONE"}, API ${result?.api ?? "NONE"})`;
+}
+
+export function createTradeifyService({ database, account, environment, dxtradeClient = null }) {
   async function statusText() {
     const [state, gridState] = await Promise.all([
       database.getState(),
@@ -165,12 +171,49 @@ export function createTradeifyService({ database, account, environment }) {
     ].join("\n");
   }
 
+  async function dxPreflightText() {
+    if (!dxtradeClient) return "DXtrade preflight is unavailable in this worker.";
+
+    const result = await runDxtradePreflight({ client: dxtradeClient });
+    await database.addEvent("INFO", "DXTRADE_VALIDATION_PREFLIGHT", {
+      source: "telegram",
+      instrument: result.instrument,
+      smallestPassingCash: result.smallestPassingCash,
+      gridBuy250: result.gridBuy.ok,
+      gridSell250: result.gridSell.ok,
+      validationOnly: true
+    });
+
+    const lines = [
+      "DXTRADE BTC PREFLIGHT",
+      "",
+      "VALIDATION ONLY — no order was placed.",
+      `Instrument: ${result.instrument}`,
+      "",
+      "BUY cash-size probes:"
+    ];
+
+    for (const probe of result.probes) {
+      lines.push(preflightValidationLine(money(probe.amount), probe));
+    }
+
+    lines.push("");
+    lines.push(`Smallest passing BUY probe: ${result.smallestPassingCash === null ? "NONE" : money(result.smallestPassingCash)}`);
+    lines.push(preflightValidationLine("Grid $250 BUY", result.gridBuy));
+    lines.push(preflightValidationLine("Grid $250 SELL", result.gridSell));
+    lines.push("");
+    lines.push("Auto-execution remains OFF. This command never calls the order-placement endpoint.");
+
+    return lines.join("\n");
+  }
+
   return {
     statusText,
     kill,
     requestResume,
     confirmResume,
     flatInstructions,
-    healthText
+    healthText,
+    dxPreflightText
   };
 }

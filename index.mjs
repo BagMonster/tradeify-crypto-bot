@@ -196,7 +196,8 @@ const service = createTradeifyService({
   database,
   account,
   strategy,
-  environment
+  environment,
+  dxtradeClient
 });
 
 const telegramBot = await startTelegramBot({
