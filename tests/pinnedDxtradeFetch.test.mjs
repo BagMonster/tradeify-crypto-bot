@@ -16,10 +16,10 @@ function json(payload, status = 200) {
   });
 }
 
-test("follows a same-host HTTPS redirect inside the pinned DXtrade REST path", async () => {
+test("follows a same-host HTTPS redirect even when the path changes", async () => {
   const calls = [];
   const responses = [
-    redirect("/dxsca-web/login/", 307),
+    redirect("/login", 307),
     json({ sessionToken: "ok" })
   ];
   const fetchImpl = async (url, options) => {
@@ -37,12 +37,35 @@ test("follows a same-host HTTPS redirect inside the pinned DXtrade REST path", a
   assert.equal(response.status, 200);
   assert.equal(calls.length, 2);
   assert.equal(calls[0].options.redirect, "manual");
-  assert.equal(calls[1].url, "https://dx.tradeifycrypto.co/dxsca-web/login/");
+  assert.equal(calls[1].url, "https://dx.tradeifycrypto.co/login");
   assert.equal(calls[1].options.method, "POST");
   assert.equal(calls[1].options.body, "{\"safe\":true}");
 });
 
-test("blocks redirects to another host before sending a second request", async () => {
+test("follows HTTPS redirects to another Tradeify Crypto subdomain", async () => {
+  const calls = [];
+  const responses = [
+    redirect("https://api.tradeifycrypto.co/session/login", 307),
+    json({ sessionToken: "ok" })
+  ];
+  const fetch = createPinnedDxtradeFetch({
+    fetchImpl: async (url, options) => {
+      calls.push({ url: url.toString(), options });
+      return responses.shift();
+    }
+  });
+
+  const response = await fetch("https://dx.tradeifycrypto.co/dxsca-web/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}"
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(calls[1].url, "https://api.tradeifycrypto.co/session/login");
+});
+
+test("still blocks redirects outside the Tradeify Crypto domain", async () => {
   const calls = [];
   const fetch = createPinnedDxtradeFetch({
     fetchImpl: async (url, options) => {
@@ -53,29 +76,29 @@ test("blocks redirects to another host before sending a second request", async (
 
   await assert.rejects(
     fetch("https://dx.tradeifycrypto.co/dxsca-web/login", { method: "POST" }),
-    /Unexpected redirect/i
+    /outside the Tradeify Crypto HTTPS domain/i
   );
   assert.equal(calls.length, 1);
 });
 
-test("blocks same-host redirects that escape the DXtrade REST base path", async () => {
+test("blocks non-HTTPS Tradeify Crypto redirects", async () => {
   const fetch = createPinnedDxtradeFetch({
-    fetchImpl: async () => redirect("https://dx.tradeifycrypto.co/other", 307)
+    fetchImpl: async () => redirect("http://dx.tradeifycrypto.co/login", 307)
   });
 
   await assert.rejects(
     fetch("https://dx.tradeifycrypto.co/dxsca-web/login", { method: "POST" }),
-    /Unexpected redirect/i
+    /outside the Tradeify Crypto HTTPS domain/i
   );
 });
 
-test("enforces a small redirect limit", async () => {
+test("enforces a finite redirect limit", async () => {
   let callCount = 0;
   const fetch = createPinnedDxtradeFetch({
     maxRedirects: 1,
     fetchImpl: async () => {
       callCount += 1;
-      return redirect("/dxsca-web/login/", 307);
+      return redirect("/login", 307);
     }
   });
 
@@ -88,9 +111,9 @@ test("enforces a small redirect limit", async () => {
 
 test("exports the frozen production redirect boundary", () => {
   assert.deepEqual(DXTRADE_REDIRECT_POLICY, {
-    hostname: "dx.tradeifycrypto.co",
-    basePath: "/dxsca-web",
-    maxRedirects: 3
+    primaryHostname: "dx.tradeifycrypto.co",
+    providerDomainSuffix: ".tradeifycrypto.co",
+    maxRedirects: 5
   });
   assert.equal(Object.isFrozen(DXTRADE_REDIRECT_POLICY), true);
 });
