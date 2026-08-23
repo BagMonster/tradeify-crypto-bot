@@ -1,10 +1,11 @@
 {
+  "strategyStatus": "pending-solana-statistical-grid",
   "instruments": {
     "BTC/USD": {
-      "enabled": true
+      "enabled": false
     },
     "SOL/USD": {
-      "enabled": false
+      "enabled": true
     }
   },
   "signal": {
