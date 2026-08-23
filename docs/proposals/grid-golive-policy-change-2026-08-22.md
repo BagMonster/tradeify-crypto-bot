@@ -1,6 +1,6 @@
 # Grid Strategy — Policy Change Package and Implementation Handoff
 
-**Prepared:** 2026-08-22 · **Revision 3** — audit corrections applied, decision numbering verified against the repo. See §12.
+**Prepared:** 2026-08-22 · **Revision 5** — Tradeify documentation review; draft D-036 added. See §12.
 **For:** the developer or agent taking the grid strategy from research to implementation
 **Status:** DRAFT decision-log entries. **Owner approval required before any are committed.**
 **Target file for entries:** `docs/implementation-decision-log.md`
@@ -25,7 +25,7 @@ The client is read-only — there is no order-placement method — which limits 
 
 Chapter 26 research was built around a **box-fade** strategy that has since been retired (D-028, draft). A **progressive reference-resetting grid on BTC** has been specified, backtested, and frozen. The grid is structurally incompatible with three project rules written for box-fade. Those rules must be formally changed before implementation begins.
 
-Six draft entries follow: **D-029 to D-035**. None weakens an account protection; three make protections stricter.
+Eight draft entries follow: **D-029 to D-036**. None weakens an account protection; three make protections stricter.
 
 ### 0.3 What is NOT changing, and is not negotiable
 
@@ -208,6 +208,46 @@ Ordered from highest authority. A lower-numbered control always overrides a high
 
 ---
 
+## 7A. DRAFT D-036 — Inactivity heartbeat ⛔ STRATEGY-BREAKING WITHOUT IT
+
+| Field | Content |
+|---|---|
+| **ID** | D-036 |
+| **Trigger** | Tradeify documentation review, 2026-08-22 |
+| **Tradeify rule (verbatim)** | *"If you go 30 consecutive days without placing a trade, your account is closed and marked as breached due to inactivity."* Warning protocol: *"At 28 days of inactivity we email you an Account Inactivity Warning telling you to place at least one trade within the next 48 hours."* |
+| **The problem** | **The frozen grid breaches this.** Measured on the 545-day dukascopy path, gaps between fills: |
+
+```
+2025-05-10 -> 2025-06-05    25.9 days   holding -0.016358 BTC
+2025-07-15 -> 2025-08-11    27.0 days   holding -0.029183 BTC
+2025-08-15 -> 2025-10-03    49.0 days   holding -0.029098 BTC   ← BREACH
+2025-12-19 -> 2026-01-13    25.3 days   holding -0.005823 BTC
+2026-04-22 -> 2026-05-27    35.8 days   holding +0.017303 BTC   ← BREACH
+2026-07-04 -> 2026-08-19    45.9 days   holding +0.045795 BTC   ← BREACH
+```
+
+| Field | Content |
+|---|---|
+| **Severity** | **Three inactivity breaches in 545 days — roughly twice a year.** Not a tail risk. Mean gap is 6.7 days and median 2.6, so the average is reassuring and the distribution is not. In every gap the account was **holding an open position**: the grid sits on live risk for up to 49 days without placing a trade. Holding is not placing. |
+| **Why spacing is not the fix** | Tightening the ladder raises trade count but breaches the daily limit (10–52% of start dates). The three-way constraint — profit, daily-limit margin, inactivity — has no solution in the spacing parameter. |
+| **Decision** | Add a **heartbeat trade**. If **25 days** elapse since the last fill, place one minimum-size round trip: open, hold at least 25 seconds (Tradeify requires 20), close. Log it as a heartbeat, alert the owner via Telegram. |
+| **Cost** | Round trip is 0.18% of notional (0.04% × 2 commission + 0.05% × 2 slippage). On a $50 position that is **$0.09**. Even fired monthly for a year it costs about **$1**. Against a ~$340 net annual return that is 0.3%. |
+| **⛔ Critical implementation constraint** | **The heartbeat must be invisible to the grid engine.** It must NOT advance level pointers, NOT increment side counters, and above all **NOT reset the reference price** — the grid re-anchors to the fill price after every trade, so a heartbeat routed through the normal fill path would silently corrupt the reference and every subsequent decision. It is a separate bookkeeping path that shares only the order-placement primitive. Getting this wrong reproduces exactly the silent-corruption failure mode in §9 Step 3. |
+| **Also required** | The heartbeat must respect one-net-position (D-029) and netting (D-033) — on a netting account a small open-then-close nets in and back out, which is compliant, but it does move average cost slightly and must be reflected in P&L accounting. |
+| **Status** | **PROPOSED 2026-08-22 — owner approval required. Without it the account is closed roughly twice a year regardless of strategy performance.** |
+
+---
+
+## 7B. Consistency score — payout constraint, not an account risk
+
+Tradeify requires a **20% consistency score** for payouts on Instant Funding accounts (evaluation accounts have none). The separate 40%-single-day trading consistency rule applies to **APE-X only** and does not bind here.
+
+Measured on the frozen grid: **the best single day was $358.09 — 34.0% of total realised profit.** Grid profit is lumpy; one day carried a third of the year.
+
+This does **not** threaten the account. It blocks a withdrawal until the profit distribution flattens. Combined with D-035's $57,000 payout gate it is largely moot in the near term, but it means a payout may be refused even after that gate is met. No action required beyond awareness — do not reshape the strategy to chase a consistency score.
+
+---
+
 ## 8. DRAFT D-034 — Staged go-live gate
 
 **This is a gate, not a relaxation. It defines what must be true before the execution locks may be discussed at all.**
@@ -311,7 +351,7 @@ A failed order that advances state leaves the bot believing it holds inventory i
 | `grid-v3.mjs` / `grid-v4.mjs` | Adds trailing-floor model, corrected day baseline, position-state census, equity-drawdown tracking | **Yes** — reference for D-032 and D-035 |
 | `claude/grid-strategy-spec-2026-08-19.md` | Frozen specification | **Yes** — this is the contract. Supersede, do not edit. |
 | `src/dxtradeClient.js` | Read-only DXtrade client with credentials, auth, session, WebSocket | **Exists already. Must be audited under D-004 before any further use** (§0.1). |
-| `src/research/strategies/boxFade.js` + 37 tests | Retired, retained as reference | Leave in place, unused |
+| `src/research/strategies/boxFade.js` + 37 tests | **Never committed.** Verified 2026-08-22: absent from `src/research/strategies/` and `tests/` on every branch. The files were written and delivered in chat but never landed in the repository. | Nothing to hand over. If the owner wants them preserved as reference, they must be committed deliberately; otherwise treat box-fade as having no code in the repo at all. |
 | **Production grid module** | **Does not exist** | Build in Step 3 |
 | **Order-placement code** | **Does not exist and must not be written before Step 2 passes** | — |
 
@@ -323,6 +363,7 @@ The backtesters read `artifacts/research-bars-btcusd/5m.json` (dukascopy BTCUSD,
 
 | # | Blocker | Owner | Severity |
 |---|---|---|---|
+| 0 | **30-day inactivity rule breaches the strategy ~2×/year** (draft D-036) | Dev | **Account-ending. Must be fixed before any live or shadow run.** |
 | 1 | **D-004 overdue** — credentials, auth, session, client already in the repo | Dev | **Governance violation. Hard gate.** |
 | 2 | Overnight financing rate unverified | Owner | **Can invalidate the strategy** |
 | 3 | Netting vs hedging mode unconfirmed | Owner | **Termination risk** |
@@ -341,6 +382,10 @@ The backtesters read `artifacts/research-bars-btcusd/5m.json` (dukascopy BTCUSD,
 ---
 
 ## 12. Revision history
+
+**Revision 5 (2026-08-22)** — Tradeify documentation review. Confirmed owner-operated trading bots are explicitly permitted and no rule prohibits grid, martingale, DCA, averaging-down, arbitrage, or news trading. Found the **30-day inactivity rule breaches the frozen grid three times in 545 days**; added draft **D-036** (heartbeat trade) as blocker 0. Recorded the 20% payout consistency score against a measured 34% best day (§7B). Confirmed the overnight financing rate is **not published anywhere in Tradeify's documentation** — Step 0.1 requires support or a statement, not a doc lookup.
+
+**Revision 4 (2026-08-22)** — corrected the claim that `boxFade.js` and its 37 tests are retained in the repository; they were never committed (verified against the working tree).
 
 **Revision 3 (2026-08-22)** — numbering verified against `docs/implementation-decision-log.md` on `grid-implementation-handoff`: the committed log runs to D-027, so D-028 is next free and this package's numbering stands. Recorded that `main`'s log stops at D-016.
 
