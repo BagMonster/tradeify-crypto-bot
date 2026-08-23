@@ -99,7 +99,7 @@ test("2 - rejects incomplete, misaligned, malformed, and impossible bars", () =>
   for (const bar of invalidBars) assert.throws(() => normalizeBar(bar));
 });
 
-test("3 - database initialization creates the bars table automatically", async () => {
+test("3 - database initialization creates bars, grid, and execution tables automatically", async () => {
   const calls = [];
   const pool = {
     async query(text, params) {
@@ -116,12 +116,16 @@ test("3 - database initialization creates the bars table automatically", async (
   assert.equal(pool.config.ssl, undefined);
   const schema = calls.map((call) => call.text).join("\n");
   assert.match(schema, /CREATE TABLE IF NOT EXISTS bars/i);
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS grid_state/i);
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS execution_orders/i);
   assert.match(schema, /PRIMARY KEY \(source, symbol, timeframe, open_time\)/i);
   assert.match(schema, /timeframe IN \('15m', '4h', '1d'\)/i);
   assert.match(schema, /is_closed = TRUE/i);
   assert.match(schema, /EXTRACT\(EPOCH FROM open_time\)/i);
-  assert.equal(calls.at(-1).params[0], 50_000);
-  assert.equal(calls.at(-1).params[1], 47_000);
+  const stateInsert = calls.find((call) => /INSERT INTO bot_state/i.test(call.text));
+  assert.ok(stateInsert);
+  assert.equal(stateInsert.params[0], 50_000);
+  assert.equal(stateInsert.params[1], 47_000);
 });
 
 test("4 - one bar is parameterized and idempotently upserted", async () => {

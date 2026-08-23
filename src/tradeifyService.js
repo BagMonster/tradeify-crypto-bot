@@ -4,16 +4,8 @@ import {
   randomInt,
   timingSafeEqual
 } from "node:crypto";
-import {
-  activeFloor,
-  calculateConsistency,
-  dailyFloor,
-  determineStage,
-  evaluateDailyControl,
-  riskGate,
-  stageProfitCeiling,
-  stageRiskCap
-} from "./riskEngine.js";
+import { calculateAccountFloors } from "./risk/accountRules.js";
+import { FROZEN_GRID } from "./strategies/grid.js";
 
 function money(value) {
   return new Intl.NumberFormat("en-US", {
@@ -23,8 +15,13 @@ function money(value) {
   }).format(value);
 }
 
-function percent(value) {
-  return value === null ? "N/A" : `${(value * 100).toFixed(2)}%`;
+function price(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(value);
 }
 
 function hashCode(code, salt) {
@@ -36,78 +33,63 @@ function safeHexEqual(left, right) {
   return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 }
 
-export function createTradeifyService({ database, account, strategy, environment }) {
-  async function getSnapshot() {
-    const [state, days] = await Promise.all([
-      database.getState(),
-      database.getDailyLedger()
-    ]);
-    const floors = {
-      prevDayClose: state.prev_day_close,
-      highWater: state.high_water,
-      mllFloor: state.mll_floor,
-      payoutTaken: state.payout_taken
-    };
-    const stage = determineStage(state.balance, strategy);
-    const floor = activeFloor(floors, account);
-    const daily = evaluateDailyControl({
-      realizedPnl: state.daily_realized_pnl,
-      unrealizedPnl: state.daily_unrealized_pnl,
-      lossesToday: state.losses_today,
-      stage
-    }, strategy);
-    const consistency = calculateConsistency(days, account.consistencyMax);
-    const gate = riskGate({
-      source: "manual",
-      instrument: "BTC/USD",
-      side: "BUY",
-      balance: state.balance,
-      liveEquity: state.equity,
-      activeFloor: floor,
-      dailyRealizedPnl: state.daily_realized_pnl,
-      dailyUnrealizedPnl: state.daily_unrealized_pnl,
-      stage,
-      hasOpenPosition: state.has_open_position,
-      lockedOut: state.operator_killed || state.safety_halt,
-      indicatorsWarm: state.indicators_warm,
-      feedStale: state.feed_stale,
-      regimeAllowed: state.regime_allowed,
-      newsBlackout: state.news_blackout
-    }, strategy);
-    return { state, floors, stage, floor, daily, consistency, gate };
-  }
+function nextLevelText(gridState, side) {
+  if (!gridState) return "WAITING FOR INITIAL REFERENCE";
+  const isBuy = side === "BUY";
+  const pointer = isBuy ? gridState.buyPtr : gridState.sellPtr;
+  const count = isBuy ? gridState.buyCount : gridState.sellCount;
+  if (count >= FROZEN_GRID.maxConsecutive) return "BLOCKED - 3 consecutive fills reached";
+  const level = isBuy ? FROZEN_GRID.buyLevels[pointer] : FROZEN_GRID.sellLevels[pointer];
+  if (!level) return "BLOCKED";
+  const trigger = gridState.referencePrice * (isBuy ? 1 - level.movePct : 1 + level.movePct);
+  const sign = isBuy ? "-" : "+";
+  return `${isBuy ? "BUY" : "SELL"}${pointer + 1} ${sign}${(level.movePct * 100).toFixed(2)}% @ ~${price(trigger)} for ${money(level.usd)}`;
+}
 
+export function createTradeifyService({ database, account, environment }) {
   async function statusText() {
-    const snapshot = await getSnapshot();
-    const state = snapshot.state;
+    const [state, gridState] = await Promise.all([
+      database.getState(),
+      database.gridState.load()
+    ]);
+    const floors = calculateAccountFloors({
+      startingBalance: account.startingBalance,
+      maxLossOffset: account.maxLossOffset,
+      peakClosedBalance: Math.max(account.startingBalance, state.high_water),
+      payoutTaken: state.payout_taken,
+      previousDayClosingBalance: state.prev_day_close,
+      dailyLossLimit: account.dailyLossLimit
+    });
     const operatingStatus = state.operator_killed || state.safety_halt ? "PAUSED" : "RUNNING";
     const lines = [
-      "TRADEIFY BOT STATUS",
+      "TRADEIFY BTC GRID STATUS",
       "",
-      `Mode: ${environment.appMode.toUpperCase()} / SIMULATION`,
-      `Auto-execution: OFF`,
+      `Mode: ${environment.appMode.toUpperCase()} / PRODUCTION GRID LOCKED`,
+      "Auto-execution: OFF",
       `Bot: ${operatingStatus}`,
-      `Stage: ${snapshot.stage}`,
+      "Market source: Binance BTCUSDT",
+      "Account source: DXtrade",
       "",
       `Balance: ${money(state.balance)}`,
       `Live equity: ${money(state.equity)}`,
-      `Daily floor: ${money(dailyFloor(snapshot.floors, account))}`,
-      `MLL floor: ${money(state.mll_floor)}`,
-      `Active floor: ${money(snapshot.floor)}`,
-      `Floor buffer: ${money(state.equity - snapshot.floor)}`,
+      `Daily floor: ${money(floors.dailyFloor)}`,
+      `MLL floor: ${money(floors.mllFloor)}`,
+      `Active floor: ${money(floors.activeFloor)}`,
+      `Floor buffer: ${money(state.equity - floors.activeFloor)}`,
+      `BTC position open: ${state.has_open_position ? "YES" : "NO"}`,
       "",
-      `Daily realized P&L: ${money(state.daily_realized_pnl)}`,
-      `Daily unrealized P&L: ${money(state.daily_unrealized_pnl)}`,
-      `Daily control: ${snapshot.daily.action}`,
-      `Risk cap: ${money(stageRiskCap(snapshot.stage, strategy))}`,
-      `Profit ceiling: ${money(stageProfitCeiling(snapshot.stage, strategy))}`,
-      "",
-      `Consistency score: ${percent(snapshot.consistency.score)}`,
-      `Indicators warm: ${state.indicators_warm ? "YES" : "NO"}`,
-      `Feed stale: ${state.feed_stale ? "YES" : "NO"}`,
-      `Regime allowed: ${state.regime_allowed ? "YES" : "NO"}`,
-      `Entry gate: ${snapshot.gate.ok ? "PASS" : `BLOCKED - ${snapshot.gate.reason}`}`
+      `Binance feed stale: ${state.feed_stale ? "YES" : "NO"}`,
+      `Grid reference: ${gridState ? price(gridState.referencePrice) : "NOT INITIALIZED"}`,
+      `Grid state version: ${gridState?.version ?? "N/A"}`,
+      `Buy ladder: ${gridState ? `${gridState.buyCount}/3` : "N/A"}`,
+      `Sell ladder: ${gridState ? `${gridState.sellCount}/3` : "N/A"}`,
+      `Next buy: ${nextLevelText(gridState, "BUY")}`,
+      `Next sell: ${nextLevelText(gridState, "SELL")}`
     ];
+    if (gridState?.lastFillAt) {
+      lines.push(`Last confirmed grid fill: ${gridState.lastFillSide} @ ${price(gridState.lastFillPrice)} (${gridState.lastFillAt})`);
+    }
+    if (state.operator_killed) lines.push("Operator pause: ACTIVE");
     if (state.safety_halt) lines.push(`Safety halt: ${state.halt_reason ?? "Manual review required"}`);
     return lines.join("\n");
   }
@@ -153,28 +135,34 @@ export function createTradeifyService({ database, account, strategy, environment
     await database.clearResumeChallenge();
     await database.addEvent("INFO", "OPERATOR_RESUME", { source: "telegram" });
     if (state.safety_halt) {
-      return "Operator pause removed, but the safety halt remains active. The bot cannot signal or trade until the safety condition is reviewed.";
+      return "Operator pause removed, but the safety halt remains active. Grid actions remain blocked until the safety condition is reviewed.";
     }
-    return "Bot resumed. All live risk gates still apply; this command cannot bypass them.";
+    return "Bot resumed. Account, market-data, and execution gates still apply; resume cannot bypass them.";
   }
 
   function flatInstructions() {
     return [
-      "STAGE A FLAT INSTRUCTIONS",
+      "BTC GRID FLAT INSTRUCTIONS",
       "",
-      "Auto-execution is intentionally disabled.",
+      "Automatic execution is currently locked OFF.",
       "1. Open DXtrade.",
-      "2. Close any open BTC/USD or SOL/USD position.",
-      "3. Cancel remaining entry, stop, and take-profit orders only after confirming the position is flat.",
-      "4. Send /status and compare the bot state with the dashboard.",
+      "2. Close any open BTC/USD position.",
+      "3. Cancel any remaining BTC/USD working orders after confirming the position is flat.",
+      "4. Send /status and confirm BTC position open shows NO.",
       "",
-      "After Stage B is verified, /flat will call the checked DXtrade order adapter."
+      "The automatic protective-flatten adapter must pass its broker validation before live activation."
     ].join("\n");
   }
 
   async function healthText() {
     const databaseTime = await database.ping();
-    return `Worker: OK\nPostgreSQL: OK\nDatabase time: ${new Date(databaseTime).toISOString()}\nAuto-execution: OFF`;
+    return [
+      "Worker: OK",
+      "PostgreSQL: OK",
+      `Database time: ${new Date(databaseTime).toISOString()}`,
+      "Strategy: BTC progressive reference-reset grid",
+      "Auto-execution: OFF"
+    ].join("\n");
   }
 
   return {
