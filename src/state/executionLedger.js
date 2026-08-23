@@ -1,8 +1,9 @@
+const DEFAULT_INSTRUMENT = "BTC/USD";
 const FINAL_STATUSES = new Set(["FILLED", "REJECTED", "CANCELED", "EXPIRED", "PARTIAL", "FAILED"]);
 const ALL_STATUSES = new Set(["CLAIMED", "SUBMITTED", "PENDING", ...FINAL_STATUSES]);
 
 export class ExecutionOrderConflictError extends Error {
-  constructor(message = "Execution order already exists for this grid state and level") {
+  constructor(message = "Execution order already exists for this strategy, instrument, state, and level") {
     super(message);
     this.name = "ExecutionOrderConflictError";
   }
@@ -12,8 +13,9 @@ export const EXECUTION_LEDGER_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS execution_orders (
   client_order_id TEXT PRIMARY KEY CHECK (LENGTH(client_order_id) BETWEEN 1 AND 64),
   strategy_id TEXT NOT NULL,
+  instrument TEXT NOT NULL,
   state_version BIGINT NOT NULL CHECK (state_version >= 0),
-  grid_tag TEXT NOT NULL CHECK (grid_tag ~ '^(BUY|SELL)[1-3]$'),
+  grid_tag TEXT NOT NULL CHECK (grid_tag ~ '^(BUY|SELL)[1-9][0-9]*$'),
   side TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
   requested_cash_quantity NUMERIC(30,12) NOT NULL CHECK (requested_cash_quantity > 0),
   status TEXT NOT NULL CHECK (status IN ('CLAIMED','SUBMITTED','PENDING','FILLED','REJECTED','CANCELED','EXPIRED','PARTIAL','FAILED')),
@@ -26,12 +28,32 @@ CREATE TABLE IF NOT EXISTS execution_orders (
   submitted_at TIMESTAMPTZ,
   last_checked_at TIMESTAMPTZ,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (state_version, grid_tag),
+  CONSTRAINT execution_orders_strategy_instrument_state_tag_key
+    UNIQUE (strategy_id, instrument, state_version, grid_tag),
   CHECK (
     (status = 'FILLED' AND fill_price IS NOT NULL AND filled_at IS NOT NULL)
     OR status <> 'FILLED'
   )
 )`;
+
+const EXECUTION_LEDGER_MIGRATION_SQL = Object.freeze([
+  "ALTER TABLE execution_orders ADD COLUMN IF NOT EXISTS instrument TEXT",
+  `UPDATE execution_orders SET instrument = '${DEFAULT_INSTRUMENT}' WHERE instrument IS NULL`,
+  "ALTER TABLE execution_orders ALTER COLUMN instrument SET NOT NULL",
+  "ALTER TABLE execution_orders DROP CONSTRAINT IF EXISTS execution_orders_state_version_grid_tag_key",
+  `DO $$
+   BEGIN
+     IF NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conname = 'execution_orders_strategy_instrument_state_tag_key'
+          AND conrelid = 'execution_orders'::regclass
+     ) THEN
+       ALTER TABLE execution_orders
+         ADD CONSTRAINT execution_orders_strategy_instrument_state_tag_key
+         UNIQUE (strategy_id, instrument, state_version, grid_tag);
+     END IF;
+   END $$`
+]);
 
 function requireQuery(query) {
   if (typeof query !== "function") throw new TypeError("query must be a function");
@@ -45,6 +67,12 @@ function requiredText(name, value, maxLength = 128) {
   const text = value.trim();
   if (text.length > maxLength) throw new TypeError(`${name} is too long`);
   return text;
+}
+
+function instrumentSymbol(value) {
+  const instrument = requiredText("instrument", value, 64);
+  if (!/^[A-Z0-9]+\/[A-Z0-9]+$/.test(instrument)) throw new TypeError("instrument must look like BASE/QUOTE");
+  return instrument;
 }
 
 function positive(name, value) {
@@ -80,6 +108,7 @@ function normalizeRow(row) {
   return Object.freeze({
     clientOrderId: String(row.client_order_id),
     strategyId: String(row.strategy_id),
+    instrument: row.instrument == null ? DEFAULT_INSTRUMENT : String(row.instrument),
     stateVersion: Number(row.state_version),
     gridTag: String(row.grid_tag),
     side: String(row.side),
@@ -102,6 +131,7 @@ export function createExecutionLedger({ query }) {
 
   async function init() {
     await run(EXECUTION_LEDGER_SCHEMA_SQL);
+    for (const statement of EXECUTION_LEDGER_MIGRATION_SQL) await run(statement);
   }
 
   async function get(clientOrderId) {
@@ -112,12 +142,21 @@ export function createExecutionLedger({ query }) {
     return normalizeRow(result.rows[0]);
   }
 
-  async function claim({ clientOrderId, strategyId, stateVersion, gridTag, side, requestedCashQuantity }) {
+  async function claim({
+    clientOrderId,
+    strategyId,
+    instrument = DEFAULT_INSTRUMENT,
+    stateVersion,
+    gridTag,
+    side,
+    requestedCashQuantity
+  }) {
     const id = requiredText("clientOrderId", clientOrderId, 64);
     const strategy = requiredText("strategyId", strategyId, 128);
+    const activeInstrument = instrumentSymbol(instrument);
     const version = nonNegativeInteger("stateVersion", stateVersion);
     const tag = requiredText("gridTag", gridTag, 16);
-    if (!/^(BUY|SELL)[1-3]$/.test(tag)) throw new TypeError("gridTag is invalid");
+    if (!/^(BUY|SELL)[1-9][0-9]*$/.test(tag)) throw new TypeError("gridTag is invalid");
     const normalizedSide = requiredText("side", side, 8).toUpperCase();
     if (normalizedSide !== "BUY" && normalizedSide !== "SELL") throw new TypeError("side must be BUY or SELL");
     const cash = positive("requestedCashQuantity", requestedCashQuantity);
@@ -125,11 +164,11 @@ export function createExecutionLedger({ query }) {
     try {
       const result = await run(
         `INSERT INTO execution_orders (
-           client_order_id, strategy_id, state_version, grid_tag, side,
+           client_order_id, strategy_id, instrument, state_version, grid_tag, side,
            requested_cash_quantity, status
-         ) VALUES ($1,$2,$3,$4,$5,$6,'CLAIMED')
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'CLAIMED')
          RETURNING *`,
-        [id, strategy, version, tag, normalizedSide, cash]
+        [id, strategy, activeInstrument, version, tag, normalizedSide, cash]
       );
       if (result?.rowCount !== 1) throw new Error("execution order claim did not return one row");
       return normalizeRow(result.rows[0]);
