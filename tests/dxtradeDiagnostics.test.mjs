@@ -29,3 +29,21 @@ test("redacts unsafe API codes", () => {
     "\nDXtrade diagnostic: category=BAD_REQUEST http=400 api=REDACTED"
   );
 });
+
+test("classifies blocked redirects without exposing the redirect target", () => {
+  const cause = new Error("unexpected redirect to https://secret.example/path");
+  const error = new Error("DXtrade request failed", { cause });
+  const diagnostic = formatDxtradeAccountDiagnostic(error);
+  assert.equal(diagnostic, "\nDXtrade diagnostic: category=REDIRECT_BLOCKED http=NONE api=NONE");
+  assert.equal(diagnostic.includes("secret.example"), false);
+});
+
+test("classifies DNS failures", () => {
+  const cause = new Error("getaddrinfo ENOTFOUND");
+  cause.code = "ENOTFOUND";
+  const error = new Error("DXtrade request failed", { cause });
+  assert.equal(
+    formatDxtradeAccountDiagnostic(error),
+    "\nDXtrade diagnostic: category=DNS_ERROR http=NONE api=NONE"
+  );
+});
