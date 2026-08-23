@@ -56,13 +56,11 @@ function requireExecution(execution) {
 export function createGridRuntime({
   stateStore,
   getRiskSnapshot,
-  quantityForIntent,
   execution,
   addEvent = async () => {}
 }) {
   const store = requireStore(stateStore);
   const riskSnapshot = requireFunction("getRiskSnapshot", getRiskSnapshot);
-  const sizeIntent = requireFunction("quantityForIntent", quantityForIntent);
   const executor = requireExecution(execution);
   const audit = requireFunction("addEvent", addEvent);
 
@@ -93,8 +91,6 @@ export function createGridRuntime({
       throw new Error("risk snapshot provider returned an invalid snapshot");
     }
 
-    // Account protection is checked on every market update, even when there is no
-    // grid entry/exit intent. Protective action always has first precedence.
     const risk = evaluateGridRisk({
       ...snapshot,
       proposedAdditionalNotional: intent?.usd ?? 0
@@ -137,12 +133,7 @@ export function createGridRuntime({
       return Object.freeze({ status: "BLOCKED", risk, state, intent });
     }
 
-    const quantity = await sizeIntent(Object.freeze({ intent, state, trade, risk }));
-    if (typeof quantity !== "number" || !Number.isFinite(quantity) || quantity <= 0) {
-      throw new Error("quantityForIntent must return a positive finite quantity");
-    }
-
-    const result = await executor.executeGridIntent({ intent, quantity });
+    const result = await executor.executeGridIntent({ intent });
     if (result.status !== "FILLED") {
       await audit("WARN", "GRID_INTENT_NOT_FILLED", {
         tag: intent.tag,
