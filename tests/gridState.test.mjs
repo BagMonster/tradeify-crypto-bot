@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { createInitialGridState, applyConfirmedGridFill, evaluateGridIntent } from "../src/strategies/grid.js";
 import { createPostgresGridStateStore, GridStateConflictError } from "../src/state/gridState.js";
 
-function rowFromState(state) {
+function rowFromState(state, strategyId = "btc-progressive-reference-reset-grid-v1", instrument = "BTC/USD") {
   return {
+    strategy_id: strategyId,
+    instrument,
     state_version: String(state.version),
     reference_price: String(state.referencePrice),
     buy_count: state.buyCount,
@@ -17,16 +19,21 @@ function rowFromState(state) {
   };
 }
 
+function migrationQuery(sql) {
+  return sql.startsWith("ALTER TABLE") || sql.startsWith("UPDATE grid_state SET strategy_id") ||
+    sql.startsWith("UPDATE grid_state SET instrument");
+}
+
 test("Postgres grid store initializes and loads a restart-safe state", async () => {
   let stored = null;
   const query = async (sql, params = []) => {
-    if (sql.trimStart().startsWith("CREATE TABLE")) return { rowCount: 0, rows: [] };
+    if (sql.trimStart().startsWith("CREATE TABLE") || migrationQuery(sql)) return { rowCount: 0, rows: [] };
     if (sql.startsWith("INSERT INTO grid_state")) {
       if (!stored) {
         stored = rowFromState({
-          version: params[0], referencePrice: params[1], buyCount: params[2], buyPtr: params[3],
-          sellCount: params[4], sellPtr: params[5], lastFillAt: params[6], lastFillSide: params[7], lastFillPrice: params[8]
-        });
+          version: params[2], referencePrice: params[3], buyCount: params[4], buyPtr: params[5],
+          sellCount: params[6], sellPtr: params[7], lastFillAt: params[8], lastFillSide: params[9], lastFillPrice: params[10]
+        }, params[0], params[1]);
       }
       return { rowCount: 1, rows: [] };
     }
@@ -42,6 +49,20 @@ test("Postgres grid store initializes and loads a restart-safe state", async () 
   assert.equal(state.referencePrice, 70_000);
   assert.equal(state.version, 0);
   assert.deepEqual(await store.load(), state);
+});
+
+test("a SOL strategy does not load a persisted BTC reference", async () => {
+  const btcRow = rowFromState(createInitialGridState(70_000));
+  const store = createPostgresGridStateStore({
+    strategyId: "sol-statistical-grid-v1",
+    instrument: "SOL/USD",
+    query: async (sql) => {
+      if (sql === "SELECT * FROM grid_state WHERE id = 1") return { rowCount: 1, rows: [btcRow] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  });
+  assert.equal(await store.load(), null);
+  assert.deepEqual(store.getIdentity(), { strategyId: "sol-statistical-grid-v1", instrument: "SOL/USD" });
 });
 
 test("Postgres grid store uses optimistic versioning to reject stale writers", async () => {
