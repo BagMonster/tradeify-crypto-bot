@@ -1,0 +1,162 @@
+name: Export SOLUSDT 5m statistician dataset
+
+on:
+  push:
+    branches:
+      - data/solusdt-5m-statistician
+    paths:
+      - .github/workflows/export-solusdt-5m.yml
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: data/solusdt-5m-statistician
+
+      - name: Build exact 365-day SOLUSDT 5m OHLCV CSV
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import hashlib
+          import io
+          import os
+          import time
+          import urllib.request
+          import zipfile
+          from datetime import datetime, timezone
+
+          SYMBOL = "SOLUSDT"
+          INTERVAL = "5m"
+          START_ISO = "2025-08-22T00:00:00Z"
+          END_EXCLUSIVE_ISO = "2026-08-22T00:00:00Z"
+          START_MS = int(datetime.fromisoformat(START_ISO.replace("Z", "+00:00")).timestamp() * 1000)
+          END_MS = int(datetime.fromisoformat(END_EXCLUSIVE_ISO.replace("Z", "+00:00")).timestamp() * 1000)
+          EXPECTED_ROWS = 365 * 24 * 12
+          STEP_MS = 5 * 60 * 1000
+
+          out_dir = "research-data"
+          os.makedirs(out_dir, exist_ok=True)
+          out_path = os.path.join(out_dir, "SOLUSDT_5m_2025-08-22_to_2026-08-21.csv")
+
+          def fetch_bytes(url, attempts=4):
+              last = None
+              for attempt in range(1, attempts + 1):
+                  try:
+                      req = urllib.request.Request(url, headers={"User-Agent": "tradeify-research-export/1.0"})
+                      with urllib.request.urlopen(req, timeout=60) as response:
+                          return response.read()
+                  except Exception as exc:
+                      last = exc
+                      if attempt < attempts:
+                          time.sleep(attempt * 2)
+              raise RuntimeError(f"Download failed after {attempts} attempts: {url}: {last}")
+
+          def normalize_ms(raw):
+              value = int(raw)
+              # Binance Vision spot archives use microseconds for newer files.
+              if value > 10**14:
+                  value //= 1000
+              return value
+
+          def rows_from_zip(url):
+              payload = fetch_bytes(url)
+              with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+                  names = [name for name in zf.namelist() if not name.endswith("/")]
+                  if len(names) != 1:
+                      raise RuntimeError(f"Unexpected ZIP contents for {url}: {names}")
+                  with zf.open(names[0]) as fh:
+                      text = io.TextIOWrapper(fh, encoding="utf-8", newline="")
+                      for row in csv.reader(text):
+                          if not row:
+                              continue
+                          # Binance Vision kline archives have 12 columns and no header.
+                          if row[0] == "open_time":
+                              continue
+                          if len(row) < 6:
+                              raise RuntimeError(f"Malformed row in {url}: {row}")
+                          open_ms = normalize_ms(row[0])
+                          if START_MS <= open_ms < END_MS:
+                              yield (open_ms, row[1], row[2], row[3], row[4], row[5])
+
+          urls = []
+          # Monthly archives: Aug 2025 through Jul 2026.
+          year, month = 2025, 8
+          while (year, month) <= (2026, 7):
+              urls.append(
+                  f"https://data.binance.vision/data/spot/monthly/klines/{SYMBOL}/{INTERVAL}/"
+                  f"{SYMBOL}-{INTERVAL}-{year:04d}-{month:02d}.zip"
+              )
+              month += 1
+              if month == 13:
+                  year += 1
+                  month = 1
+
+          # Current incomplete month: daily archives through the last complete UTC day, Aug 21.
+          for day in range(1, 22):
+              urls.append(
+                  f"https://data.binance.vision/data/spot/daily/klines/{SYMBOL}/{INTERVAL}/"
+                  f"{SYMBOL}-{INTERVAL}-2026-08-{day:02d}.zip"
+              )
+
+          candles = {}
+          for index, url in enumerate(urls, start=1):
+              print(f"[{index}/{len(urls)}] {url}")
+              for candle in rows_from_zip(url):
+                  candles[candle[0]] = candle
+
+          ordered = [candles[key] for key in sorted(candles)]
+          if len(ordered) != EXPECTED_ROWS:
+              raise RuntimeError(f"Expected {EXPECTED_ROWS} rows, got {len(ordered)}")
+          if ordered[0][0] != START_MS:
+              raise RuntimeError(f"First candle mismatch: {ordered[0][0]} != {START_MS}")
+          if ordered[-1][0] != END_MS - STEP_MS:
+              raise RuntimeError(f"Last candle mismatch: {ordered[-1][0]} != {END_MS - STEP_MS}")
+
+          previous = None
+          for candle in ordered:
+              if previous is not None and candle[0] - previous != STEP_MS:
+                  raise RuntimeError(f"Gap or duplicate between {previous} and {candle[0]}")
+              previous = candle[0]
+
+          with open(out_path, "w", newline="", encoding="utf-8") as fh:
+              writer = csv.writer(fh)
+              writer.writerow(["timestamp_utc", "open", "high", "low", "close", "volume", "symbol", "source"])
+              for open_ms, o, h, l, c, v in ordered:
+                  timestamp = datetime.fromtimestamp(open_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                  writer.writerow([timestamp, o, h, l, c, v, SYMBOL, "binance-spot"])
+
+          digest = hashlib.sha256(open(out_path, "rb").read()).hexdigest()
+          with open(out_path + ".sha256", "w", encoding="utf-8") as fh:
+              fh.write(f"{digest}  {os.path.basename(out_path)}\n")
+
+          print(f"Created {out_path}")
+          print(f"Rows: {len(ordered)}")
+          print(f"First: {ordered[0][0]}")
+          print(f"Last: {ordered[-1][0]}")
+          print(f"SHA256: {digest}")
+          PY
+
+      - name: Commit generated dataset to isolated data branch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add research-data/SOLUSDT_5m_2025-08-22_to_2026-08-21.csv research-data/SOLUSDT_5m_2025-08-22_to_2026-08-21.csv.sha256
+          git commit -m "Add SOLUSDT 5m statistician dataset [skip ci]"
+          git push origin HEAD:data/solusdt-5m-statistician
+
+      - name: Upload downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SOLUSDT-5m-365d-statistician
+          path: |
+            research-data/SOLUSDT_5m_2025-08-22_to_2026-08-21.csv
+            research-data/SOLUSDT_5m_2025-08-22_to_2026-08-21.csv.sha256
+          retention-days: 30
