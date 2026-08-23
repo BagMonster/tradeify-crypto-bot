@@ -1,0 +1,172 @@
+import {
+  applyConfirmedGridFill,
+  createInitialGridState,
+  evaluateGridIntent,
+  resetGridAfterProtectiveFlatten
+} from "../strategies/grid.js";
+import { evaluateGridRisk } from "../risk/accountRules.js";
+
+function requireFunction(name, value) {
+  if (typeof value !== "function") throw new TypeError(`${name} must be a function`);
+  return value;
+}
+
+function canonicalUtc(name, value) {
+  if (typeof value !== "string") throw new TypeError(`${name} must be a canonical UTC timestamp`);
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString() !== value) {
+    throw new TypeError(`${name} must be a canonical UTC timestamp`);
+  }
+  return value;
+}
+
+function normalizeTrade(trade) {
+  if (!trade || typeof trade !== "object" || Array.isArray(trade)) {
+    throw new TypeError("market trade must be an object");
+  }
+  if (trade.source !== "binance" || trade.symbol !== "BTCUSDT") {
+    throw new TypeError("grid runtime accepts only Binance BTCUSDT trades");
+  }
+  if (typeof trade.price !== "number" || !Number.isFinite(trade.price) || trade.price <= 0) {
+    throw new TypeError("market trade price must be a positive finite number");
+  }
+  return Object.freeze({
+    source: trade.source,
+    symbol: trade.symbol,
+    price: trade.price,
+    tradeTime: canonicalUtc("market trade time", trade.tradeTime)
+  });
+}
+
+function requireStore(store) {
+  for (const method of ["init", "load", "initializeIfMissing", "save"]) {
+    if (typeof store?.[method] !== "function") throw new TypeError(`stateStore.${method} must be a function`);
+  }
+  return store;
+}
+
+function requireExecution(execution) {
+  if (typeof execution?.executeGridIntent !== "function" ||
+      typeof execution?.executeProtectiveFlatten !== "function") {
+    throw new TypeError("execution must provide executeGridIntent and executeProtectiveFlatten");
+  }
+  return execution;
+}
+
+export function createGridRuntime({
+  stateStore,
+  getRiskSnapshot,
+  quantityForIntent,
+  execution,
+  addEvent = async () => {}
+}) {
+  const store = requireStore(stateStore);
+  const riskSnapshot = requireFunction("getRiskSnapshot", getRiskSnapshot);
+  const sizeIntent = requireFunction("quantityForIntent", quantityForIntent);
+  const executor = requireExecution(execution);
+  const audit = requireFunction("addEvent", addEvent);
+
+  async function initialize(referencePrice) {
+    if (typeof referencePrice !== "number" || !Number.isFinite(referencePrice) || referencePrice <= 0) {
+      throw new TypeError("initial grid reference price must be a positive finite number");
+    }
+    await store.init();
+    const existing = await store.load();
+    if (existing) return existing;
+    const created = createInitialGridState(referencePrice);
+    const stored = await store.initializeIfMissing(created);
+    await audit("INFO", "GRID_STATE_INITIALIZED", {
+      referencePrice: stored.referencePrice,
+      version: stored.version
+    });
+    return stored;
+  }
+
+  async function processTrade(inputTrade) {
+    const trade = normalizeTrade(inputTrade);
+    const state = await store.load();
+    if (!state) throw new Error("grid state is not initialized");
+
+    const intent = evaluateGridIntent(state, trade.price);
+    const snapshot = await riskSnapshot(Object.freeze({ state, trade, intent }));
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+      throw new Error("risk snapshot provider returned an invalid snapshot");
+    }
+
+    // Account protection is checked on every market update, even when there is no
+    // grid entry/exit intent. Protective action always has first precedence.
+    const risk = evaluateGridRisk({
+      ...snapshot,
+      proposedAdditionalNotional: intent?.usd ?? 0
+    });
+
+    if (risk.protectiveAction === "FLATTEN_AND_LOCK") {
+      const result = await executor.executeProtectiveFlatten({ reason: risk.reason });
+      if (result.status !== "FILLED") {
+        await audit("ERROR", "GRID_PROTECTIVE_ACTION_UNCONFIRMED", {
+          reason: risk.reason,
+          result: result.status
+        });
+        return Object.freeze({ status: "PROTECTIVE_PENDING", risk, state, intent: null });
+      }
+
+      const nextState = resetGridAfterProtectiveFlatten(state, {
+        fillPrice: result.fillPrice,
+        filledAt: result.filledAt
+      });
+      const saved = await store.save(state.version, nextState);
+      await audit("WARN", "GRID_PROTECTIVE_ACTION_APPLIED", {
+        reason: risk.reason,
+        fillPrice: result.fillPrice,
+        stateVersion: saved.version
+      });
+      return Object.freeze({ status: "PROTECTIVE_FILLED", risk, state: saved, intent: null });
+    }
+
+    if (!intent) {
+      return Object.freeze({ status: "NO_INTENT", risk, state, intent: null });
+    }
+
+    if (!risk.allowNewGridAction) {
+      await audit("INFO", "GRID_INTENT_BLOCKED", {
+        tag: intent.tag,
+        side: intent.side,
+        reason: risk.reason,
+        stateVersion: state.version
+      });
+      return Object.freeze({ status: "BLOCKED", risk, state, intent });
+    }
+
+    const quantity = await sizeIntent(Object.freeze({ intent, state, trade, risk }));
+    if (typeof quantity !== "number" || !Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error("quantityForIntent must return a positive finite quantity");
+    }
+
+    const result = await executor.executeGridIntent({ intent, quantity });
+    if (result.status !== "FILLED") {
+      await audit("WARN", "GRID_INTENT_NOT_FILLED", {
+        tag: intent.tag,
+        side: intent.side,
+        result: result.status,
+        stateVersion: state.version
+      });
+      return Object.freeze({ status: result.status, risk, state, intent });
+    }
+
+    const nextState = applyConfirmedGridFill(state, intent, {
+      fillPrice: result.fillPrice,
+      filledAt: result.filledAt
+    });
+    const saved = await store.save(state.version, nextState);
+    await audit("INFO", "GRID_FILL_APPLIED", {
+      tag: intent.tag,
+      side: intent.side,
+      orderCode: result.orderCode ?? null,
+      fillPrice: result.fillPrice,
+      stateVersion: saved.version
+    });
+    return Object.freeze({ status: "FILLED", risk, state: saved, intent, execution: result });
+  }
+
+  return Object.freeze({ initialize, processTrade });
+}
