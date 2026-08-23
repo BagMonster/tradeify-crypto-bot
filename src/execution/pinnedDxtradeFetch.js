@@ -1,7 +1,7 @@
-const REQUIRED_HOSTNAME = "dx.tradeifycrypto.co";
-const REQUIRED_BASE_PATH = "/dxsca-web";
+const PRIMARY_HOSTNAME = "dx.tradeifycrypto.co";
+const PROVIDER_DOMAIN_SUFFIX = ".tradeifycrypto.co";
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
-const DEFAULT_MAX_REDIRECTS = 3;
+const DEFAULT_MAX_REDIRECTS = 5;
 
 function requireFetch(fetchImpl) {
   if (typeof fetchImpl !== "function") throw new TypeError("A fetch implementation is required");
@@ -9,23 +9,26 @@ function requireFetch(fetchImpl) {
 }
 
 function requireMaxRedirects(value) {
-  if (!Number.isInteger(value) || value < 0 || value > 5) {
-    throw new TypeError("maxRedirects must be an integer from 0 to 5");
+  if (!Number.isInteger(value) || value < 0 || value > 10) {
+    throw new TypeError("maxRedirects must be an integer from 0 to 10");
   }
   return value;
 }
 
-function pinnedUrl(input) {
+function isTradeifyCryptoHost(hostname) {
+  return hostname === PRIMARY_HOSTNAME || hostname.endsWith(PROVIDER_DOMAIN_SUFFIX);
+}
+
+function providerUrl(input) {
   const url = input instanceof URL ? new URL(input.toString()) : new URL(String(input));
   if (
     url.protocol !== "https:" ||
-    url.hostname !== REQUIRED_HOSTNAME ||
+    !isTradeifyCryptoHost(url.hostname) ||
     url.port !== "" ||
     url.username ||
-    url.password ||
-    (url.pathname !== REQUIRED_BASE_PATH && !url.pathname.startsWith(`${REQUIRED_BASE_PATH}/`))
+    url.password
   ) {
-    throw new Error("Unexpected redirect outside the pinned DXtrade REST origin");
+    throw new Error("Unexpected redirect outside the Tradeify Crypto HTTPS domain");
   }
   url.hash = "";
   return url;
@@ -48,7 +51,7 @@ export function createPinnedDxtradeFetch({
   const redirectLimit = requireMaxRedirects(maxRedirects);
 
   return async function pinnedDxtradeFetch(input, init = {}) {
-    let url = pinnedUrl(input);
+    let url = providerUrl(input);
     let redirectCount = 0;
 
     while (true) {
@@ -63,15 +66,14 @@ export function createPinnedDxtradeFetch({
         throw new Error("Unexpected redirect limit exceeded for DXtrade REST request");
       }
 
-      const nextUrl = pinnedUrl(new URL(location, url));
-      url = nextUrl;
+      url = providerUrl(new URL(location, url));
       redirectCount += 1;
     }
   };
 }
 
 export const DXTRADE_REDIRECT_POLICY = Object.freeze({
-  hostname: REQUIRED_HOSTNAME,
-  basePath: REQUIRED_BASE_PATH,
+  primaryHostname: PRIMARY_HOSTNAME,
+  providerDomainSuffix: PROVIDER_DOMAIN_SUFFIX,
   maxRedirects: DEFAULT_MAX_REDIRECTS
 });
