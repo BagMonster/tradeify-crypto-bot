@@ -5,6 +5,7 @@ import { DxtradeExecutionClient } from "./src/execution/dxtradeExecutionClient.j
 import { createDxtradeOrderAdapter } from "./src/execution/dxtradeOrderAdapter.js";
 import { createGuardedExecution } from "./src/execution/orderGuard.js";
 import { createDxtradeAccountMonitor } from "./src/account/dxtradeAccountMonitor.js";
+import { formatDxtradeAccountDiagnostic } from "./src/account/dxtradeDiagnostics.js";
 import { createGridRuntime } from "./src/runtime/gridRuntime.js";
 import { createTradeifyService } from "./src/tradeifyService.js";
 import { startTelegramBot } from "./src/telegramBot.js";
@@ -49,10 +50,12 @@ const accountMonitor = createDxtradeAccountMonitor({
     accountErrorLogged = false;
     await database.syncAccountSnapshot(snapshot, account);
   },
-  onError: () => {
+  onError: (error) => {
     if (!accountErrorLogged) {
       accountErrorLogged = true;
-      console.error("DXtrade account state is unavailable; new grid actions remain blocked.");
+      console.error(
+        `DXtrade account state is unavailable; new grid actions remain blocked. ${formatDxtradeAccountDiagnostic(error)}`
+      );
     }
   }
 });
