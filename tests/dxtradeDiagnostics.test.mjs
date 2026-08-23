@@ -7,7 +7,7 @@ test("classifies HTTP authentication failure without leaking message content", (
   error.status = 401;
   error.apiCode = "AUTH_FAILED";
   const diagnostic = formatDxtradeAccountDiagnostic(error);
-  assert.equal(diagnostic, "category=AUTHENTICATION_REJECTED http=401 api=AUTH_FAILED");
+  assert.equal(diagnostic, "\nDXtrade diagnostic: category=AUTHENTICATION_REJECTED http=401 api=AUTH_FAILED");
   assert.equal(diagnostic.includes("secret-user"), false);
   assert.equal(diagnostic.includes("secret-pass"), false);
   assert.equal(diagnostic.includes("SECRET-ACCOUNT"), false);
@@ -16,7 +16,7 @@ test("classifies HTTP authentication failure without leaking message content", (
 test("classifies invalid metrics payload without returning raw remote text", () => {
   const error = new Error("DXtrade account metrics response must contain a metrics array; token=super-secret");
   const diagnostic = formatDxtradeAccountDiagnostic(error);
-  assert.equal(diagnostic, "category=METRICS_RESPONSE_INVALID http=NONE api=NONE");
+  assert.equal(diagnostic, "\nDXtrade diagnostic: category=METRICS_RESPONSE_INVALID http=NONE api=NONE");
   assert.equal(diagnostic.includes("super-secret"), false);
 });
 
@@ -26,6 +26,6 @@ test("redacts unsafe API codes", () => {
   error.apiCode = "bad code account=123";
   assert.equal(
     formatDxtradeAccountDiagnostic(error),
-    "category=BAD_REQUEST http=400 api=REDACTED"
+    "\nDXtrade diagnostic: category=BAD_REQUEST http=400 api=REDACTED"
   );
 });
