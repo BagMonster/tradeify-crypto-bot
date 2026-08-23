@@ -11,6 +11,13 @@ function requireFunction(name, value) {
   return value;
 }
 
+function requireMinimumHoldSeconds(value) {
+  if (!Number.isInteger(value) || value < 25 || value > 300) {
+    throw new TypeError("minimumHoldSeconds must be an integer from 25 to 300");
+  }
+  return value;
+}
+
 function canonicalUtc(name, value) {
   if (typeof value !== "string") throw new TypeError(`${name} must be a canonical UTC timestamp`);
   const ms = Date.parse(value);
@@ -53,15 +60,29 @@ function requireExecution(execution) {
   return execution;
 }
 
+function entryHoldStatus(state, tradeTime, minimumHoldSeconds) {
+  if ((state.lastFillSide !== "BUY" && state.lastFillSide !== "SELL") || !state.lastFillAt) {
+    return Object.freeze({ allowed: true, remainingMs: 0 });
+  }
+  const elapsedMs = Date.parse(tradeTime) - Date.parse(state.lastFillAt);
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) {
+    return Object.freeze({ allowed: false, remainingMs: minimumHoldSeconds * 1000 });
+  }
+  const requiredMs = minimumHoldSeconds * 1000;
+  return Object.freeze({ allowed: elapsedMs >= requiredMs, remainingMs: Math.max(0, requiredMs - elapsedMs) });
+}
+
 export function createGridRuntime({
   stateStore,
   getRiskSnapshot,
   execution,
+  minimumHoldSeconds = 25,
   addEvent = async () => {}
 }) {
   const store = requireStore(stateStore);
   const riskSnapshot = requireFunction("getRiskSnapshot", getRiskSnapshot);
   const executor = requireExecution(execution);
+  const holdSeconds = requireMinimumHoldSeconds(minimumHoldSeconds);
   const audit = requireFunction("addEvent", addEvent);
 
   async function initialize(referencePrice) {
@@ -131,6 +152,18 @@ export function createGridRuntime({
         stateVersion: state.version
       });
       return Object.freeze({ status: "BLOCKED", risk, state, intent });
+    }
+
+    const hold = entryHoldStatus(state, trade.tradeTime, holdSeconds);
+    if (!hold.allowed) {
+      const reason = `Minimum ${holdSeconds}-second grid-entry hold is still active`;
+      await audit("INFO", "GRID_INTENT_BLOCKED_MIN_HOLD", {
+        tag: intent.tag,
+        side: intent.side,
+        stateVersion: state.version,
+        remainingMs: hold.remainingMs
+      });
+      return Object.freeze({ status: "BLOCKED", risk, state, intent, reason });
     }
 
     const result = await executor.executeGridIntent({ intent });
