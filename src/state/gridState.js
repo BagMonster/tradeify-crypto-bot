@@ -97,12 +97,18 @@ export function createPostgresGridStateStore({
   instrument = DEFAULT_INSTRUMENT
 }) {
   const run = requireQuery(query);
-  const activeStrategyId = requiredText("grid strategyId", strategyId, 128);
-  const activeInstrument = instrumentSymbol(instrument);
+  let activeStrategyId = requiredText("grid strategyId", strategyId, 128);
+  let activeInstrument = instrumentSymbol(instrument);
 
   async function init() {
     await run(GRID_STATE_SCHEMA_SQL);
     for (const statement of GRID_STATE_MIGRATION_SQL) await run(statement);
+  }
+
+  function setIdentity({ strategyId: nextStrategyId, instrument: nextInstrument }) {
+    activeStrategyId = requiredText("grid strategyId", nextStrategyId, 128);
+    activeInstrument = instrumentSymbol(nextInstrument);
+    return getIdentity();
   }
 
   async function load() {
@@ -189,5 +195,5 @@ export function createPostgresGridStateStore({
     return Object.freeze({ strategyId: activeStrategyId, instrument: activeInstrument });
   }
 
-  return Object.freeze({ init, load, initializeIfMissing, save, clearForStrategyTransition, getIdentity });
+  return Object.freeze({ init, setIdentity, load, initializeIfMissing, save, clearForStrategyTransition, getIdentity });
 }
