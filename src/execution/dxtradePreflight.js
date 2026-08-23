@@ -1,0 +1,136 @@
+const BTC_INSTRUMENT = "BTC/USD";
+const CASH_PROBES = Object.freeze([0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250]);
+const GRID_FIRST_CASH = 250;
+const VALIDATION_DELAY_MS = 1250;
+
+function positiveFinite(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function safeCode(value) {
+  if (value === null || value === undefined || value === "") return "NONE";
+  const text = String(value).slice(0, 48);
+  return /^[A-Za-z0-9._-]+$/.test(text) ? text : "REDACTED";
+}
+
+function validationFailure(error) {
+  return Object.freeze({
+    ok: false,
+    http: Number.isInteger(error?.status) ? error.status : null,
+    api: safeCode(error?.apiCode)
+  });
+}
+
+function collectMinimumHints(value, path = [], results = [], depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return results;
+
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectMinimumHints(item, [...path, String(index)], results, depth + 1));
+    return results;
+  }
+
+  if (typeof value !== "object") return results;
+
+  for (const [key, child] of Object.entries(value)) {
+    const nextPath = [...path, key];
+    const normalizedKey = key.toLowerCase();
+    const number = positiveFinite(child);
+    const looksMinimum = normalizedKey.includes("min") || normalizedKey.includes("minimum");
+    const looksOrderRelated = /(order|size|quantity|qty|cash|notional|lot|amount)/i.test(nextPath.join("."));
+
+    if (number !== null && looksMinimum && looksOrderRelated) {
+      results.push(Object.freeze({ path: nextPath.join("."), value: number }));
+    } else if (child && typeof child === "object") {
+      collectMinimumHints(child, nextPath, results, depth + 1);
+    }
+  }
+
+  return results;
+}
+
+async function defaultWait(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function orderCode(amount, side, nonce) {
+  const amountCode = String(amount).replace(".", "p");
+  return `PREFLIGHT-${nonce}-${side}-${amountCode}`.slice(0, 64);
+}
+
+async function validateCash({ client, amount, side, nonce }) {
+  try {
+    await client.validateMarketCashOrder({
+      clientOrderId: orderCode(amount, side, nonce),
+      orderSide: side,
+      cashQuantity: amount
+    });
+    return Object.freeze({ amount, side, ok: true, http: 200, api: "NONE" });
+  } catch (error) {
+    return Object.freeze({ amount, side, ...validationFailure(error) });
+  }
+}
+
+export async function runDxtradePreflight({ client, wait = defaultWait } = {}) {
+  if (!client || typeof client !== "object") throw new TypeError("DXtrade client is required");
+  if (typeof client.login !== "function") throw new TypeError("DXtrade client.login is required");
+  if (typeof client.validateMarketCashOrder !== "function") {
+    throw new TypeError("DXtrade client.validateMarketCashOrder is required");
+  }
+  if (typeof wait !== "function") throw new TypeError("wait must be a function");
+
+  await client.login();
+
+  let instrumentHints = [];
+  let instrumentSettingsAvailable = false;
+  if (typeof client.getAccountInstrumentSettings === "function") {
+    try {
+      const settings = await client.getAccountInstrumentSettings(BTC_INSTRUMENT);
+      instrumentSettingsAvailable = true;
+      instrumentHints = collectMinimumHints(settings).slice(0, 6);
+    } catch {
+      instrumentSettingsAvailable = false;
+    }
+  }
+
+  const nonce = Date.now().toString(36);
+  const buyResults = [];
+  let smallestPassingCash = null;
+
+  for (const amount of CASH_PROBES) {
+    if (buyResults.length > 0) await wait(VALIDATION_DELAY_MS);
+    const result = await validateCash({ client, amount, side: "BUY", nonce });
+    buyResults.push(result);
+    if (result.ok) {
+      smallestPassingCash = amount;
+      break;
+    }
+  }
+
+  let gridBuy = buyResults.find((item) => item.amount === GRID_FIRST_CASH) ?? null;
+  if (!gridBuy) {
+    if (buyResults.length > 0) await wait(VALIDATION_DELAY_MS);
+    gridBuy = await validateCash({ client, amount: GRID_FIRST_CASH, side: "BUY", nonce });
+  }
+
+  await wait(VALIDATION_DELAY_MS);
+  const gridSell = await validateCash({ client, amount: GRID_FIRST_CASH, side: "SELL", nonce });
+
+  return Object.freeze({
+    instrument: BTC_INSTRUMENT,
+    validationOnly: true,
+    instrumentSettingsAvailable,
+    instrumentHints: Object.freeze(instrumentHints),
+    probes: Object.freeze(buyResults),
+    smallestPassingCash,
+    gridBuy,
+    gridSell
+  });
+}
+
+export const DXTRADE_PREFLIGHT_POLICY = Object.freeze({
+  instrument: BTC_INSTRUMENT,
+  cashProbes: CASH_PROBES,
+  gridFirstCash: GRID_FIRST_CASH,
+  validationDelayMs: VALIDATION_DELAY_MS
+});
