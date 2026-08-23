@@ -25,7 +25,7 @@ test("execution stays blocked unless both locks are true", async () => {
       placeMarketOrder: async () => { calls += 1; },
       flattenPosition: async () => { calls += 1; }
     });
-    const result = await execution.executeGridIntent({ intent: INTENT, quantity: 0.003 });
+    const result = await execution.executeGridIntent({ intent: INTENT });
     assert.equal(result.status, "BLOCKED");
     assert.equal(execution.isEnabled(), false);
   }
@@ -37,14 +37,31 @@ test("deterministic order code binds to state version and grid level", () => {
   assert.equal(gridOrderCode({ ...INTENT, stateVersion: 4, side: "SELL", tag: "SELL2" }), "GRID-4-SELL2");
 });
 
+test("execution passes the exact frozen dollar size as cashQuantity", async () => {
+  let submitted;
+  const execution = createGuardedExecution({
+    autoExecute: true,
+    strategyAutoExecute: true,
+    placeMarketOrder: async (request) => {
+      submitted = request;
+      return { confirmed: false, status: "PENDING" };
+    },
+    flattenPosition: async () => ({ confirmed: false })
+  });
+  await execution.executeGridIntent({ intent: INTENT });
+  assert.equal(submitted.instrument, "BTC/USD");
+  assert.equal(submitted.cashQuantity, 250);
+  assert.equal(Object.hasOwn(submitted, "quantity"), false);
+});
+
 test("broker acknowledgement without confirmed fill never counts as filled", async () => {
   const execution = createGuardedExecution({
     autoExecute: true,
     strategyAutoExecute: true,
-    placeMarketOrder: async ({ orderCode }) => ({ confirmed: false, orderCode }),
+    placeMarketOrder: async ({ orderCode }) => ({ confirmed: false, orderCode, status: "PENDING" }),
     flattenPosition: async () => ({ confirmed: false })
   });
-  const result = await execution.executeGridIntent({ intent: INTENT, quantity: 0.003 });
+  const result = await execution.executeGridIntent({ intent: INTENT });
   assert.equal(result.status, "NOT_CONFIRMED");
 });
 
@@ -61,10 +78,26 @@ test("confirmed fill is returned only with matching order identity, price, and t
     }),
     flattenPosition: async () => ({ confirmed: false })
   });
-  const result = await execution.executeGridIntent({ intent: INTENT, quantity: 0.003 });
+  const result = await execution.executeGridIntent({ intent: INTENT });
   assert.equal(result.status, "FILLED");
   assert.equal(result.orderCode, "GRID-0-BUY1");
   assert.equal(result.fillPrice, 67195.25);
+});
+
+test("partial broker fill is surfaced and never advances as filled", async () => {
+  const execution = createGuardedExecution({
+    autoExecute: true,
+    strategyAutoExecute: true,
+    placeMarketOrder: async ({ orderCode }) => ({
+      confirmed: false,
+      orderCode,
+      status: "PARTIAL",
+      reason: "Incomplete broker fill"
+    }),
+    flattenPosition: async () => ({ confirmed: false })
+  });
+  const result = await execution.executeGridIntent({ intent: INTENT });
+  assert.equal(result.status, "PARTIAL");
 });
 
 test("mismatched broker order identity fails closed", async () => {
@@ -80,7 +113,7 @@ test("mismatched broker order identity fails closed", async () => {
     flattenPosition: async () => ({ confirmed: false })
   });
   await assert.rejects(
-    execution.executeGridIntent({ intent: INTENT, quantity: 0.003 }),
+    execution.executeGridIntent({ intent: INTENT }),
     /orderCode does not match/i
   );
 });
