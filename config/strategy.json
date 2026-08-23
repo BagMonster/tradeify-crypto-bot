@@ -1,5 +1,6 @@
 {
   "strategyId": "sol-statistical-grid-pending",
+  "strategyType": "reference-reset-grid",
   "strategyStatus": "pending-solana-statistical-grid",
   "instruments": {
     "BTC/USD": {
@@ -9,40 +10,9 @@
       "enabled": true
     }
   },
-  "signal": {
-    "bbPeriod": 20,
-    "bbStdDev": 2,
-    "rsiPeriod": 14,
-    "rsiLongThreshold": 32,
-    "rsiShortThreshold": 68,
-    "requireCloseInsideBand": true,
-    "atrPeriod": 14,
-    "stopAtrMultiple": 1.5,
-    "timeStopBars": 24
-  },
-  "regime": {
-    "minDailyAtrPct": 0.015,
-    "maxDailyAtrPct": 0.037,
-    "adxPeriod": 14,
-    "adxMax": 25,
-    "adxStandDown": 30,
-    "rangeBandStdDev": 2.5
-  },
-  "risk": {
-    "stage1RiskCap": 200,
-    "stage2RiskCap": 300,
-    "stage2Threshold": 53000,
-    "dailySoftStop": -750,
-    "dailyHardStop": -1000,
-    "stage1ProfitCeiling": 500,
-    "stage2ProfitCeiling": 700,
-    "maxNotional": 100000,
-    "floorSafetyMargin": 750
-  },
   "execution": {
     "minHoldSeconds": 25,
     "slippageCapPct": 0.0005,
-    "hardFlatUtc": "21:45",
     "autoExecute": false
   }
 }
