@@ -1,9 +1,21 @@
-const BINANCE_WS_URL = "wss://data-stream.binance.vision/ws/btcusdt@trade";
+const BINANCE_WS_BASE = "wss://data-stream.binance.vision/ws";
 const SOURCE = "binance";
-const SYMBOL = "BTCUSDT";
+const DEFAULT_SYMBOL = "BTCUSDT";
 const DEFAULT_STALE_AFTER_MS = 15_000;
 const DEFAULT_RECONNECT_MIN_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_MS = 30_000;
+
+function marketSymbol(value) {
+  if (typeof value !== "string" || !/^[A-Z0-9]{5,20}$/.test(value)) {
+    throw new TypeError("Binance market symbol must be an uppercase alphanumeric symbol");
+  }
+  return value;
+}
+
+function streamUrl(symbol) {
+  const normalized = marketSymbol(symbol);
+  return `${BINANCE_WS_BASE}/${normalized.toLowerCase()}@trade`;
+}
 
 function safeInteger(name, value, minimum = 0) {
   const number = typeof value === "number" ? value : Number(value);
@@ -21,12 +33,13 @@ function positiveNumber(name, value) {
   return number;
 }
 
-export function normalizeBinanceTrade(message, receivedAtMs = Date.now()) {
+export function normalizeBinanceTrade(message, receivedAtMs = Date.now(), expectedSymbol = DEFAULT_SYMBOL) {
+  const symbol = marketSymbol(expectedSymbol);
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     throw new TypeError("Binance trade message must be an object");
   }
   if (message.e !== "trade") throw new TypeError("Binance message must be a trade event");
-  if (message.s !== SYMBOL) throw new TypeError(`Binance trade symbol must be ${SYMBOL}`);
+  if (message.s !== symbol) throw new TypeError(`Binance trade symbol must be ${symbol}`);
 
   const eventTimeMs = safeInteger("Binance event time", message.E, 1);
   const tradeTimeMs = safeInteger("Binance trade time", message.T, 1);
@@ -37,7 +50,7 @@ export function normalizeBinanceTrade(message, receivedAtMs = Date.now()) {
 
   return Object.freeze({
     source: SOURCE,
-    symbol: SYMBOL,
+    symbol,
     price,
     quantity,
     tradeId,
@@ -59,6 +72,7 @@ function freezeState(state) {
 }
 
 export function createBinanceLiveFeed({
+  symbol = DEFAULT_SYMBOL,
   webSocketImpl = globalThis.WebSocket,
   now = Date.now,
   setTimeoutImpl = setTimeout,
@@ -70,6 +84,8 @@ export function createBinanceLiveFeed({
   onState = () => {},
   onError = () => {}
 } = {}) {
+  const configuredSymbol = marketSymbol(symbol);
+  const configuredUrl = streamUrl(configuredSymbol);
   if (typeof webSocketImpl !== "function") throw new TypeError("A WebSocket implementation is required");
   if (typeof now !== "function" || typeof setTimeoutImpl !== "function" || typeof clearTimeoutImpl !== "function") {
     throw new TypeError("Timer implementations are invalid");
@@ -147,7 +163,7 @@ export function createBinanceLiveFeed({
   function openSocket() {
     if (!state.running) return;
     const thisGeneration = ++generation;
-    const ws = new webSocketImpl(BINANCE_WS_URL);
+    const ws = new webSocketImpl(configuredUrl);
     socket = ws;
 
     ws.addEventListener("open", () => {
@@ -166,7 +182,7 @@ export function createBinanceLiveFeed({
       if (!state.running || thisGeneration !== generation) return;
       try {
         const parsed = typeof event.data === "string" ? JSON.parse(event.data) : JSON.parse(String(event.data));
-        const trade = normalizeBinanceTrade(parsed, now());
+        const trade = normalizeBinanceTrade(parsed, now(), configuredSymbol);
         if (state.lastTradeId !== null && trade.tradeId <= state.lastTradeId) {
           throw new Error("Binance trade id was duplicate or out of order");
         }
@@ -228,11 +244,20 @@ export function createBinanceLiveFeed({
     return freezeState(state);
   }
 
-  return Object.freeze({ start, stop, getState });
+  function getIdentity() {
+    return Object.freeze({ source: SOURCE, symbol: configuredSymbol, url: configuredUrl });
+  }
+
+  return Object.freeze({ start, stop, getState, getIdentity });
 }
 
-export const BINANCE_LIVE_FEED_IDENTITY = Object.freeze({
-  source: SOURCE,
-  symbol: SYMBOL,
-  url: BINANCE_WS_URL
-});
+export function createBinanceLiveFeedIdentity(symbol = DEFAULT_SYMBOL) {
+  const normalized = marketSymbol(symbol);
+  return Object.freeze({
+    source: SOURCE,
+    symbol: normalized,
+    url: streamUrl(normalized)
+  });
+}
+
+export const BINANCE_LIVE_FEED_IDENTITY = createBinanceLiveFeedIdentity(DEFAULT_SYMBOL);
