@@ -40,7 +40,7 @@ function encoded(value, label) {
 
 function safeApiDescription(payload, secrets) {
   const candidate = payload && typeof payload === "object"
-    ? payload.description ?? payload.message ?? payload.error
+    ? payload.description ?? payload.message ?? payload.error ?? payload.rejectReason
     : null;
   let description = typeof candidate === "string"
     ? candidate.slice(0, 300)
@@ -59,6 +59,10 @@ function orderCode(value) {
     throw new TypeError("DXtrade orderCode contains unsupported characters");
   }
   return code;
+}
+
+function positionCode(value) {
+  return requiredString(value, "DXtrade positionCode", 128);
 }
 
 function side(value) {
@@ -91,78 +95,104 @@ function latestPositiveExecution(order) {
   return null;
 }
 
-export function reconcileCashOrderHistory(payload, { clientOrderId, requestedCashQuantity }) {
+function orderHistoryParts(payload, clientOrderId) {
   const code = orderCode(clientOrderId);
-  const requestedCash = positive("requestedCashQuantity", requestedCashQuantity);
   const matches = extractOrders(payload).filter((order) => order?.clientOrderId === code);
-  if (matches.length === 0) return Object.freeze({ status: "PENDING", reason: "Order not found in DXtrade history yet" });
+  if (matches.length === 0) return Object.freeze({ code, missing: true });
   if (matches.length !== 1) throw new Error("DXtrade returned duplicate history rows for one client order id");
-
   const order = matches[0];
   const currentStatus = requiredString(order.status, "DXtrade order status", 32).toUpperCase();
   const isFinal = order.finalStatus === true;
   const leg = Array.isArray(order.legs) && order.legs.length === 1 ? order.legs[0] : null;
   if (!leg) throw new Error("DXtrade single BTC order must contain exactly one order leg");
-
-  const filledCash = finiteNumberOrNull(leg.filledCashQuantity);
-  const remainingCash = finiteNumberOrNull(leg.remainingCashQuantity);
-  const filledQuantity = Math.abs(finiteNumberOrNull(leg.filledQuantity) ?? 0);
-  const remainingQuantity = Math.abs(finiteNumberOrNull(leg.remainingQuantity) ?? 0);
-  const averagePrice = finiteNumberOrNull(leg.averagePrice);
   const execution = latestPositiveExecution(order);
+  const averagePrice = finiteNumberOrNull(leg.averagePrice);
   const executionAverage = finiteNumberOrNull(execution?.averagePrice);
   const executionLast = finiteNumberOrNull(execution?.lastPrice);
-  const fillPrice = [averagePrice, executionAverage, executionLast].find((value) => value !== null && value > 0) ?? null;
+  const fillPrice = [averagePrice, executionAverage, executionLast]
+    .find((value) => value !== null && value > 0) ?? null;
   const filledAt = execution?.transactionTime ?? order.transactionTime ?? null;
+  return Object.freeze({ code, missing: false, order, currentStatus, isFinal, leg, execution, fillPrice, filledAt });
+}
 
-  const hasAnyFill = (filledCash !== null && filledCash > 0) || filledQuantity > 0;
-  const cashComplete = filledCash !== null &&
-    filledCash + Math.max(0.01, requestedCash * 1e-6) >= requestedCash &&
-    (remainingCash === null || Math.abs(remainingCash) <= Math.max(0.01, requestedCash * 1e-6));
-  const quantityComplete = filledCash === null && filledQuantity > 0 && remainingQuantity === 0;
-
-  if (currentStatus === "COMPLETED" && isFinal && (cashComplete || quantityComplete)) {
-    if (fillPrice === null || typeof filledAt !== "string" || !Number.isFinite(Date.parse(filledAt))) {
-      throw new Error("DXtrade completed order lacks reliable fill price or time");
-    }
-    return Object.freeze({
-      status: "FILLED",
-      clientOrderId: code,
-      brokerOrderId: order.orderId == null ? null : String(order.orderId),
-      fillPrice,
-      filledAt: new Date(Date.parse(filledAt)).toISOString(),
-      filledCashQuantity: filledCash,
-      filledQuantity
-    });
+function confirmedFillResult(parts, extra = {}) {
+  if (parts.fillPrice === null || typeof parts.filledAt !== "string" || !Number.isFinite(Date.parse(parts.filledAt))) {
+    throw new Error("DXtrade completed order lacks reliable fill price or time");
   }
+  return Object.freeze({
+    status: "FILLED",
+    clientOrderId: parts.code,
+    brokerOrderId: parts.order.orderId == null ? null : String(parts.order.orderId),
+    fillPrice: parts.fillPrice,
+    filledAt: new Date(Date.parse(parts.filledAt)).toISOString(),
+    ...extra
+  });
+}
 
-  if (isFinal && hasAnyFill) {
+function finalNonfillResult(parts, hasAnyFill, extra = {}) {
+  if (parts.isFinal && hasAnyFill) {
     return Object.freeze({
       status: "PARTIAL",
-      clientOrderId: code,
-      reason: `DXtrade order ended ${currentStatus} with an incomplete fill`,
-      fillPrice,
-      filledCashQuantity: filledCash,
-      filledQuantity
+      clientOrderId: parts.code,
+      reason: `DXtrade order ended ${parts.currentStatus} with an incomplete fill`,
+      fillPrice: parts.fillPrice,
+      ...extra
     });
   }
-
-  if (isFinal && ["REJECTED", "CANCELED", "EXPIRED"].includes(currentStatus)) {
-    const latestExecution = Array.isArray(order.executions) ? order.executions.at(-1) : null;
+  if (parts.isFinal && ["REJECTED", "CANCELED", "EXPIRED"].includes(parts.currentStatus)) {
+    const latestExecution = Array.isArray(parts.order.executions) ? parts.order.executions.at(-1) : null;
     return Object.freeze({
-      status: currentStatus,
-      clientOrderId: code,
+      status: parts.currentStatus,
+      clientOrderId: parts.code,
       reason: safeApiDescription(latestExecution, [])
     });
   }
-
   return Object.freeze({
     status: "PENDING",
-    clientOrderId: code,
-    brokerOrderId: order.orderId == null ? null : String(order.orderId),
-    brokerUpdateOrderId: order.updateOrderId == null ? null : String(order.updateOrderId),
-    brokerStatus: currentStatus
+    clientOrderId: parts.code,
+    brokerOrderId: parts.order.orderId == null ? null : String(parts.order.orderId),
+    brokerUpdateOrderId: parts.order.updateOrderId == null ? null : String(parts.order.updateOrderId),
+    brokerStatus: parts.currentStatus
   });
+}
+
+export function reconcileCashOrderHistory(payload, { clientOrderId, requestedCashQuantity }) {
+  const requestedCash = positive("requestedCashQuantity", requestedCashQuantity);
+  const parts = orderHistoryParts(payload, clientOrderId);
+  if (parts.missing) return Object.freeze({ status: "PENDING", reason: "Order not found in DXtrade history yet" });
+
+  const filledCash = finiteNumberOrNull(parts.leg.filledCashQuantity);
+  const remainingCash = finiteNumberOrNull(parts.leg.remainingCashQuantity);
+  const filledQuantity = Math.abs(finiteNumberOrNull(parts.leg.filledQuantity) ?? 0);
+  const remainingQuantity = Math.abs(finiteNumberOrNull(parts.leg.remainingQuantity) ?? 0);
+  const hasAnyFill = (filledCash !== null && filledCash > 0) || filledQuantity > 0;
+  const cashTolerance = Math.max(0.01, requestedCash * 1e-6);
+  const cashComplete = filledCash !== null &&
+    filledCash + cashTolerance >= requestedCash &&
+    (remainingCash === null || Math.abs(remainingCash) <= cashTolerance);
+  const quantityComplete = filledCash === null && filledQuantity > 0 && remainingQuantity === 0;
+
+  if (parts.currentStatus === "COMPLETED" && parts.isFinal && (cashComplete || quantityComplete)) {
+    return confirmedFillResult(parts, { filledCashQuantity: filledCash, filledQuantity });
+  }
+  return finalNonfillResult(parts, hasAnyFill, { filledCashQuantity: filledCash, filledQuantity });
+}
+
+export function reconcileQuantityOrderHistory(payload, { clientOrderId, requestedQuantity }) {
+  const requested = positive("requestedQuantity", requestedQuantity);
+  const parts = orderHistoryParts(payload, clientOrderId);
+  if (parts.missing) return Object.freeze({ status: "PENDING", reason: "Order not found in DXtrade history yet" });
+
+  const filledQuantity = Math.abs(finiteNumberOrNull(parts.leg.filledQuantity) ?? 0);
+  const remainingQuantity = Math.abs(finiteNumberOrNull(parts.leg.remainingQuantity) ?? 0);
+  const tolerance = Math.max(1e-12, requested * 1e-8);
+  const hasAnyFill = filledQuantity > 0;
+  const complete = filledQuantity + tolerance >= requested && remainingQuantity <= tolerance;
+
+  if (parts.currentStatus === "COMPLETED" && parts.isFinal && complete) {
+    return confirmedFillResult(parts, { filledQuantity });
+  }
+  return finalNonfillResult(parts, hasAnyFill, { filledQuantity });
 }
 
 export class DxtradeExecutionError extends Error {
@@ -234,31 +264,58 @@ export class DxtradeExecutionClient {
     }
   }
 
-  async validateMarketCashOrder({ clientOrderId, orderSide, cashQuantity }) {
+  #marketCashOrderBody({ clientOrderId, orderSide, cashQuantity }) {
+    return {
+      orderCode: orderCode(clientOrderId),
+      type: "MARKET",
+      instrument: BTC_INSTRUMENT,
+      cashQuantity: positive("cashQuantity", cashQuantity),
+      side: side(orderSide)
+    };
+  }
+
+  #marketPositionCloseBody({ clientOrderId, orderSide, quantity, positionCode: requestedPositionCode }) {
+    return {
+      orderCode: orderCode(clientOrderId),
+      type: "MARKET",
+      instrument: BTC_INSTRUMENT,
+      quantity: positive("quantity", quantity),
+      positionEffect: "CLOSE",
+      positionCode: positionCode(requestedPositionCode),
+      side: side(orderSide),
+      tif: "GTC"
+    };
+  }
+
+  async validateMarketCashOrder(input) {
     return this.#requestJson({
       method: "POST",
       path: `/accounts/${encoded(this.#accountCode, "DXtrade account code")}/orders/validate`,
-      body: {
-        orderCode: orderCode(clientOrderId),
-        type: "MARKET",
-        instrument: BTC_INSTRUMENT,
-        cashQuantity: positive("cashQuantity", cashQuantity),
-        side: side(orderSide)
-      }
+      body: this.#marketCashOrderBody(input)
     });
   }
 
-  async placeMarketCashOrder({ clientOrderId, orderSide, cashQuantity }) {
+  async placeMarketCashOrder(input) {
     return this.#requestJson({
       method: "POST",
       path: `/accounts/${encoded(this.#accountCode, "DXtrade account code")}/orders`,
-      body: {
-        orderCode: orderCode(clientOrderId),
-        type: "MARKET",
-        instrument: BTC_INSTRUMENT,
-        cashQuantity: positive("cashQuantity", cashQuantity),
-        side: side(orderSide)
-      }
+      body: this.#marketCashOrderBody(input)
+    });
+  }
+
+  async validateMarketPositionClose(input) {
+    return this.#requestJson({
+      method: "POST",
+      path: `/accounts/${encoded(this.#accountCode, "DXtrade account code")}/orders/validate`,
+      body: this.#marketPositionCloseBody(input)
+    });
+  }
+
+  async placeMarketPositionClose(input) {
+    return this.#requestJson({
+      method: "POST",
+      path: `/accounts/${encoded(this.#accountCode, "DXtrade account code")}/orders`,
+      body: this.#marketPositionCloseBody(input)
     });
   }
 
@@ -275,6 +332,13 @@ export class DxtradeExecutionClient {
     return reconcileCashOrderHistory(await this.getOrderHistory(clientOrderId), {
       clientOrderId,
       requestedCashQuantity
+    });
+  }
+
+  async reconcileMarketQuantityOrder({ clientOrderId, requestedQuantity }) {
+    return reconcileQuantityOrderHistory(await this.getOrderHistory(clientOrderId), {
+      clientOrderId,
+      requestedQuantity
     });
   }
 
