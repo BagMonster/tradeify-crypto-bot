@@ -1,0 +1,48 @@
+name: Build extended SOLUSDT 5m history
+
+on:
+  push:
+    branches:
+      - data/solusdt-5m-statistician
+    paths:
+      - .github/workflows/build-solusdt-extended-history.yml
+      - scripts/build_solusdt_extended_history.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out data branch
+        uses: actions/checkout@v4
+        with:
+          ref: data/solusdt-5m-statistician
+          fetch-depth: 1
+
+      - name: Build and validate 18-month SOLUSDT dataset
+        run: python3 scripts/build_solusdt_extended_history.py
+
+      - name: Show generated file summary
+        run: |
+          ls -lh research-data/SOLUSDT_5m_2024-02-22_to_2025-08-21.csv
+          wc -l research-data/SOLUSDT_5m_2024-02-22_to_2025-08-21.csv
+          cat research-data/SOLUSDT_5m_2024-02-22_to_2025-08-21.csv.sha256
+          head -n 2 research-data/SOLUSDT_5m_2024-02-22_to_2025-08-21.csv
+          tail -n 1 research-data/SOLUSDT_5m_2024-02-22_to_2025-08-21.csv
+
+      - name: Commit generated research files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add research-data/SOLUSDT_5m_2024-02-22_to_2025-08-21.csv \
+                  research-data/SOLUSDT_5m_2024-02-22_to_2025-08-21.csv.sha256
+          if git diff --cached --quiet; then
+            echo "Dataset already matches the generated result."
+          else
+            git commit -m "Add extended SOLUSDT 5m research history"
+            git push origin HEAD:data/solusdt-5m-statistician
+          fi
