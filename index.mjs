@@ -2,6 +2,7 @@ import { loadConfiguration } from "./src/config.js";
 import { createDatabase } from "./src/database.js";
 import { createBinanceLiveFeed } from "./src/market/binanceLiveFeed.js";
 import { DxtradeExecutionClient } from "./src/execution/dxtradeExecutionClient.js";
+import { createPinnedDxtradeFetch } from "./src/execution/pinnedDxtradeFetch.js";
 import { createDxtradeOrderAdapter } from "./src/execution/dxtradeOrderAdapter.js";
 import { createGuardedExecution } from "./src/execution/orderGuard.js";
 import { createDxtradeAccountMonitor } from "./src/account/dxtradeAccountMonitor.js";
@@ -20,7 +21,8 @@ const dxtradeClient = new DxtradeExecutionClient({
   username: environment.dxtrade.username,
   domain: environment.dxtrade.domain,
   password: environment.dxtrade.password,
-  accountCode: environment.dxtrade.accountCode
+  accountCode: environment.dxtrade.accountCode,
+  fetchImpl: createPinnedDxtradeFetch()
 });
 
 const dxtradeOrderAdapter = createDxtradeOrderAdapter({
