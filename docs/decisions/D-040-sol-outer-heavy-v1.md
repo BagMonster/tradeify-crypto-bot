@@ -1,104 +1,118 @@
 # D-040 — Frozen SOL outer-heavy grid baseline
 
 **Strategy ID:** `sol-outer-heavy-v1`  
-**Status:** OWNER-APPROVED RESEARCH BASELINE, frozen 2026-08-23; NOT LIVE; implementation target only.
+**Status:** OWNER-APPROVED RESEARCH BASELINE, frozen 2026-08-23; implementation semantics resolved by the owner and D-041; not an automatic-execution authorization.
 
 ## Governing replacement
 
-This decision replaces all remaining three-level BTC grid assumptions for the planned SOL strategy. No `BUY1-BUY3` / `SELL1-SELL3` counter model, confirmed-fill reference reset, or maximum-consecutive-same-side-fill rule may be carried into the SOL strategy.
+This decision replaces all remaining three-level BTC grid assumptions for the SOL strategy. No `BUY1-BUY3` / `SELL1-SELL3` counter model, confirmed-fill reference reset, or maximum-consecutive-same-side-fill rule carries into SOL.
 
 ## Reference
 
-- Reference is the 200-day simple moving average of completed daily SOL closes.
-- The reference updates when a new completed daily close enters the 200-day window.
-- All ring distances are measured from the current moving average.
+- 200-day simple moving average of completed UTC daily SOL closes.
+- The MA updates when a new completed daily close enters the 200-day window.
+- All ring distances and exit targets use the current MA.
 - A confirmed fill never becomes the reference.
 
-## Ring geometry
+## Ring geometry and sizing
 
-- Band width: `4.5%` of the current 200-day MA.
-- Dead zone: no active entry rings inside `±18%` of the MA; the first four 4.5% bands are skipped.
-- Eight BUY rings below the MA and eight SHORT rings above the MA.
+- Band width: `4.5%` of current MA.
+- Dead zone: no entry rings inside `±18%`; first four bands are skipped.
+- Eight BUY rings below MA and eight SHORT rings above MA.
 
-| Level | BUY distance | SHORT distance | Exact USD formula |
+| Level | BUY distance | SHORT distance | USD notional |
 |---|---:|---:|---:|
-| 1 | -22.5% | +22.5% | `6 * 1.8^0` |
-| 2 | -27.0% | +27.0% | `6 * 1.8^1` |
-| 3 | -31.5% | +31.5% | `6 * 1.8^2` |
-| 4 | -36.0% | +36.0% | `6 * 1.8^3` |
-| 5 | -40.5% | +40.5% | `6 * 1.8^4` |
-| 6 | -45.0% | +45.0% | `6 * 1.8^5` |
-| 7 | -49.5% | +49.5% | `6 * 1.8^6` |
-| 8 | -54.0% | +54.0% | `6 * 1.8^7` |
+| 1 | -22.5% | +22.5% | `$6.00` |
+| 2 | -27.0% | +27.0% | `$10.80` |
+| 3 | -31.5% | +31.5% | `$19.44` |
+| 4 | -36.0% | +36.0% | `$34.992` |
+| 5 | -40.5% | +40.5% | `$62.9856` |
+| 6 | -45.0% | +45.0% | `$113.37408` |
+| 7 | -49.5% | +49.5% | `$204.073344` |
+| 8 | -54.0% | +54.0% | `$367.3320192` |
 
-Approximate USD notionals supplied with the freeze are `$6`, `$10.80`, `$19.44`, `$34.99`, `$62.99`, `$113.37`, `$204.07`, `$367.33` per side.
+Sizing formula is `$6 × 1.8^(level-1)`. At a confirmed entry, SOL quantity is floored from the USD target to the `0.01 SOL` increment.
 
-At fill time, the strategy computes SOL quantity from the USD notional and fill price, flooring to the `0.01 SOL` lot increment. The exact broker minimum SOL order quantity remains a live-execution discovery item unless separately confirmed.
+## Ring capacity and re-arm
 
-## Entry behavior
+- Maximum two virtual lots per ring.
+- Every new fill sets that ring `armed=false`.
+- A second fill may occur while the first lot remains open only after the ring re-arms.
+- Re-arm distance is `currentMA × 0.045 × 0.5` measured from the current moving ring.
+- Either direction away from the ring counts.
+- When all remaining units for a ring are closed, that ring becomes armed immediately.
+- There is no same-side consecutive-fill counter and no whole-ladder reset after the outer ring.
 
-- Entry evaluation uses completed/observed 5-minute SOL bars and high/low ring touches.
-- An entry is eligible when price trades through an armed ring level and that ring has capacity.
-- The outermost ring has no special reset or cycle behavior.
+## Four-tranche exits
 
-## Ring capacity and re-arm — owner-supplied rules
+For tranche `t ∈ {1,2,3,4}`:
 
-- Each ring may hold up to two positions at the same time.
-- The owner also specified that a ring is locked while it holds any open position.
-- After a position is fully closed, the ring becomes free only after price has moved at least `0.5` band away from the ring level and then returned.
-- There is no maximum-consecutive-same-side-fill counter.
+```text
+target(t) = entry + (currentMA - entry) × (t / 4)
+```
 
-The two-position capacity statement and the statement that a ring is locked while any position is open are not yet executable together without an additional rule defining how/when the second simultaneous position can be opened. That point must be resolved before the production strategy module is considered complete.
+This places targets 25%, 50%, 75%, and 100% of the way from entry toward the current MA.
 
-## Exits
+No tranche target may realize a modeled round-trip loss:
 
-Every entry position is split conceptually into four exit tranches:
+```text
+long target  = max(target, entry × (1 + 0.0018))
+short target = min(target, entry × (1 - 0.0018))
+```
 
-- weights: `1/10`, `2/10`, `3/10`, `4/10` of original lot size;
-- targets move toward the current 200-day MA;
-- final tranche clears any quantity remainder;
-- no tranche may execute if its realized result after modeled/actual costs would be a loss;
-- cost floor supplied by owner: `0.04%` commission plus `0.05%` slippage on each side.
+The `0.0018` floor represents two sides of `0.04%` commission plus `0.05%` slippage.
 
-The freeze does not yet state the exact target-price formula or target distance for tranche 1, 2, 3, and 4. That geometry is required before the exit engine can be implemented without inventing behavior.
+Tranche quantity rules:
 
-Because the entry quantity is floored to `0.01 SOL`, a separate executable tranche-rounding rule is also required. In particular, an original position below `0.10 SOL` cannot preserve a non-zero 10% first tranche at a `0.01 SOL` increment. The production strategy must define how tranche quantities round and what happens when one or more weighted tranches would round below the broker lot increment.
+1. intended weights are 1/10, 2/10, 3/10, 4/10 of original quantity;
+2. non-final tranches floor to `0.01 SOL` and never exceed the remaining quantity;
+3. a non-final tranche that floors below `0.01 SOL` is skipped and its done counter advances;
+4. tranche four closes the entire remainder.
 
-## BUY/SHORT independence — production compatibility blocker
+## Research-bar ordering and production translation
 
-The research definition states that BUY and SHORT sides are fully independent and may both have open positions simultaneously.
+The verified `ringgrid3.mjs` research engine processes all touched exits before entries on each five-minute bar. It does not reconstruct an intrabar path.
 
-The currently verified Tradeify/DXtrade account model is netting / one signed instrument position. Under netting, simultaneous independent long and short broker positions in the same `SOL/USD` instrument cannot be represented exactly: opposing executions offset the broker's single net position. Therefore this research behavior cannot be mapped truthfully to the current execution architecture without a separately approved resolution (for example, a verified hedge-mode account, or a strategy change that removes simultaneous opposite-side inventory).
+D-041 translates this to production as **actual live Binance `SOLUSDT` touches with eligible exits processed before entries on each live update**.
 
-Do not emulate two independent opposite-side live inventories inside the bot while the broker is netted; that would make internal ring state diverge from actual broker exposure.
+## Netting translation
 
-## Risk limits
+The research engine retains independent long and short tagged lots. The Tradeify/DXtrade account remains netted and may expose only one signed physical `SOL/USD` position.
 
-- Overall open-notional ceiling: approximately `$1,830` as supplied by the owner. The runtime must treat the configured ceiling as a hard gate before adding exposure.
-- Tradeify daily-loss protection remains `$1,500`, checked using live equity including unrealized P&L.
-- Existing maximum-loss / payout-floor protections, owner pause, safety halt, account lockout, DXtrade reconciliation, and confirmed-fill accounting remain applicable unless a later approved decision explicitly changes them.
-- No automatic execution is authorized by D-040.
+Production therefore keeps the tagged research lots as durable **virtual lots** while the broker position is the signed aggregate of their remaining quantities. The bot must continuously reconcile:
+
+```text
+expected DXtrade net SOL = sum(signed remaining virtual SOL quantities)
+```
+
+A persistent mismatch blocks new strategy actions and requires owner reconciliation. This preserves ring/tranche accounting without pretending that the broker is in hedge mode.
+
+## Risk and account limits
+
+- Hard virtual gross-exposure ceiling: `$1,830`.
+- Tradeify daily-loss limit: `$1,500`, checked from live equity including unrealized P&L.
+- Existing maximum-loss/payout floor, owner pause, safety halt, account lockout, current account data, feed freshness, and confirmed-fill accounting remain applicable.
+- Minimum project hold: 25 seconds.
+- One net broker instrument position; no hedge-mode dependency.
 
 ## Inactivity heartbeat
 
-A 30-day inactivity heartbeat is mandatory and must be implemented as a separate minimum-size round trip that does not read, increment, arm, disarm, or otherwise mutate ring strategy state. Exact SOL minimum order quantity and heartbeat execution details must be verified before live activation.
+- Tradeify inactivity deadline: 30 days without a trade.
+- Production safety trigger: after 25 days without a confirmed bot trade.
+- Heartbeat quantity: `0.01 SOL`.
+- Heartbeat is a separate round trip and must never mutate a ring, virtual lot, tranche counter, MA, or ring armed state.
+- The same 25-second project minimum hold applies to the heartbeat round trip.
 
 ## Data identity
 
 - Strategy market/reference source: Binance `SOLUSDT`.
 - Broker/account instrument: DXtrade `SOL/USD`.
-- 5-minute OHLCV is the strategy trigger interval.
-- 200-day MA uses completed daily closes only.
-- Source and symbol identity must remain preserved throughout the data path.
+- Research evidence: completed five-minute OHLCV.
+- Live production trigger rule: actual Binance live trade touch under D-041.
+- 200-day MA: completed UTC daily closes only.
 
-## Still-required exact definitions before production implementation is complete
+## Activation boundary
 
-1. Exact four tranche target-price formulas relative to the moving 200-day MA.
-2. How a ring can reach two simultaneous positions if it is locked whenever any position is open.
-3. Exact re-arm excursion interpretation when the MA and therefore the ring level move: excursion direction and whether the threshold is measured against the contemporaneous moving ring or the ring price at close time.
-4. Exact tranche quantity rounding at the `0.01 SOL` increment, including sub-minimum tranche behavior.
-5. Deterministic ordering when one 5-minute bar touches multiple entry/exit levels and OHLC alone does not reveal the intrabar sequence.
-6. Resolution of simultaneous independent BUY+SHORT inventory versus the verified DXtrade netting / one-signed-position account model.
-7. Exact minimum SOL order quantity for the inactivity heartbeat and eventual live execution.
+D-040 freezes the strategy but does not turn on automatic execution. D-041 authorizes the production live-touch translation. The D-038 minimum-size live lifecycle canary remains a separate owner-approved step, followed by a separate final automatic-execution approval.
 
-Until these are resolved, the migration branch must remain locked and must not silently invent production behavior. `AUTO_EXECUTE=false` and `execution.autoExecute=false` remain required.
+Until those checkpoints are completed, `AUTO_EXECUTE=false` and `execution.autoExecute=false` remain required.
