@@ -70,6 +70,8 @@ npm start
 ```text
 /status
 /health
+/levels
+/rings
 /dxpreflight
 /solcanary
 /kill
@@ -79,6 +81,8 @@ npm start
 /whoami
 /help
 ```
+
+`/levels` shows the complete live 8×8 SOL ladder, frozen USD sizes, estimated SOL quantities, and armed/occupied state. `/rings` gives a compact read-only view of where live SOL sits relative to the current MA and next BUY/SHORT rings.
 
 See the complete operator guide: [Telegram command reference](docs/telegram-command-reference.md).
 
@@ -91,6 +95,7 @@ See the complete operator guide: [Telegram command reference](docs/telegram-comm
 - [D-042 — owner-approved SOL live lifecycle canary](docs/decisions/D-042-owner-approved-sol-live-canary.md)
 - [D-044 — DXtrade SOL position-effect order shape](docs/decisions/D-044-dxtrade-position-effect-order-shape.md)
 - [D-045 — final SOL live activation](docs/decisions/D-045-final-sol-live-activation.md)
+- [D-046 — Telegram SOL ring observability](docs/decisions/D-046-telegram-ring-observability.md)
 - [DXtrade API endpoint reference](docs/dxtrade-api-endpoint-reference.md)
 - [Post-Automation Addendum A](docs/post-automation-development-agent-addendum.md)
 
