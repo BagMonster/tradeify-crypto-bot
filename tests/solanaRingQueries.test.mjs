@@ -15,16 +15,19 @@ test("ring query geometry matches frozen 8x8 SOL baseline", () => {
 });
 
 test("dead-zone query returns the nearest BUY and SHORT levels", () => {
-  const view = summarizeSolanaRingPosition({ price: 94.67, ma: 81.19 });
+  const livePrice = 94.67;
+  const buy1 = 62.92225;
+  const short1 = 99.45775;
+  const view = summarizeSolanaRingPosition({ price: livePrice, ma: 81.19 });
   assert.equal(view.status, "Dead zone");
   assert.equal(view.touched, null);
   assert.equal(view.nextBuy.tag, "BUY1");
-  assert.ok(Math.abs(view.nextBuy.triggerPrice - 62.92225) < 1e-8);
+  assert.ok(Math.abs(view.nextBuy.triggerPrice - buy1) < 1e-8);
   assert.equal(view.nextShort.tag, "SHORT1");
-  assert.ok(Math.abs(view.nextShort.triggerPrice - 99.45775) < 1e-8);
+  assert.ok(Math.abs(view.nextShort.triggerPrice - short1) < 1e-8);
   assert.equal(view.closer, "SHORT");
-  assert.ok(Math.abs(view.nextBuyDistance.pct - (-33.534382591106994)) < 1e-8);
-  assert.ok(Math.abs(view.nextShortDistance.pct - 5.057568395479026) < 1e-8);
+  assert.ok(Math.abs(view.nextBuyDistance.pct - (((buy1 - livePrice) / livePrice) * 100)) < 1e-10);
+  assert.ok(Math.abs(view.nextShortDistance.pct - (((short1 - livePrice) / livePrice) * 100)) < 1e-10);
 });
 
 test("price through BUY1 reports BUY1 and advances next BUY to BUY2", () => {
