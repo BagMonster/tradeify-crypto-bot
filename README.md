@@ -1,34 +1,48 @@
 # Tradeify Crypto Bot
 
-This repository is the Stage A foundation for a Telegram-controlled Tradeify bot.
+Owner-operated Tradeify Crypto automation for a `$50,000` Instant Funding account with the 95% profit-split add-on.
 
-## Current working features
+The active production strategy is the frozen SOL research baseline **`sol-outer-heavy-v1`**. The worker is still deployed behind both automatic-execution locks until the separately approved live activation checkpoint.
 
-- One Node.js worker designed for Railway
-- Telegram long polling with inline control buttons
-- One-user Telegram authorization
-- PostgreSQL state that survives restarts
-- Persistent pause and confirmed resume flow
-- Tradeify dual-floor, daily-control, consistency, and position-sizing logic
-- Read-only DXtrade discovery client with no order methods
-- Completed, source-tagged PostgreSQL bar storage
-- Idempotent 12-month Binance `BTCUSDT` historical backfill for `15m`, `4h`, and `1d`
-- Deterministic Bollinger, RSI, ATR, and ADX calculations with fail-closed warm-up checks
-- Deterministic Bollinger/RSI candidate evaluation with fail-closed regime checks
-- Simulation-only Telegram signal-alert formatting with sanitized audit evidence
-- Automated risk, read-only-client, storage, backfill, indicator, signal, and alert tests
-- Automatic execution locked off
+## Current architecture
 
-## Current safety state
+- One Node.js Railway worker
+- Railway PostgreSQL for durable account, audit, strategy, virtual-lot, and execution state
+- Owner-only Telegram control
+- Binance `SOLUSDT` for external/live strategy price references
+- DXtrade `SOL/USD` for Tradeify account state, broker reconciliation, and eventual execution
+- One net DXtrade SOL position; independent strategy lots are tracked virtually and reconciled to the broker net quantity
 
-The worker starts only when both of these settings are false:
+## Frozen SOL strategy
 
-- Railway variable `AUTO_EXECUTE=false`
-- `config/strategy.json` value `execution.autoExecute=false`
+- 200-day simple moving average from completed UTC daily closes
+- 4.5% bands
+- no entries inside ±18% of the MA
+- 8 BUY rings below the MA and 8 SHORT rings above it
+- active distances from ±22.5% through ±54.0%
+- USD sizing starts at `$6` and grows ×`1.8` outward
+- maximum two virtual lots per ring
+- 0.5-band re-arm excursion
+- 4 exit tranches: 10%, 20%, 30%, then the complete remainder
+- tranche targets move 25%, 50%, 75%, and 100% from entry toward the current MA
+- live production semantics: eligible exits are processed before entries on every live touch
+- 0.01 SOL quantity increment
+- hard virtual gross-exposure ceiling: approximately `$1,830`
+- funded-account daily loss protection: `$1,500`, evaluated from live equity
+- separate 0.01 SOL inactivity heartbeat after 25 days without a confirmed trade; heartbeat state never mutates ring state
 
-Stage A exposes no DXtrade order, modification, cancellation, close-position, or flatten method. Binance is public historical data only and cannot place or control Tradeify trades. A calculated signal candidate or simulation alert does not make the live feed fresh, persist regime permission, bypass the shared risk gate, or authorize an order or position. Exact DXtrade size remains blocked until instrument lot rules are verified. The bot does not create orders or expose manual long/short commands.
+## Current execution state
 
-The Chapter 25 alert publisher is a tested capability and is not called by the current worker. Live owner alerts begin only after a later chapter supplies a fresh validated feed and controlled evaluation loop; this checkpoint sends no production alert and places no order.
+Automatic execution remains OFF. Both settings are required to remain false during the locked deployment:
+
+```text
+Railway: AUTO_EXECUTE=false
+config/strategy.json: execution.autoExecute=false
+```
+
+The production-shaped SOL order, confirmation, virtual-lot, reconciliation, and protective-flatten paths exist behind those locks. A submitted or acknowledged DXtrade order is never treated as a fill; strategy state advances only after broker fill confirmation.
+
+A persistent mismatch between the signed virtual SOL total and the DXtrade net `SOL/USD` position blocks new strategy actions and creates a safety halt.
 
 ## Railway start command
 
@@ -41,6 +55,7 @@ npm start
 ```text
 /status
 /health
+/dxpreflight
 /kill
 /resume
 /confirmresume CODE
@@ -49,12 +64,14 @@ npm start
 /help
 ```
 
-Use the project build manual for the exact GitHub, Railway, PostgreSQL, and Telegram setup sequence.
+See the complete operator guide: [Telegram command reference](docs/telegram-command-reference.md).
 
-## Project governance and future roadmap
+## Governance and implementation records
 
 - [Implementation decision log](docs/implementation-decision-log.md)
-- [Post-Automation Addendum A - Owner-Only OpenAI Development Agent](docs/post-automation-development-agent-addendum.md)
-- [DXtrade API endpoint reference](docs/dxtrade-api-endpoint-reference.md) - research-only survey of the DXtrade Developer Portal (REST + Push APIs); read this before any future DXtrade credential, authentication, client, session, or order-routing work, which remains gated behind the D-004 Codex Security checkpoint and the appropriate approved chapter.
+- [D-039 — SOL transition](docs/decisions/D-039-solana-transition.md)
+- [D-041 — SOL live-touch production semantics](docs/decisions/D-041-sol-live-touch-production-semantics.md)
+- [DXtrade API endpoint reference](docs/dxtrade-api-endpoint-reference.md)
+- [Post-Automation Addendum A](docs/post-automation-development-agent-addendum.md)
 
-The development-agent addendum is approved future scope only. It begins after the current trading automation roadmap, stability gates, final Telegram command documentation, and a fresh security checkpoint are complete. It does not change Stage A or enable execution.
+The post-automation development-agent addendum remains future scope and does not change the trading worker or grant production trading access.

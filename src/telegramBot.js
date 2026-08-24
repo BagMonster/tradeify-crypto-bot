@@ -24,7 +24,7 @@ const HELP_TEXT = [
   "",
   "/status - show account, floors, risk, and readiness",
   "/health - confirm the worker and PostgreSQL are reachable",
-  "/dxpreflight - validate BTC order sizes without placing an order",
+  "/dxpreflight - inspect active-instrument order settings without placing an order",
   "/kill - pause the bot and persist the pause",
   "/resume - request a 6-digit resume code",
   "/confirmresume CODE - confirm the restart",
@@ -146,7 +146,7 @@ export async function startTelegramBot({ environment, service }) {
   await bot.setMyCommands([
     { command: "status", description: "Show bot and risk status" },
     { command: "health", description: "Check worker and database" },
-    { command: "dxpreflight", description: "Validate BTC sizes without an order" },
+    { command: "dxpreflight", description: "Inspect active instrument settings" },
     { command: "kill", description: "Pause the bot" },
     { command: "resume", description: "Request a resume code" },
     { command: "flat", description: "Show flattening instructions" },

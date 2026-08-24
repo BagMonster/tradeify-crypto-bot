@@ -1,14 +1,44 @@
 import {
-  applyConfirmedGridFill,
-  createInitialGridState,
-  evaluateGridIntent,
-  resetGridAfterProtectiveFlatten
+  applyConfirmedGridFill as defaultApplyConfirmedGridFill,
+  createInitialGridState as defaultCreateInitialGridState,
+  evaluateGridIntent as defaultEvaluateGridIntent,
+  resetGridAfterProtectiveFlatten as defaultResetGridAfterProtectiveFlatten
 } from "../strategies/grid.js";
 import { evaluateGridRisk } from "../risk/accountRules.js";
+
+const DEFAULT_MARKET_SYMBOL = "BTCUSDT";
+const DEFAULT_STRATEGY = Object.freeze({
+  createInitialGridState: defaultCreateInitialGridState,
+  evaluateGridIntent: defaultEvaluateGridIntent,
+  applyConfirmedGridFill: defaultApplyConfirmedGridFill,
+  resetGridAfterProtectiveFlatten: defaultResetGridAfterProtectiveFlatten
+});
 
 function requireFunction(name, value) {
   if (typeof value !== "function") throw new TypeError(`${name} must be a function`);
   return value;
+}
+
+function requireMarketSymbol(value) {
+  if (typeof value !== "string" || !/^[A-Z0-9]{5,20}$/.test(value)) {
+    throw new TypeError("marketSymbol must be an uppercase alphanumeric symbol");
+  }
+  return value;
+}
+
+function requireStrategy(strategy) {
+  if (!strategy || typeof strategy !== "object" || Array.isArray(strategy)) {
+    throw new TypeError("gridStrategy must be an object");
+  }
+  return Object.freeze({
+    createInitialGridState: requireFunction("gridStrategy.createInitialGridState", strategy.createInitialGridState),
+    evaluateGridIntent: requireFunction("gridStrategy.evaluateGridIntent", strategy.evaluateGridIntent),
+    applyConfirmedGridFill: requireFunction("gridStrategy.applyConfirmedGridFill", strategy.applyConfirmedGridFill),
+    resetGridAfterProtectiveFlatten: requireFunction(
+      "gridStrategy.resetGridAfterProtectiveFlatten",
+      strategy.resetGridAfterProtectiveFlatten
+    )
+  });
 }
 
 function requireMinimumHoldSeconds(value) {
@@ -27,12 +57,12 @@ function canonicalUtc(name, value) {
   return value;
 }
 
-function normalizeTrade(trade) {
+function normalizeTrade(trade, marketSymbol) {
   if (!trade || typeof trade !== "object" || Array.isArray(trade)) {
     throw new TypeError("market trade must be an object");
   }
-  if (trade.source !== "binance" || trade.symbol !== "BTCUSDT") {
-    throw new TypeError("grid runtime accepts only Binance BTCUSDT trades");
+  if (trade.source !== "binance" || trade.symbol !== marketSymbol) {
+    throw new TypeError(`grid runtime accepts only Binance ${marketSymbol} trades`);
   }
   if (typeof trade.price !== "number" || !Number.isFinite(trade.price) || trade.price <= 0) {
     throw new TypeError("market trade price must be a positive finite number");
@@ -76,12 +106,16 @@ export function createGridRuntime({
   stateStore,
   getRiskSnapshot,
   execution,
+  marketSymbol = DEFAULT_MARKET_SYMBOL,
+  gridStrategy = DEFAULT_STRATEGY,
   minimumHoldSeconds = 25,
   addEvent = async () => {}
 }) {
   const store = requireStore(stateStore);
   const riskSnapshot = requireFunction("getRiskSnapshot", getRiskSnapshot);
   const executor = requireExecution(execution);
+  const symbol = requireMarketSymbol(marketSymbol);
+  const strategy = requireStrategy(gridStrategy);
   const holdSeconds = requireMinimumHoldSeconds(minimumHoldSeconds);
   const audit = requireFunction("addEvent", addEvent);
   let lastRepeatedAuditKey = null;
@@ -99,9 +133,10 @@ export function createGridRuntime({
     await store.init();
     const existing = await store.load();
     if (existing) return existing;
-    const created = createInitialGridState(referencePrice);
+    const created = strategy.createInitialGridState(referencePrice);
     const stored = await store.initializeIfMissing(created);
     await audit("INFO", "GRID_STATE_INITIALIZED", {
+      marketSymbol: symbol,
       referencePrice: stored.referencePrice,
       version: stored.version
     });
@@ -109,11 +144,11 @@ export function createGridRuntime({
   }
 
   async function processTrade(inputTrade) {
-    const trade = normalizeTrade(inputTrade);
+    const trade = normalizeTrade(inputTrade, symbol);
     const state = await store.load();
     if (!state) throw new Error("grid state is not initialized");
 
-    const intent = evaluateGridIntent(state, trade.price);
+    const intent = strategy.evaluateGridIntent(state, trade.price);
     const snapshot = await riskSnapshot(Object.freeze({ state, trade, intent }));
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
       throw new Error("risk snapshot provider returned an invalid snapshot");
@@ -137,7 +172,7 @@ export function createGridRuntime({
       }
 
       lastRepeatedAuditKey = null;
-      const nextState = resetGridAfterProtectiveFlatten(state, {
+      const nextState = strategy.resetGridAfterProtectiveFlatten(state, {
         fillPrice: result.fillPrice,
         filledAt: result.filledAt
       });
@@ -206,7 +241,7 @@ export function createGridRuntime({
       return Object.freeze({ status: result.status, risk, state, intent });
     }
 
-    const nextState = applyConfirmedGridFill(state, intent, {
+    const nextState = strategy.applyConfirmedGridFill(state, intent, {
       fillPrice: result.fillPrice,
       filledAt: result.filledAt
     });
@@ -221,5 +256,5 @@ export function createGridRuntime({
     return Object.freeze({ status: "FILLED", risk, state: saved, intent, execution: result });
   }
 
-  return Object.freeze({ initialize, processTrade });
+  return Object.freeze({ initialize, processTrade, marketSymbol: symbol });
 }

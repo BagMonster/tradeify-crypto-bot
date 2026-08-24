@@ -8,7 +8,10 @@ import {
 function createFakeQuery() {
   const rows = new Map();
   return async function query(sql, params = []) {
-    if (sql.includes("CREATE TABLE")) return { rowCount: 0, rows: [] };
+    if (sql.includes("CREATE TABLE") || sql.startsWith("ALTER TABLE") ||
+        sql.startsWith("UPDATE execution_orders SET instrument") || sql.startsWith("DO $$")) {
+      return { rowCount: 0, rows: [] };
+    }
 
     if (sql.startsWith("SELECT * FROM execution_orders WHERE client_order_id")) {
       const row = rows.get(params[0]);
@@ -16,10 +19,11 @@ function createFakeQuery() {
     }
 
     if (sql.startsWith("INSERT INTO execution_orders")) {
-      const [clientOrderId, strategyId, stateVersion, gridTag, side, requestedCashQuantity] = params;
+      const [clientOrderId, strategyId, instrument, stateVersion, gridTag, side, requestedCashQuantity] = params;
       for (const row of rows.values()) {
         if (row.client_order_id === clientOrderId ||
-            (Number(row.state_version) === stateVersion && row.grid_tag === gridTag)) {
+            (row.strategy_id === strategyId && row.instrument === instrument &&
+             Number(row.state_version) === stateVersion && row.grid_tag === gridTag)) {
           const error = new Error("duplicate key");
           error.code = "23505";
           throw error;
@@ -29,6 +33,7 @@ function createFakeQuery() {
       const row = {
         client_order_id: clientOrderId,
         strategy_id: strategyId,
+        instrument,
         state_version: stateVersion,
         grid_tag: gridTag,
         side,
@@ -94,28 +99,42 @@ function createFakeQuery() {
 const CLAIM = Object.freeze({
   clientOrderId: "GRID-0-BUY1",
   strategyId: "btc-progressive-reference-reset-grid-v1",
+  instrument: "BTC/USD",
   stateVersion: 0,
   gridTag: "BUY1",
   side: "BUY",
   requestedCashQuantity: 250
 });
 
-test("ledger persists a unique claim for one grid state and level", async () => {
+test("ledger persists a unique claim for one strategy, instrument, state, and level", async () => {
   const ledger = createExecutionLedger({ query: createFakeQuery() });
   await ledger.init();
   const claimed = await ledger.claim(CLAIM);
   assert.equal(claimed.status, "CLAIMED");
+  assert.equal(claimed.instrument, "BTC/USD");
   assert.equal(claimed.requestedCashQuantity, 250);
   assert.equal((await ledger.get(CLAIM.clientOrderId)).gridTag, "BUY1");
 });
 
-test("duplicate state+grid level is rejected even with a different client id", async () => {
+test("duplicate strategy+instrument+state+grid level is rejected even with a different client id", async () => {
   const ledger = createExecutionLedger({ query: createFakeQuery() });
   await ledger.claim(CLAIM);
   await assert.rejects(
     ledger.claim({ ...CLAIM, clientOrderId: "GRID-0-BUY1-retry" }),
     ExecutionOrderConflictError
   );
+});
+
+test("same state and level can be used by a separate SOL strategy namespace", async () => {
+  const ledger = createExecutionLedger({ query: createFakeQuery() });
+  await ledger.claim(CLAIM);
+  const sol = await ledger.claim({
+    ...CLAIM,
+    clientOrderId: "SOLGRID-0-BUY1",
+    strategyId: "sol-statistical-grid-v1",
+    instrument: "SOL/USD"
+  });
+  assert.equal(sol.instrument, "SOL/USD");
 });
 
 test("submitted order keeps broker identifiers and remains unresolved", async () => {

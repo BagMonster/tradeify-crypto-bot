@@ -1,46 +1,35 @@
 {
+  "strategyId": "sol-outer-heavy-v1",
+  "strategyType": "moving-ma-outer-heavy-grid",
+  "strategyStatus": "production-implemented-locked",
   "instruments": {
     "BTC/USD": {
-      "enabled": true
+      "enabled": false
     },
     "SOL/USD": {
-      "enabled": false
+      "enabled": true
     }
   },
-  "signal": {
-    "bbPeriod": 20,
-    "bbStdDev": 2,
-    "rsiPeriod": 14,
-    "rsiLongThreshold": 32,
-    "rsiShortThreshold": 68,
-    "requireCloseInsideBand": true,
-    "atrPeriod": 14,
-    "stopAtrMultiple": 1.5,
-    "timeStopBars": 24
-  },
-  "regime": {
-    "minDailyAtrPct": 0.015,
-    "maxDailyAtrPct": 0.037,
-    "adxPeriod": 14,
-    "adxMax": 25,
-    "adxStandDown": 30,
-    "rangeBandStdDev": 2.5
-  },
-  "risk": {
-    "stage1RiskCap": 200,
-    "stage2RiskCap": 300,
-    "stage2Threshold": 53000,
-    "dailySoftStop": -750,
-    "dailyHardStop": -1000,
-    "stage1ProfitCeiling": 500,
-    "stage2ProfitCeiling": 700,
-    "maxNotional": 100000,
-    "floorSafetyMargin": 750
+  "solOuterHeavy": {
+    "maDays": 200,
+    "bandPct": 0.045,
+    "deadZoneBands": 4,
+    "activeLevelsPerSide": 8,
+    "baseUsd": 6,
+    "growth": 1.8,
+    "positionsPerRing": 2,
+    "rearmBands": 0.5,
+    "lotStep": 0.01,
+    "trancheWeights": [1, 2, 3, 4],
+    "roundTripCostFloorPct": 0.0018,
+    "grossExposureCeilingUsd": 1830,
+    "heartbeatDays": 30,
+    "heartbeatQuantitySol": 0.01,
+    "liveSemantics": "live-touch-exits-before-entries"
   },
   "execution": {
     "minHoldSeconds": 25,
     "slippageCapPct": 0.0005,
-    "hardFlatUtc": "21:45",
     "autoExecute": false
   }
 }

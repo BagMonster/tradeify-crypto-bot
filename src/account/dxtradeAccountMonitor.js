@@ -1,6 +1,13 @@
-const BTC_SYMBOL = "BTC/USD";
+const DEFAULT_INSTRUMENT = "BTC/USD";
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_FRESH_AFTER_MS = 3_000;
+
+function instrumentSymbol(value) {
+  if (typeof value !== "string" || !/^[A-Z0-9]+\/[A-Z0-9]+$/.test(value.trim())) {
+    throw new TypeError("DXtrade instrument must look like BASE/QUOTE");
+  }
+  return value.trim();
+}
 
 function finite(name, value) {
   const number = typeof value === "number" ? value : Number(value);
@@ -53,8 +60,10 @@ function normalizePositions(metric) {
 export function normalizeDxtradeAccountMetrics(payload, {
   startingBalance,
   persistedPeakClosedBalance,
+  instrument = DEFAULT_INSTRUMENT,
   fetchedAtMs = Date.now()
 }) {
+  const activeInstrument = instrumentSymbol(instrument);
   const metric = extractMetric(payload);
   const balance = finite("DXtrade balance", metric.balance);
   const equity = finite("DXtrade equity", metric.equity);
@@ -65,32 +74,32 @@ export function normalizeDxtradeAccountMetrics(payload, {
   const fetched = finite("fetchedAtMs", fetchedAtMs);
   if (fetched <= 0) throw new TypeError("fetchedAtMs must be positive");
 
-  // DXtrade dayClosedPl is the realized P&L of the current broker business day.
-  // Therefore balance - dayClosedPl reconstructs the account's closing balance at
-  // the start of the current account day without waiting for a rollover observation.
   const previousDayClosingBalance = balance - dayClosedPl;
   const peakClosedBalance = Math.max(start, priorPeak, balance);
   const positions = normalizePositions(metric);
   const nonZeroPositions = positions.filter((position) => Math.abs(position.quantity) > 1e-12);
-  const btcPositions = nonZeroPositions.filter((position) => position.symbol === BTC_SYMBOL);
-  const foreignPositions = nonZeroPositions.filter((position) => position.symbol !== BTC_SYMBOL);
+  const instrumentPositions = nonZeroPositions.filter((position) => position.symbol === activeInstrument);
+  const foreignPositions = nonZeroPositions.filter((position) => position.symbol !== activeInstrument);
 
   let invariantError = null;
   if (foreignPositions.length > 0) {
-    invariantError = "A non-BTC position exists on the Tradeify account";
-  } else if (openPositionsCount > 1 || nonZeroPositions.length > 1 || btcPositions.length > 1) {
+    invariantError = `A non-${activeInstrument} position exists on the Tradeify account`;
+  } else if (openPositionsCount > 1 || nonZeroPositions.length > 1 || instrumentPositions.length > 1) {
     invariantError = "More than one open position exists on the Tradeify account";
   } else if (openPositionsCount !== nonZeroPositions.length) {
     invariantError = "DXtrade open-position count does not match position metrics";
   }
 
-  const btcPosition = btcPositions[0] ?? null;
-  const currentNotional = btcPosition ? Math.abs(btcPosition.quantity * btcPosition.markPrice) : 0;
-  if (!Number.isFinite(currentNotional)) throw new Error("DXtrade BTC notional is invalid");
+  const instrumentPosition = instrumentPositions[0] ?? null;
+  const currentNotional = instrumentPosition
+    ? Math.abs(instrumentPosition.quantity * instrumentPosition.markPrice)
+    : 0;
+  if (!Number.isFinite(currentNotional)) throw new Error(`DXtrade ${activeInstrument} notional is invalid`);
 
   return Object.freeze({
     account: metric.account == null ? null : String(metric.account),
     version: metric.version == null ? null : Number(metric.version),
+    instrument: activeInstrument,
     balance,
     equity,
     dayClosedPl,
@@ -98,7 +107,8 @@ export function normalizeDxtradeAccountMetrics(payload, {
     previousDayClosingBalance,
     peakClosedBalance,
     openPositionsCount,
-    btcPosition,
+    instrumentPosition,
+    btcPosition: activeInstrument === "BTC/USD" ? instrumentPosition : null,
     currentNotional,
     invariantError,
     accountLocked: invariantError !== null,
@@ -110,6 +120,7 @@ export function normalizeDxtradeAccountMetrics(payload, {
 export function createDxtradeAccountMonitor({
   client,
   startingBalance,
+  instrument = DEFAULT_INSTRUMENT,
   getPersistedPeakClosedBalance,
   onSnapshot = async () => {},
   onError = () => {},
@@ -120,6 +131,7 @@ export function createDxtradeAccountMonitor({
   if (typeof client?.login !== "function" || typeof client?.getAccountMetrics !== "function") {
     throw new TypeError("DXtrade account monitor requires login and getAccountMetrics methods");
   }
+  const activeInstrument = instrumentSymbol(instrument);
   const getPeak = requireFunction("getPersistedPeakClosedBalance", getPersistedPeakClosedBalance);
   const publish = requireFunction("onSnapshot", onSnapshot);
   const reportError = requireFunction("onError", onError);
@@ -150,6 +162,7 @@ export function createDxtradeAccountMonitor({
       const snapshot = normalizeDxtradeAccountMetrics(payload, {
         startingBalance,
         persistedPeakClosedBalance: persistedPeak,
+        instrument: activeInstrument,
         fetchedAtMs: clock()
       });
       latest = snapshot;

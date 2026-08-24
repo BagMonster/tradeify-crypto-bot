@@ -1,5 +1,6 @@
 import { DxtradeExecutionError } from "./dxtradeExecutionClient.js";
 
+const DEFAULT_INSTRUMENT = "BTC/USD";
 const FINAL_NONFILL = new Set(["REJECTED", "CANCELED", "EXPIRED", "PARTIAL", "FAILED"]);
 
 function requireFunction(name, value) {
@@ -12,6 +13,13 @@ function requireInteger(name, value, minimum, maximum) {
     throw new TypeError(`${name} must be an integer from ${minimum} to ${maximum}`);
   }
   return value;
+}
+
+function instrumentSymbol(value) {
+  if (typeof value !== "string" || !/^[A-Z0-9]+\/[A-Z0-9]+$/.test(value.trim())) {
+    throw new TypeError("instrument must look like BASE/QUOTE");
+  }
+  return value.trim();
 }
 
 function positive(name, value) {
@@ -42,11 +50,12 @@ function safeFailureText(error) {
   return "DXtrade execution request failed";
 }
 
-function assertRequestMatchesLedger(request, row) {
+function assertRequestMatchesLedger(request, row, instrument) {
   if (row.clientOrderId !== request.orderCode ||
       row.stateVersion !== request.intent.stateVersion ||
       row.gridTag !== request.intent.tag ||
       row.side !== request.side ||
+      (row.instrument != null && row.instrument !== instrument) ||
       Math.abs(row.requestedCashQuantity - request.cashQuantity) > 1e-9) {
     throw new Error("Persistent order record does not match the current grid intent");
   }
@@ -55,12 +64,14 @@ function assertRequestMatchesLedger(request, row) {
 export function createDxtradeOrderAdapter({
   client,
   ledger,
+  instrument = DEFAULT_INSTRUMENT,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   pollIntervalMs = 250,
   confirmationTimeoutMs = 10_000
 }) {
   const dx = requireClient(client);
   const orders = requireLedger(ledger);
+  const activeInstrument = instrumentSymbol(instrument);
   const wait = requireFunction("sleep", sleep);
   requireInteger("pollIntervalMs", pollIntervalMs, 50, 5_000);
   requireInteger("confirmationTimeoutMs", confirmationTimeoutMs, 1_000, 60_000);
@@ -71,8 +82,8 @@ export function createDxtradeOrderAdapter({
   }
 
   async function validateGridOrder(request) {
-    if (request?.instrument !== "BTC/USD" || request?.type !== "MARKET") {
-      throw new TypeError("DXtrade grid adapter accepts only BTC/USD MARKET orders");
+    if (request?.instrument !== activeInstrument || request?.type !== "MARKET") {
+      throw new TypeError(`DXtrade grid adapter accepts only ${activeInstrument} MARKET orders`);
     }
     if (request.side !== "BUY" && request.side !== "SELL") throw new TypeError("order side must be BUY or SELL");
     const cashQuantity = positive("cashQuantity", request.cashQuantity);
@@ -134,13 +145,13 @@ export function createDxtradeOrderAdapter({
     if (!request || typeof request !== "object" || Array.isArray(request)) {
       throw new TypeError("DXtrade market order request must be an object");
     }
-    if (request.instrument !== "BTC/USD" || request.type !== "MARKET") {
-      throw new TypeError("DXtrade grid adapter accepts only BTC/USD MARKET orders");
+    if (request.instrument !== activeInstrument || request.type !== "MARKET") {
+      throw new TypeError(`DXtrade grid adapter accepts only ${activeInstrument} MARKET orders`);
     }
     if (request.side !== "BUY" && request.side !== "SELL") throw new TypeError("order side must be BUY or SELL");
     positive("cashQuantity", request.cashQuantity);
     if (!request.intent || request.intent.usd !== request.cashQuantity) {
-      throw new Error("DXtrade cash quantity must equal the frozen grid intent dollar size");
+      throw new Error("DXtrade cash quantity must equal the grid intent dollar size");
     }
 
     await orders.init();
@@ -151,13 +162,14 @@ export function createDxtradeOrderAdapter({
       row = await orders.claim({
         clientOrderId: request.orderCode,
         strategyId: request.intent.strategyId,
+        instrument: activeInstrument,
         stateVersion: request.intent.stateVersion,
         gridTag: request.intent.tag,
         side: request.side,
         requestedCashQuantity: request.cashQuantity
       });
     }
-    assertRequestMatchesLedger(request, row);
+    assertRequestMatchesLedger(request, row, activeInstrument);
 
     if (row.status === "FILLED") {
       return Object.freeze({
@@ -189,9 +201,6 @@ export function createDxtradeOrderAdapter({
           brokerUpdateOrderId: response?.updateOrderId ?? null
         });
       } catch (error) {
-        // POST is not idempotent. A timeout/network failure can occur after the
-        // server accepted the order, and a 409 can mean the same client id already
-        // exists. Never generate a replacement order here; reconcile the same id.
         if (error instanceof DxtradeExecutionError && error.status !== null &&
             error.status >= 400 && error.status < 500 && error.status !== 409) {
           await orders.markStatus(request.orderCode, "FAILED", { lastError: safeFailureText(error) });
@@ -209,5 +218,5 @@ export function createDxtradeOrderAdapter({
     return reconcileUntilTerminal(request);
   }
 
-  return Object.freeze({ initialize, validateGridOrder, placeMarketOrder });
+  return Object.freeze({ initialize, validateGridOrder, placeMarketOrder, instrument: activeInstrument });
 }

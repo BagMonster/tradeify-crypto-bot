@@ -7,6 +7,7 @@ import {
 import { calculateAccountFloors } from "./risk/accountRules.js";
 import { FROZEN_GRID } from "./strategies/grid.js";
 import { runDxtradePreflight } from "./execution/dxtradePreflight.js";
+import { resolveInstrumentProfile } from "./instrumentProfile.js";
 
 function money(value) {
   return new Intl.NumberFormat("en-US", {
@@ -34,13 +35,15 @@ function safeHexEqual(left, right) {
   return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 }
 
-function nextLevelText(gridState, side) {
+function nextLevelText(gridState, side, gridDefinition) {
   if (!gridState) return "WAITING FOR INITIAL REFERENCE";
   const isBuy = side === "BUY";
   const pointer = isBuy ? gridState.buyPtr : gridState.sellPtr;
   const count = isBuy ? gridState.buyCount : gridState.sellCount;
-  if (count >= FROZEN_GRID.maxConsecutive) return "BLOCKED - 3 consecutive fills reached";
-  const level = isBuy ? FROZEN_GRID.buyLevels[pointer] : FROZEN_GRID.sellLevels[pointer];
+  const levels = isBuy ? gridDefinition.buyLevels : gridDefinition.sellLevels;
+  const maxConsecutive = gridDefinition.maxConsecutive ?? levels.length;
+  if (count >= maxConsecutive) return `BLOCKED - ${maxConsecutive} consecutive fills reached`;
+  const level = levels[pointer];
   if (!level) return "BLOCKED";
   const trigger = gridState.referencePrice * (isBuy ? 1 - level.movePct : 1 + level.movePct);
   const sign = isBuy ? "-" : "+";
@@ -52,12 +55,20 @@ function preflightValidationLine(label, result) {
   return `${label}: REJECTED (HTTP ${result?.http ?? "NONE"}, API ${result?.api ?? "NONE"})`;
 }
 
-export function createTradeifyService({ database, account, environment, dxtradeClient = null }) {
+export function createTradeifyService({
+  database,
+  account,
+  strategy,
+  environment,
+  dxtradeClient = null,
+  gridDefinition = FROZEN_GRID
+}) {
+  const instrument = resolveInstrumentProfile(strategy);
+  const strategyPending = typeof strategy.strategyStatus === "string" && strategy.strategyStatus.startsWith("pending-");
+
   async function statusText() {
-    const [state, gridState] = await Promise.all([
-      database.getState(),
-      database.gridState.load()
-    ]);
+    const state = await database.getState();
+    const gridState = strategyPending ? null : await database.gridState.load();
     const floors = calculateAccountFloors({
       startingBalance: account.startingBalance,
       maxLossOffset: account.maxLossOffset,
@@ -68,13 +79,13 @@ export function createTradeifyService({ database, account, environment, dxtradeC
     });
     const operatingStatus = state.operator_killed || state.safety_halt ? "PAUSED" : "RUNNING";
     const lines = [
-      "TRADEIFY BTC GRID STATUS",
+      `TRADEIFY ${instrument.asset} GRID STATUS`,
       "",
       `Mode: ${environment.appMode.toUpperCase()} / PRODUCTION GRID LOCKED`,
       "Auto-execution: OFF",
       `Bot: ${operatingStatus}`,
-      "Market source: Binance BTCUSDT",
-      "Account source: DXtrade",
+      `Market source: Binance ${instrument.binanceSymbol}`,
+      `Account source: DXtrade ${instrument.dxtradeSymbol}`,
       "",
       `Balance: ${money(state.balance)}`,
       `Live equity: ${money(state.equity)}`,
@@ -82,19 +93,29 @@ export function createTradeifyService({ database, account, environment, dxtradeC
       `MLL floor: ${money(floors.mllFloor)}`,
       `Active floor: ${money(floors.activeFloor)}`,
       `Floor buffer: ${money(state.equity - floors.activeFloor)}`,
-      `BTC position open: ${state.has_open_position ? "YES" : "NO"}`,
+      `${instrument.asset} position open: ${state.has_open_position ? "YES" : "NO"}`,
       "",
-      `Binance feed stale: ${state.feed_stale ? "YES" : "NO"}`,
-      `Grid reference: ${gridState ? price(gridState.referencePrice) : "NOT INITIALIZED"}`,
-      `Grid state version: ${gridState?.version ?? "N/A"}`,
-      `Buy ladder: ${gridState ? `${gridState.buyCount}/3` : "N/A"}`,
-      `Sell ladder: ${gridState ? `${gridState.sellCount}/3` : "N/A"}`,
-      `Next buy: ${nextLevelText(gridState, "BUY")}`,
-      `Next sell: ${nextLevelText(gridState, "SELL")}`
+      `Binance feed stale: ${state.feed_stale ? "YES" : "NO"}`
     ];
-    if (gridState?.lastFillAt) {
-      lines.push(`Last confirmed grid fill: ${gridState.lastFillSide} @ ${price(gridState.lastFillPrice)} (${gridState.lastFillAt})`);
+
+    if (strategyPending) {
+      lines.push(`Strategy: PENDING (${strategy.strategyStatus})`);
+      lines.push("Grid reference: NOT INITIALIZED FOR NEW STRATEGY");
+      lines.push("Next buy: WAITING FOR APPROVED SOL STRATEGY");
+      lines.push("Next sell: WAITING FOR APPROVED SOL STRATEGY");
+    } else {
+      const max = gridDefinition.maxConsecutive ?? gridDefinition.buyLevels.length;
+      lines.push(`Grid reference: ${gridState ? price(gridState.referencePrice) : "NOT INITIALIZED"}`);
+      lines.push(`Grid state version: ${gridState?.version ?? "N/A"}`);
+      lines.push(`Buy ladder: ${gridState ? `${gridState.buyCount}/${max}` : "N/A"}`);
+      lines.push(`Sell ladder: ${gridState ? `${gridState.sellCount}/${max}` : "N/A"}`);
+      lines.push(`Next buy: ${nextLevelText(gridState, "BUY", gridDefinition)}`);
+      lines.push(`Next sell: ${nextLevelText(gridState, "SELL", gridDefinition)}`);
+      if (gridState?.lastFillAt) {
+        lines.push(`Last confirmed grid fill: ${gridState.lastFillSide} @ ${price(gridState.lastFillPrice)} (${gridState.lastFillAt})`);
+      }
     }
+
     if (state.operator_killed) lines.push("Operator pause: ACTIVE");
     if (state.safety_halt) lines.push(`Safety halt: ${state.halt_reason ?? "Manual review required"}`);
     return lines.join("\n");
@@ -148,13 +169,13 @@ export function createTradeifyService({ database, account, environment, dxtradeC
 
   function flatInstructions() {
     return [
-      "BTC GRID FLAT INSTRUCTIONS",
+      `${instrument.asset} GRID FLAT INSTRUCTIONS`,
       "",
       "Automatic execution is currently locked OFF.",
       "1. Open DXtrade.",
-      "2. Close any open BTC/USD position.",
-      "3. Cancel any remaining BTC/USD working orders after confirming the position is flat.",
-      "4. Send /status and confirm BTC position open shows NO.",
+      `2. Close any open ${instrument.dxtradeSymbol} position.`,
+      `3. Cancel any remaining ${instrument.dxtradeSymbol} working orders after confirming the position is flat.`,
+      `4. Send /status and confirm ${instrument.asset} position open shows NO.`,
       "",
       "The automatic protective-flatten adapter must pass its broker validation before live activation."
     ].join("\n");
@@ -166,7 +187,8 @@ export function createTradeifyService({ database, account, environment, dxtradeC
       "Worker: OK",
       "PostgreSQL: OK",
       `Database time: ${new Date(databaseTime).toISOString()}`,
-      "Strategy: BTC progressive reference-reset grid",
+      `Instrument: ${instrument.dxtradeSymbol} / Binance ${instrument.binanceSymbol}`,
+      `Strategy: ${strategyPending ? `PENDING (${strategy.strategyStatus})` : gridDefinition.strategyId ?? "grid"}`,
       "Auto-execution: OFF"
     ].join("\n");
   }
@@ -187,7 +209,7 @@ export function createTradeifyService({ database, account, environment, dxtradeC
     });
 
     const lines = [
-      "DXTRADE BTC PREFLIGHT",
+      `DXTRADE ${instrument.asset} PREFLIGHT`,
       "",
       "READ-ONLY / VALIDATION ONLY — no order was placed.",
       `Instrument: ${result.instrument}`,

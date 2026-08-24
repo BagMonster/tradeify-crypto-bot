@@ -1,5 +1,6 @@
-const EXECUTION_INSTRUMENT = "BTC/USD";
-const ORDER_CODE_PREFIX = "GRID";
+const DEFAULT_EXECUTION_INSTRUMENT = "BTC/USD";
+const DEFAULT_MARKET_SYMBOL = "BTCUSDT";
+const DEFAULT_ORDER_CODE_PREFIX = "GRID";
 
 function requireBoolean(name, value) {
   if (typeof value !== "boolean") throw new TypeError(`${name} must be boolean`);
@@ -9,6 +10,13 @@ function requireBoolean(name, value) {
 function requireFunction(name, value) {
   if (typeof value !== "function") throw new TypeError(`${name} must be a function`);
   return value;
+}
+
+function requireText(name, value, pattern = null) {
+  if (typeof value !== "string" || value.trim() === "") throw new TypeError(`${name} must be a non-empty string`);
+  const text = value.trim();
+  if (pattern && !pattern.test(text)) throw new TypeError(`${name} is invalid`);
+  return text;
 }
 
 function requirePositiveFinite(name, value) {
@@ -27,12 +35,12 @@ function canonicalUtc(name, value) {
   return value;
 }
 
-function normalizeIntent(intent) {
+function normalizeIntent(intent, marketSymbol) {
   if (!intent || typeof intent !== "object" || Array.isArray(intent)) {
     throw new TypeError("grid intent must be an object");
   }
-  if (intent.source !== "binance" || intent.symbol !== "BTCUSDT") {
-    throw new TypeError("execution accepts only Binance BTCUSDT grid intents");
+  if (intent.source !== "binance" || intent.symbol !== marketSymbol) {
+    throw new TypeError(`execution accepts only Binance ${marketSymbol} grid intents`);
   }
   if (intent.side !== "BUY" && intent.side !== "SELL") {
     throw new TypeError("grid intent side must be BUY or SELL");
@@ -40,17 +48,22 @@ function normalizeIntent(intent) {
   if (!Number.isSafeInteger(intent.stateVersion) || intent.stateVersion < 0) {
     throw new TypeError("grid intent stateVersion must be a non-negative safe integer");
   }
-  if (!/^BUY[1-3]$|^SELL[1-3]$/.test(intent.tag ?? "")) {
-    throw new TypeError("grid intent tag must identify a frozen grid level");
+  if (!/^BUY[1-9][0-9]*$|^SELL[1-9][0-9]*$/.test(intent.tag ?? "")) {
+    throw new TypeError("grid intent tag must identify a grid level");
   }
   requirePositiveFinite("grid intent usd", intent.usd);
   requirePositiveFinite("grid intent observedPrice", intent.observedPrice);
   return intent;
 }
 
-export function gridOrderCode(intent) {
-  const normalized = normalizeIntent(intent);
-  return `${ORDER_CODE_PREFIX}-${normalized.stateVersion}-${normalized.tag}`;
+export function gridOrderCode(intent, {
+  marketSymbol = DEFAULT_MARKET_SYMBOL,
+  orderCodePrefix = DEFAULT_ORDER_CODE_PREFIX
+} = {}) {
+  const symbol = requireText("marketSymbol", marketSymbol, /^[A-Z0-9]{5,20}$/);
+  const prefix = requireText("orderCodePrefix", orderCodePrefix, /^[A-Z0-9_-]{1,16}$/);
+  const normalized = normalizeIntent(intent, symbol);
+  return `${prefix}-${normalized.stateVersion}-${normalized.tag}`;
 }
 
 function normalizeConfirmedFill(fill, expectedOrderCode) {
@@ -73,12 +86,18 @@ function normalizeConfirmedFill(fill, expectedOrderCode) {
 export function createGuardedExecution({
   autoExecute,
   strategyAutoExecute,
+  instrument = DEFAULT_EXECUTION_INSTRUMENT,
+  marketSymbol = DEFAULT_MARKET_SYMBOL,
+  orderCodePrefix = DEFAULT_ORDER_CODE_PREFIX,
   placeMarketOrder,
   flattenPosition,
   addEvent = async () => {}
 }) {
   const envLock = requireBoolean("autoExecute", autoExecute);
   const strategyLock = requireBoolean("strategyAutoExecute", strategyAutoExecute);
+  const executionInstrument = requireText("instrument", instrument, /^[A-Z0-9]+\/[A-Z0-9]+$/);
+  const executionMarketSymbol = requireText("marketSymbol", marketSymbol, /^[A-Z0-9]{5,20}$/);
+  const executionOrderPrefix = requireText("orderCodePrefix", orderCodePrefix, /^[A-Z0-9_-]{1,16}$/);
   const place = requireFunction("placeMarketOrder", placeMarketOrder);
   const flatten = requireFunction("flattenPosition", flattenPosition);
   const audit = requireFunction("addEvent", addEvent);
@@ -89,8 +108,11 @@ export function createGuardedExecution({
   }
 
   async function executeGridIntent({ intent }) {
-    const normalized = normalizeIntent(intent);
-    const orderCode = gridOrderCode(normalized);
+    const normalized = normalizeIntent(intent, executionMarketSymbol);
+    const orderCode = gridOrderCode(normalized, {
+      marketSymbol: executionMarketSymbol,
+      orderCodePrefix: executionOrderPrefix
+    });
 
     if (!isEnabled()) {
       await audit("INFO", "GRID_ORDER_BLOCKED_EXECUTION_LOCK", {
@@ -111,7 +133,7 @@ export function createGuardedExecution({
     try {
       await audit("INFO", "GRID_ORDER_SUBMITTING", {
         orderCode,
-        instrument: EXECUTION_INSTRUMENT,
+        instrument: executionInstrument,
         side: normalized.side,
         cashQuantity: normalized.usd,
         tag: normalized.tag,
@@ -120,7 +142,7 @@ export function createGuardedExecution({
 
       const result = await place(Object.freeze({
         orderCode,
-        instrument: EXECUTION_INSTRUMENT,
+        instrument: executionInstrument,
         type: "MARKET",
         side: normalized.side,
         cashQuantity: normalized.usd,
@@ -158,7 +180,7 @@ export function createGuardedExecution({
       return Object.freeze({ status: "BLOCKED", reason: "Automatic execution locks are off" });
     }
 
-    const result = await flatten(Object.freeze({ instrument: EXECUTION_INSTRUMENT, reason: reason.trim() }));
+    const result = await flatten(Object.freeze({ instrument: executionInstrument, reason: reason.trim() }));
     if (!result || result.confirmed !== true) {
       await audit("ERROR", "PROTECTIVE_FLATTEN_NOT_CONFIRMED", { reason: reason.trim() });
       return Object.freeze({ status: "NOT_CONFIRMED", reason: "Protective flatten was not confirmed" });

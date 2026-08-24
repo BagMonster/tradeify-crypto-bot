@@ -186,3 +186,31 @@ Legacy Bollinger/RSI warm-up, regime permission, news blackout, legacy per-trade
 The fast-track sequence is: build the write-capable DXtrade path behind both false execution locks; validate the production path through deterministic replay, failure injection, restart, and reconciliation tests; deploy and verify the locked Railway/PostgreSQL/Telegram runtime; then perform one separately owner-approved minimum-size real DXtrade execution lifecycle canary. If that canary is clean, a separate final owner approval is still required before enabling the frozen `$250 / $550 / $1,250` BTC grid.
 
 D-038 supersedes calendar-duration and natural-signal waiting requirements in D-002, D-009, D-034, D-037, and older manual text only to that extent. It does not supersede D-004 security blocking findings, D-007 operator documentation, funded-account loss protections, execution correctness, or the requirement for explicit final live activation approval. `AUTO_EXECUTE=false` and `config/strategy.json` → `execution.autoExecute=false` remain required. D-038 does not itself authorize live automatic trading.
+
+## D-039 — Transition production plan from BTC to SOL
+
+**Status:** APPROVED by owner on 2026-08-23.
+
+The planned production instrument changes from BTC to SOL. Binance `SOLUSDT` is the external strategy/reference market and DXtrade `SOL/USD` is the broker/account instrument. BTC grid parameters remain historical and must not be copied into the SOL strategy. SOL persistent strategy state and execution identity are separated from old BTC grid state. Exactly one production instrument remains enabled. Automatic execution remains off pending the separate activation checkpoint.
+
+Full decision: `docs/decisions/D-039-solana-transition.md`.
+
+## D-040 — Frozen SOL outer-heavy grid baseline
+
+**Status:** APPROVED by owner on 2026-08-23.
+
+The frozen strategy is `sol-outer-heavy-v1`: a 200-day simple moving average of completed UTC daily SOL closes; 4.5% bands; no entry rings inside ±18%; eight BUY and eight SHORT rings from ±22.5% through ±54%; USD sizing of `$6 × 1.8^(level-1)` floored to the 0.01 SOL quantity increment; up to two durable virtual lots per ring; 0.5-band moving-ring re-arm; four exit tranches at 10%, 20%, 30%, then the entire remainder; current-MA targets at 25%, 50%, 75%, and 100% of the distance from entry to MA; a 0.18% round-trip no-loss target floor/ceiling; hard virtual gross-exposure ceiling of approximately $1,830; and the funded-account $1,500 continuous daily-loss protection.
+
+The research engine's independently tagged long and short lots are represented in production as virtual lots reconciled to the one signed net DXtrade `SOL/USD` position. A persistent virtual/broker quantity mismatch fails closed. The 30-day inactivity rule is protected by a separate 0.01 SOL round trip triggered after 25 days without a confirmed bot trade, with the 25-second project hold; heartbeat activity never mutates ring state.
+
+Full decision: `docs/decisions/D-040-sol-outer-heavy-v1.md`.
+
+## D-041 — SOL live-touch production semantics
+
+**Status:** APPROVED by owner on 2026-08-23.
+
+The frozen five-minute research touch model is translated to production using actual live Binance `SOLUSDT` trade touches. On each live update, the worker observes moving-ring re-arm conditions, processes all eligible exits before entries, and advances durable strategy state only after confirmed DXtrade fills. Locked/shadow operation may record intents but must never pretend an order filled. The reference remains the completed-day 200-day SOL moving average.
+
+D-041 authorizes implementation only. It does not authorize live automatic grid execution. D-038 still requires one separately owner-approved minimum-size live execution lifecycle canary, followed by a separate final owner approval before automatic grid execution may be enabled. Until then, Railway `AUTO_EXECUTE=false` and `config/strategy.json` → `execution.autoExecute=false` remain required.
+
+Full decision: `docs/decisions/D-041-sol-live-touch-production-semantics.md`.
