@@ -10,7 +10,7 @@ function price(value) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(value);
 }
 
-export function createSolanaTradeifyService({ database, account, strategy, environment, dxtradeClient, persistence, maProvider, execution }) {
+export function createSolanaTradeifyService({ database, account, strategy, environment, dxtradeClient, persistence, maProvider, execution, canary = null }) {
   const base = createTradeifyService({ database, account, strategy, environment, dxtradeClient });
 
   async function statusText() {
@@ -83,5 +83,42 @@ export function createSolanaTradeifyService({ database, account, strategy, envir
     ].join("\n");
   }
 
-  return Object.freeze({ ...base, statusText, healthText });
+  async function canaryText() {
+    if (!canary || typeof canary.run !== "function") return "SOL live canary is unavailable in this worker.";
+    const [botState, gridState] = await Promise.all([
+      database.getState(),
+      persistence.state.load()
+    ]);
+    const floors = calculateAccountFloors({
+      startingBalance: account.startingBalance,
+      maxLossOffset: account.maxLossOffset,
+      peakClosedBalance: Math.max(account.startingBalance, botState.high_water),
+      payoutTaken: botState.payout_taken,
+      previousDayClosingBalance: botState.prev_day_close,
+      dailyLossLimit: account.dailyLossLimit
+    });
+
+    if (botState.operator_killed) return "SOL live canary is blocked while the operator pause is active.";
+    if (botState.safety_halt) return `SOL live canary is blocked by the safety halt: ${botState.halt_reason ?? "owner review required"}`;
+    if (botState.has_open_position) return "SOL live canary requires the DXtrade account to be flat first.";
+    if (botState.equity <= floors.activeFloor) return "SOL live canary is blocked because live equity is at or below the active account floor.";
+
+    const result = await canary.run({ stateVersion: gridState?.version ?? 0 });
+    if (result.status === "COMPLETE" && result.openPrice && result.closePrice) {
+      return [
+        "SOL LIVE CANARY COMPLETE",
+        "",
+        `Quantity: ${result.quantity.toFixed(2)} SOL`,
+        `Open fill: ${price(result.openPrice)}`,
+        `Close fill: ${price(result.closePrice)}`,
+        "Broker account: FLAT",
+        "Automatic grid execution: OFF",
+        "",
+        "The real DXtrade order lifecycle has been verified."
+      ].join("\n");
+    }
+    return result.message ?? `SOL live canary ended with status ${result.status}.`;
+  }
+
+  return Object.freeze({ ...base, statusText, healthText, canaryText });
 }
