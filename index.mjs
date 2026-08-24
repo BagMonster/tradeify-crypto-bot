@@ -251,12 +251,19 @@ const service = createSolanaTradeifyService({
 
 const telegramBot = await startTelegramBot({ environment, service });
 
-console.log("Production SOL outer-heavy runtime started in locked Stage A mode.");
+const executionLive = solanaExecution.isEnabled();
+console.log(executionLive
+  ? "Production SOL outer-heavy runtime started with automatic execution LIVE."
+  : "Production SOL outer-heavy runtime started ARMED with automatic execution still blocked by the Railway control.");
 console.log("Market source: Binance SOLUSDT. Account source: DXtrade SOL/USD.");
 console.log("Live-touch semantics: exits before entries.");
-console.log("Owner-triggered 0.01 SOL lifecycle canary is available while automatic execution remains OFF.");
+if (executionLive) {
+  console.log("Owner-triggered lifecycle canary is disabled while automatic grid execution is ON.");
+} else {
+  console.log("Owner-triggered 0.01 SOL lifecycle canary remains available while automatic execution is OFF.");
+}
 console.log("25-day inactivity heartbeat: armed for 0.01 SOL round trips after live activation.");
-console.log("Automatic execution remains OFF; both execution settings remain false.");
+console.log(`Automatic execution: ${executionLive ? "ON" : "OFF"} (Railway=${environment.autoExecute ? "ON" : "OFF"}, strategy=${strategy.execution.autoExecute ? "ON" : "OFF"}, mode=${environment.appMode}).`);
 
 let shuttingDown = false;
 async function shutdown(signal) {
