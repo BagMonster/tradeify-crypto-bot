@@ -3,7 +3,7 @@ name: Sync D-042 through D-046 decision log
 on:
   push:
     branches:
-      - docs/sync-decisions-d042-d046
+      - main
     paths:
       - .github/workflows/sync-decision-log-d042-d046.yml
 
@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: docs/sync-decisions-d042-d046
+          ref: main
       - name: Append missing governed decisions and remove workflow
         shell: bash
         run: |
@@ -80,4 +80,4 @@ EOF
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add "$log"
           git commit -m 'Synchronize D-042 through D-046 in governing decision log'
-          git push origin HEAD:docs/sync-decisions-d042-d046
+          git push origin HEAD:main
