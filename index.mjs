@@ -108,6 +108,7 @@ let liveFeedState = Object.freeze({
   lastTradeId: null,
   reconnectAttempt: 0
 });
+let lastLiveTrade = null;
 let persistedFeedStale = true;
 let runtimeErrorLatched = false;
 let reconciliationHaltLatched = false;
@@ -204,6 +205,7 @@ const heartbeat = createSolanaHeartbeat({
 const binanceFeed = createBinanceLiveFeed({
   symbol: instrument.binanceSymbol,
   onPrice: (trade) => {
+    lastLiveTrade = trade;
     pendingTrade = trade;
     if (!drainingTrades && !maintenanceBusy && !runtimeErrorLatched) void drainLatestTrades();
   },
@@ -246,7 +248,12 @@ const service = createSolanaTradeifyService({
   persistence: solPersistence,
   maProvider,
   execution: solanaExecution,
-  canary: liveCanary
+  canary: liveCanary,
+  getLiveMarketSnapshot: () => Object.freeze({
+    price: lastLiveTrade?.price ?? null,
+    tradeTime: lastLiveTrade?.tradeTime ?? null,
+    stale: liveFeedState.connected !== true || liveFeedState.stale === true
+  })
 });
 
 const telegramBot = await startTelegramBot({ environment, service });
