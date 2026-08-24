@@ -57,7 +57,7 @@ test("200-day SOL MA uses exactly completed UTC daily closes", async () => {
   assert.match(calls[1], /limit=200/);
 });
 
-test("SOL quantity client sends quantity, never cash quantity, and reconciles confirmed fill", async () => {
+test("SOL quantity client sends explicit OPEN position effect and reconciles confirmed fill", async () => {
   const calls = [];
   const replies = [
     response({ sessionToken: "session-token-123" }),
@@ -92,6 +92,7 @@ test("SOL quantity client sends quantity, never cash quantity, and reconciles co
     type: "MARKET",
     instrument: "SOL/USD",
     quantity: 0.06,
+    positionEffect: "OPEN",
     side: "BUY",
     tif: "GTC"
   });
@@ -100,6 +101,39 @@ test("SOL quantity client sends quantity, never cash quantity, and reconciles co
   assert.equal(fill.status, "FILLED");
   assert.equal(fill.filledQuantity, 0.06);
   assert.equal(fill.fillPrice, 99.5);
+});
+
+test("SOL position close uses CLOSE effect and position code without an explicit quantity", async () => {
+  const calls = [];
+  const replies = [response({ sessionToken: "session-token-123" }), response({ orderId: 77 })];
+  const client = new SolanaQuantityClient({
+    restBaseUrl: "https://dx.tradeifycrypto.co/dxsca-web",
+    username: "private-user",
+    domain: "private-domain",
+    password: "private-password",
+    accountCode: "account-code",
+    fetchImpl: async (url, options) => {
+      calls.push({ url: url.toString(), options });
+      return replies.shift();
+    }
+  });
+  await client.placePositionClose({
+    orderCode: "SOLCANARY-V2-CLOSE",
+    orderSide: "SELL",
+    quantity: 0.01,
+    positionCode: "position-sol-1"
+  });
+  const body = JSON.parse(calls[1].options.body);
+  assert.deepEqual(body, {
+    orderCode: "SOLCANARY-V2-CLOSE",
+    type: "MARKET",
+    instrument: "SOL/USD",
+    positionEffect: "CLOSE",
+    positionCode: "position-sol-1",
+    side: "SELL",
+    tif: "GTC"
+  });
+  assert.equal("quantity" in body, false);
 });
 
 test("quantity reconciliation never treats a partial final order as filled", () => {
@@ -247,11 +281,9 @@ test("live runtime executes eligible exits before an entry crossed on the same l
   });
   await runtime.init();
 
-  // Prime the live crossing price while the 25-second hold still blocks exits.
   await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 122, tradeTime: "2026-08-24T00:00:10.000Z" });
   assert.deepEqual(actions, []);
 
-  // At 30 seconds the existing long can exit, and the same tick crosses SELL1 at 122.5.
   await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 123, tradeTime: "2026-08-24T00:00:30.000Z" });
   const firstEntryIndex = actions.findIndex((x) => x === "SELL1");
   assert.ok(firstEntryIndex > 0, `expected exits before SELL1, got ${actions.join(",")}`);
