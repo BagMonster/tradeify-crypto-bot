@@ -1,5 +1,6 @@
 import { loadConfiguration } from "./src/config.js";
 import { createDatabase } from "./src/database.js";
+import { createDevCompanionStore } from "./src/devCompanionStore.js";
 import { createBinanceLiveFeed } from "./src/market/binanceLiveFeed.js";
 import { createBinanceDailyMaProvider } from "./src/market/binanceDailyMa.js";
 import { DxtradeExecutionClient } from "./src/execution/dxtradeExecutionClient.js";
@@ -33,6 +34,12 @@ if (typeof strategy.strategyStatus === "string" && strategy.strategyStatus.start
 
 const database = createDatabase(environment);
 await database.init(account);
+
+const devCompanion = createDevCompanionStore({
+  databaseUrl: environment.databaseUrl,
+  databaseSsl: environment.databaseSsl
+});
+await devCompanion.init();
 
 const solPersistence = createSolanaPersistence(environment);
 await solPersistence.init();
@@ -291,7 +298,8 @@ const service = createSolanaTradeifyService({
 const telegramBot = await startTelegramBot({
   environment,
   service,
-  notifications: liveNotifications
+  notifications: liveNotifications,
+  devCompanion
 });
 
 // Start live inputs only after the owner notification destination is ready.
@@ -319,6 +327,7 @@ console.log(executionLive
 console.log("Market source: Binance SOLUSDT. Account source: DXtrade SOL/USD.");
 console.log("Live-touch semantics: exits before entries.");
 console.log("Owner Telegram broker-confirmed trade and safety notifications: armed.");
+console.log("Owner Telegram OpenAI development mode: queue bridge armed; companion processing runs in the separate Railway worker.");
 if (executionLive) {
   console.log("Owner-triggered lifecycle canary is disabled while automatic grid execution is ON.");
 } else {
@@ -333,6 +342,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   console.log(`Received ${signal}; shutting down cleanly.`);
   clearInterval(heartbeatTimer);
+  telegramBot.stopDevCompanionDelivery?.();
   binanceFeed.stop();
   accountMonitor.stop();
   try {
@@ -341,7 +351,7 @@ async function shutdown(signal) {
     try { await liveNotifications.drain(); } catch { console.error("Telegram notification queue did not drain cleanly."); }
     try { await dxtradeClient.logout(); } catch { console.error("DXtrade account-monitor logout did not complete cleanly."); }
     try { await solanaQuantityClient.logout(); } catch { console.error("DXtrade SOL execution logout did not complete cleanly."); }
-    await Promise.allSettled([database.close(), solPersistence.close()]);
+    await Promise.allSettled([database.close(), solPersistence.close(), devCompanion.close()]);
   }
   process.exit(0);
 }

@@ -16,8 +16,11 @@ const MAIN_MENU = {
         { text: "Resume", callback_data: "resume" }
       ],
       [
-        { text: "Flat Instructions", callback_data: "flat" },
+        { text: "Development", callback_data: "code" },
         { text: "Help", callback_data: "help" }
+      ],
+      [
+        { text: "Flat Instructions", callback_data: "flat" }
       ]
     ]
   }
@@ -36,14 +39,38 @@ const HELP_TEXT = [
   "/resume - request a 6-digit resume code",
   "/confirmresume CODE - confirm the restart",
   "/flat - show manual SOL/USD flattening instructions",
+  "/code - enter the owner-only OpenAI development conversation",
+  "/devstatus - show development companion queue/session status",
+  "/devreset - reset OpenAI conversation context and remain in development mode",
+  "/devexit - leave development mode",
   "/whoami - show your Telegram numeric user ID",
   "/help - show this list",
   "",
-  "There are no /long or /short commands. /levels and /rings are read-only. The frozen SOL grid trades automatically only when both live execution controls are ON and every safety gate passes."
+  "There are no /long or /short commands. /levels and /rings are read-only. The frozen SOL grid trades automatically only when both live execution controls are ON and every safety gate passes.",
+  "Development mode is conversational only in Phase 1. It cannot place trades or change GitHub."
 ].join("\n");
 
-export async function startTelegramBot({ environment, service, notifications = null }) {
-  const bot = new TelegramBot(environment.telegramToken, { polling: true });
+function devStatusText(status) {
+  return [
+    "OPENAI DEVELOPMENT COMPANION",
+    `Mode: ${status.active ? "ACTIVE" : "OFF"}`,
+    `Conversation context: ${status.hasContext ? "PERSISTED" : "NEW"}`,
+    `Queued: ${status.pending}`,
+    `Processing: ${status.processing}`,
+    `Ready to deliver: ${status.ready}`,
+    `Failed awaiting notice: ${status.failed}`,
+    "Phase 1: conversational/read-only"
+  ].join("\n");
+}
+
+export async function startTelegramBot({
+  environment,
+  service,
+  notifications = null,
+  devCompanion = null,
+  BotClass = TelegramBot
+}) {
+  const bot = new BotClass(environment.telegramToken, { polling: true });
 
   if (notifications !== null) {
     if (typeof notifications?.setSender !== "function") throw new TypeError("notifications.setSender must be a function");
@@ -53,6 +80,13 @@ export async function startTelegramBot({ environment, service, notifications = n
       }
       await bot.sendMessage(environment.telegramAllowedUserId, text);
     });
+  }
+
+  if (devCompanion !== null) {
+    const required = ["setSessionActive", "isSessionActive", "resetSession", "enqueue", "pendingDeliveries", "markDelivered", "status"];
+    for (const method of required) {
+      if (typeof devCompanion?.[method] !== "function") throw new TypeError(`devCompanion.${method} must be a function`);
+    }
   }
 
   function isAuthorized(from) {
@@ -79,6 +113,15 @@ export async function startTelegramBot({ environment, service, notifications = n
 
   async function sendMenu(chatId, lead = "Tradeify control panel") {
     return bot.sendMessage(chatId, lead, MAIN_MENU);
+  }
+
+  async function enterDevelopment(chatId) {
+    if (!devCompanion) return bot.sendMessage(chatId, "Development companion is not configured on this deployment.");
+    await devCompanion.setSessionActive(environment.telegramAllowedUserId, true);
+    return bot.sendMessage(
+      chatId,
+      "OpenAI development mode is ACTIVE. Send normal text to talk with the development companion. Use /devexit to leave, /devreset for a fresh conversation, or /devstatus to check the queue."
+    );
   }
 
   bot.onText(/^\/whoami(?:@\w+)?$/i, async (message) => {
@@ -133,6 +176,42 @@ export async function startTelegramBot({ environment, service, notifications = n
     await bot.sendMessage(message.chat.id, service.flatInstructions());
   }));
 
+  bot.onText(/^\/code(?:@\w+)?$/i, withAuthorization(async (message) => {
+    await enterDevelopment(message.chat.id);
+  }));
+
+  bot.onText(/^\/devstatus(?:@\w+)?$/i, withAuthorization(async (message) => {
+    if (!devCompanion) return bot.sendMessage(message.chat.id, "Development companion is not configured on this deployment.");
+    await bot.sendMessage(message.chat.id, devStatusText(await devCompanion.status(environment.telegramAllowedUserId)));
+  }));
+
+  bot.onText(/^\/devreset(?:@\w+)?$/i, withAuthorization(async (message) => {
+    if (!devCompanion) return bot.sendMessage(message.chat.id, "Development companion is not configured on this deployment.");
+    await devCompanion.resetSession(environment.telegramAllowedUserId);
+    await bot.sendMessage(message.chat.id, "Development conversation reset. OpenAI context is fresh and development mode remains ACTIVE.");
+  }));
+
+  bot.onText(/^\/devexit(?:@\w+)?$/i, withAuthorization(async (message) => {
+    if (!devCompanion) return bot.sendMessage(message.chat.id, "Development companion is not configured on this deployment.");
+    await devCompanion.setSessionActive(environment.telegramAllowedUserId, false);
+    await bot.sendMessage(message.chat.id, "OpenAI development mode is OFF. Trading commands continue to work normally.");
+  }));
+
+  // Ordinary owner text becomes development conversation only while /code mode is active.
+  bot.on("message", async (message) => {
+    if (!devCompanion || !isAuthorized(message.from)) return;
+    const text = typeof message.text === "string" ? message.text.trim() : "";
+    if (!text || text.startsWith("/")) return;
+    try {
+      if (!(await devCompanion.isSessionActive(environment.telegramAllowedUserId))) return;
+      const jobId = await devCompanion.enqueue(environment.telegramAllowedUserId, text);
+      await bot.sendMessage(message.chat.id, `Development request #${jobId} queued. I'll send the OpenAI reply here when it is ready.`);
+    } catch (error) {
+      console.error("Development message routing failed:", error.message);
+      await bot.sendMessage(message.chat.id, "The development request could not be queued. Check Railway logs.");
+    }
+  });
+
   bot.on("callback_query", async (query) => {
     const chatId = query.message?.chat?.id;
     if (!chatId) return;
@@ -163,6 +242,9 @@ export async function startTelegramBot({ environment, service, notifications = n
         case "flat":
           await bot.sendMessage(chatId, service.flatInstructions());
           break;
+        case "code":
+          await enterDevelopment(chatId);
+          break;
         case "help":
           await bot.sendMessage(chatId, HELP_TEXT);
           break;
@@ -179,6 +261,32 @@ export async function startTelegramBot({ environment, service, notifications = n
     console.error("Telegram polling error:", error.message);
   });
 
+  let deliveryBusy = false;
+  async function deliverDevelopmentReplies() {
+    if (!devCompanion || deliveryBusy) return;
+    deliveryBusy = true;
+    try {
+      const deliveries = await devCompanion.pendingDeliveries(environment.telegramAllowedUserId, 5);
+      for (const delivery of deliveries) {
+        const text = delivery.status === "COMPLETED"
+          ? `🤖 DEVELOPMENT COMPANION\n\n${delivery.outputText}`
+          : "⚠️ DEVELOPMENT COMPANION\n\nThe OpenAI request failed. The trading bot was not affected. Check the companion worker logs.";
+        await bot.sendMessage(environment.telegramAllowedUserId, text);
+        await devCompanion.markDelivered(delivery.id, environment.telegramAllowedUserId);
+      }
+    } catch (error) {
+      console.error("Development reply delivery failed:", error.message);
+    } finally {
+      deliveryBusy = false;
+    }
+  }
+
+  const devDeliveryTimer = devCompanion
+    ? setInterval(() => void deliverDevelopmentReplies(), 1500)
+    : null;
+  devDeliveryTimer?.unref?.();
+  if (devCompanion) void deliverDevelopmentReplies();
+
   await bot.setMyCommands([
     { command: "status", description: "Show bot and risk status" },
     { command: "health", description: "Check worker and database" },
@@ -189,9 +297,17 @@ export async function startTelegramBot({ environment, service, notifications = n
     { command: "kill", description: "Pause the bot" },
     { command: "resume", description: "Request a resume code" },
     { command: "flat", description: "Show flattening instructions" },
+    { command: "code", description: "Enter OpenAI development mode" },
+    { command: "devstatus", description: "Show development companion status" },
+    { command: "devreset", description: "Reset development conversation" },
+    { command: "devexit", description: "Leave development mode" },
     { command: "whoami", description: "Show your Telegram user ID" },
     { command: "help", description: "Show commands" }
   ]);
+
+  bot.stopDevCompanionDelivery = () => {
+    if (devDeliveryTimer) clearInterval(devDeliveryTimer);
+  };
 
   return bot;
 }
