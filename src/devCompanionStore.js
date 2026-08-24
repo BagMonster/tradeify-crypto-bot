@@ -50,6 +50,14 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     `);
     await pool.query("CREATE INDEX IF NOT EXISTS ai_dev_jobs_pending_idx ON ai_dev_jobs (status, id)");
     await pool.query("CREATE INDEX IF NOT EXISTS ai_dev_jobs_delivery_idx ON ai_dev_jobs (owner_id, status, delivered_at, id)");
+
+    // Phase 1 runs exactly one companion worker. If Railway restarts it after a job was
+    // claimed but before completion, make that job eligible again instead of stranding it.
+    await pool.query(`
+      UPDATE ai_dev_jobs
+      SET status = 'PENDING', started_at = NULL
+      WHERE status = 'PROCESSING' AND completed_at IS NULL
+    `);
   }
 
   async function setSessionActive(ownerIdValue, active) {
@@ -116,11 +124,13 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     const responseId = requireText("responseId", responseIdValue, 256);
     await pool.query("BEGIN");
     try {
-      await pool.query(`
+      const job = await pool.query(`
         UPDATE ai_dev_jobs
         SET status = 'COMPLETED', output_text = $2, response_id = $3, completed_at = NOW()
         WHERE id = $1 AND owner_id = $4 AND status = 'PROCESSING'
+        RETURNING id
       `, [jobId, outputText, responseId, ownerId]);
+      if (job.rowCount !== 1) throw new Error("Development companion job could not be completed");
       await pool.query(`
         INSERT INTO ai_dev_sessions (owner_id, active, previous_response_id, updated_at)
         VALUES ($1, TRUE, $2, NOW())
@@ -158,8 +168,37 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     }));
   }
 
-  async function markDelivered(jobId) {
-    await pool.query("UPDATE ai_dev_jobs SET delivered_at = NOW() WHERE id = $1 AND delivered_at IS NULL", [jobId]);
+  async function markDelivered(jobId, ownerIdValue) {
+    const ownerId = requireOwnerId(ownerIdValue);
+    await pool.query(
+      "UPDATE ai_dev_jobs SET delivered_at = NOW() WHERE id = $1 AND owner_id = $2 AND delivered_at IS NULL",
+      [jobId, ownerId]
+    );
+  }
+
+  async function status(ownerIdValue) {
+    const ownerId = requireOwnerId(ownerIdValue);
+    const [session, jobs] = await Promise.all([
+      pool.query("SELECT active, previous_response_id IS NOT NULL AS has_context, updated_at FROM ai_dev_sessions WHERE owner_id = $1", [ownerId]),
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'PENDING')::int AS pending,
+          COUNT(*) FILTER (WHERE status = 'PROCESSING')::int AS processing,
+          COUNT(*) FILTER (WHERE status = 'COMPLETED' AND delivered_at IS NULL)::int AS ready,
+          COUNT(*) FILTER (WHERE status = 'FAILED' AND delivered_at IS NULL)::int AS failed
+        FROM ai_dev_jobs
+        WHERE owner_id = $1
+      `, [ownerId])
+    ]);
+    const row = jobs.rows[0];
+    return Object.freeze({
+      active: session.rowCount === 1 && session.rows[0].active === true,
+      hasContext: session.rowCount === 1 && session.rows[0].has_context === true,
+      pending: Number(row.pending ?? 0),
+      processing: Number(row.processing ?? 0),
+      ready: Number(row.ready ?? 0),
+      failed: Number(row.failed ?? 0)
+    });
   }
 
   async function health() {
@@ -171,5 +210,19 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     await pool.end();
   }
 
-  return Object.freeze({ init, setSessionActive, isSessionActive, resetSession, enqueue, claimNext, complete, fail, pendingDeliveries, markDelivered, health, close });
+  return Object.freeze({
+    init,
+    setSessionActive,
+    isSessionActive,
+    resetSession,
+    enqueue,
+    claimNext,
+    complete,
+    fail,
+    pendingDeliveries,
+    markDelivered,
+    status,
+    health,
+    close
+  });
 }
