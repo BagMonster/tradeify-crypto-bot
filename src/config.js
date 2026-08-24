@@ -152,15 +152,21 @@ export function loadEnvironment() {
       accountCode: requireText("DXTRADE_ACCOUNT_CODE", process.env.DXTRADE_ACCOUNT_CODE)
     })
   };
-  if (environment.appMode !== "stage-a") throw new Error("The production grid remains in APP_MODE=stage-a until the final live activation decision");
-  if (environment.autoExecute) throw new Error("AUTO_EXECUTE must remain false until the final live activation approval");
+  if (!new Set(["stage-a", "live"]).has(environment.appMode)) {
+    throw new Error("APP_MODE must equal stage-a or live");
+  }
+  if (environment.autoExecute && environment.appMode !== "live") {
+    throw new Error("AUTO_EXECUTE=true requires APP_MODE=live");
+  }
   return Object.freeze(environment);
 }
 
 export async function loadConfiguration() {
   const [account, strategy] = await Promise.all([loadAccountConfig(), loadStrategyConfig()]);
   const environment = loadEnvironment();
-  if (strategy.execution.autoExecute) throw new Error("config/strategy.json execution.autoExecute must remain false");
+  if (environment.autoExecute && strategy.execution.autoExecute !== true) {
+    throw new Error("AUTO_EXECUTE=true requires config/strategy.json execution.autoExecute=true");
+  }
   const instrument = resolveInstrumentProfile(strategy);
   return { account, strategy, environment, instrument };
 }

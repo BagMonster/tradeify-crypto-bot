@@ -22,18 +22,18 @@ const MAIN_MENU = {
 const HELP_TEXT = [
   "TRADEIFY BOT COMMANDS",
   "",
-  "/status - show account, floors, risk, and readiness",
-  "/health - confirm the worker and PostgreSQL are reachable",
+  "/status - show account, floors, SOL strategy state, and live execution controls",
+  "/health - confirm the worker, PostgreSQL, MA provider, and execution state",
   "/dxpreflight - inspect active-instrument order settings without placing an order",
-  "/solcanary - run the approved 0.01 SOL live open/hold/close lifecycle canary",
+  "/solcanary - inspect/replay the approved lifecycle canary only while automatic execution is OFF",
   "/kill - pause the bot and persist the pause",
   "/resume - request a 6-digit resume code",
   "/confirmresume CODE - confirm the restart",
-  "/flat - show Stage A manual flattening instructions",
+  "/flat - show manual SOL/USD flattening instructions",
   "/whoami - show your Telegram numeric user ID",
   "/help - show this list",
   "",
-  "There are no /long or /short commands. Automatic grid execution remains separately gated."
+  "There are no /long or /short commands. The frozen SOL grid trades automatically only when both live execution controls are ON and every safety gate passes."
 ].join("\n");
 
 export async function startTelegramBot({ environment, service }) {
@@ -88,7 +88,7 @@ export async function startTelegramBot({ environment, service }) {
   }));
 
   bot.onText(/^\/solcanary(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, "Starting the owner-approved 0.01 SOL live lifecycle canary. Automatic grid execution stays OFF.");
+    await bot.sendMessage(message.chat.id, "Checking the owner-approved 0.01 SOL lifecycle canary. It can run only while automatic grid execution is OFF.");
     await bot.sendMessage(message.chat.id, await service.canaryText());
   }));
 
@@ -153,7 +153,7 @@ export async function startTelegramBot({ environment, service }) {
     { command: "status", description: "Show bot and risk status" },
     { command: "health", description: "Check worker and database" },
     { command: "dxpreflight", description: "Inspect active instrument settings" },
-    { command: "solcanary", description: "Run approved 0.01 SOL lifecycle canary" },
+    { command: "solcanary", description: "Inspect approved 0.01 SOL lifecycle canary" },
     { command: "kill", description: "Pause the bot" },
     { command: "resume", description: "Request a resume code" },
     { command: "flat", description: "Show flattening instructions" },

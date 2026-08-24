@@ -34,12 +34,15 @@ export function createSolanaTradeifyService({ database, account, strategy, envir
     const gross = gridState ? grossVirtualExposureUsd(gridState, mark) : 0;
     const net = gridState ? expectedNetUnits(gridState) : 0;
     const operating = botState.operator_killed || botState.safety_halt ? "PAUSED" : "RUNNING";
+    const executionState = execution.isEnabled() ? "LIVE" : (strategy.execution.autoExecute ? "ARMED" : "LOCKED");
 
     const lines = [
       "TRADEIFY SOL OUTER-HEAVY STATUS",
       "",
-      `Mode: ${environment.appMode.toUpperCase()} / PRODUCTION STRATEGY LOCKED`,
+      `Mode: ${environment.appMode.toUpperCase()} / PRODUCTION ${executionState}`,
       `Auto-execution: ${execution.isEnabled() ? "ON" : "OFF"}`,
+      `Railway execution control: ${environment.autoExecute ? "ON" : "OFF"}`,
+      `Strategy execution control: ${strategy.execution.autoExecute ? "ON" : "OFF"}`,
       `Bot: ${operating}`,
       "Strategy: sol-outer-heavy-v1",
       "Market source: Binance SOLUSDT",
@@ -79,7 +82,8 @@ export function createSolanaTradeifyService({ database, account, strategy, envir
       "Instrument: SOL/USD / Binance SOLUSDT",
       "Strategy: sol-outer-heavy-v1",
       `200-day MA: OK (${ma.completedThrough})`,
-      `Auto-execution: ${execution.isEnabled() ? "ON" : "OFF"}`
+      `Auto-execution: ${execution.isEnabled() ? "ON" : "OFF"}`,
+      `Mode: ${environment.appMode}`
     ].join("\n");
   }
 
