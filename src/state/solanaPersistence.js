@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS solana_telegram_notifications (
     'HEARTBEAT_CONFIRMED',
     'RECONCILIATION_MISMATCH',
     'ACCOUNT_LOCKOUT',
+    'SAFETY_HALT',
     'PROTECTIVE_FLATTEN_CONFIRMED'
   )),
   status TEXT NOT NULL CHECK (status IN ('CLAIMED','SENT','FAILED')),
@@ -230,6 +231,7 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
       "HEARTBEAT_CONFIRMED",
       "RECONCILIATION_MISMATCH",
       "ACCOUNT_LOCKOUT",
+      "SAFETY_HALT",
       "PROTECTIVE_FLATTEN_CONFIRMED"
     ];
     if (!allowed.includes(kind)) throw new TypeError("notification kind is invalid");
