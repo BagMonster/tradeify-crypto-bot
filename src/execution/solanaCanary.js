@@ -1,8 +1,8 @@
 const STRATEGY_ID = "sol-outer-heavy-v1";
 const INSTRUMENT = "SOL/USD";
 const CANARY_QUANTITY = 0.01;
-const OPEN_CODE = "SOLCANARY-V1-OPEN";
-const CLOSE_CODE = "SOLCANARY-V1-CLOSE";
+const OPEN_CODE = "SOLCANARY-V2-OPEN";
+const CLOSE_CODE = "SOLCANARY-V2-CLOSE";
 const FINAL_FAILURES = new Set(["REJECTED", "CANCELED", "EXPIRED", "PARTIAL", "FAILED"]);
 
 function text(name, value, max = 128) {
