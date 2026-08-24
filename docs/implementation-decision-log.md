@@ -139,7 +139,7 @@ Approval of this contract freezes it: no Step from 26.2 onward may quietly chang
 - Chapter 6.10 `src/tradeifyService.js`: completed and verified on 2026-08-12. Focused checks passed for status calculations, persistent pause, hashed two-step resume, incorrect/expired-code rejection, safety-halt preservation, Stage A flat instructions, and health reporting; no order-placement path exists. Commit: `60cfe0e`.
 - Chapter 6.11 `src/telegramBot.js`: completed and verified on 2026-08-12. Focused checks passed for `/whoami` discovery, one-user authorization, all Stage A slash commands, all six inline buttons, callback acknowledgement, command/button parity, unknown-button handling, and the registered Telegram command menu. Commit: `7a86783`.
 - Chapter 6.12 `index.mjs`: completed and verified on 2026-08-12. Syntax and lifecycle checks passed for configuration → PostgreSQL initialization → control service → Telegram startup, Stage A simulation/auto-execution-off reporting, and clean `SIGTERM`/`SIGINT` shutdown of Telegram polling and PostgreSQL. Commit: `0de139a`.
-- Chapter 6.13 `tests/riskEngine.test.mjs`: completed and verified on 2026-08-12. All 13 automated checks passed for initial/daily/trailing floors, MLL ratcheting and cap, payout locking, 20% consistency, required-profit reporting, BTC position sizing, maximum-notional refusal, healthy and blocked risk gates, and two-loss risk reduction. Commit: `4483e69`.
+- Chapter 6.13 `tests/riskEngine.test.mjs`: completed and verified on 2026-08-12. All 13 automated checks passed for initial/daily/trailing floors, MLL ratcheting and cap, payout locking, 20% consistency, required-profit reporting, BTC position sizing, maximum-notional refusal, healthy and blocked risk gates, and two-loss risk reduction. Commit: `4483e69a`.
 - Chapter 6.14 `.github/workflows/test.yml`: completed and verified on 2026-08-12. YAML validation passed, and GitHub Actions push run #1 completed successfully under Node.js 22 with dependency installation, full JavaScript syntax checks, and all 13 risk tests. Commit: `76b3f82`.
 - Chapter 6.15 `README.md`: completed and verified on 2026-08-12. The Stage A feature summary, dual automatic-execution locks, Railway start command, eight operator commands, and simulation-only boundaries match the repository; the Chapter 4 file tree is complete; no embedded token, database credential, API key, password, or secret was found; GitHub Actions run #3 passed. Commit: `6dcb8a2`.
 - Chapter 7 GitHub Actions verification: completed on 2026-08-12. The newest completed `Test Tradeify Bot` workflow, run #4, finished successfully; the `test` job and every workflow step were green, and the cloud log reported 13 tests, 13 passes, and 0 failures.
@@ -214,3 +214,51 @@ The frozen five-minute research touch model is translated to production using ac
 D-041 authorizes implementation only. It does not authorize live automatic grid execution. D-038 still requires one separately owner-approved minimum-size live execution lifecycle canary, followed by a separate final owner approval before automatic grid execution may be enabled. Until then, Railway `AUTO_EXECUTE=false` and `config/strategy.json` → `execution.autoExecute=false` remain required.
 
 Full decision: `docs/decisions/D-041-sol-live-touch-production-semantics.md`.
+
+## D-042 — Owner-approved SOL live lifecycle canary
+
+**Status:** APPROVED by owner on 2026-08-23; implemented and completed successfully.
+
+The owner explicitly approved the one controlled real DXtrade lifecycle canary required by D-038. The canary was permitted only while automatic grid execution remained locked, required a flat account and clear safety state, used one durable/idempotent 0.01 SOL opening order, required confirmed broker fills, held at least 25 seconds, closed the exact linked SOL/USD position, and required the broker account to be confirmed flat afterward. Ambiguous, partial, rejected, or mismatched broker outcomes had to stop rather than trigger a guessed replacement order.
+
+D-042 authorized the lifecycle canary only; it did not authorize automatic production-grid trading. The canary later completed successfully under the corrected V2 order path.
+
+Full decision: `docs/decisions/D-042-owner-approved-sol-live-canary.md`.
+
+## D-043 — SOL canary open diagnostic follow-up
+
+**Status:** OWNER-DIRECTED operational follow-up on 2026-08-23; implemented.
+
+After the first `/solcanary` opening attempt was not confirmed, the bot was required to preserve the original idempotent order identity, send no replacement order while broker state was uncertain, read DXtrade positions, and report whether the account was flat or held SOL/USD exposure. The diagnostic path kept the failed/pending V1 attempt visible as historical evidence and prevented duplicate exposure while the execution-path cause was investigated.
+
+This follow-up did not change strategy parameters, ring state, account risk limits, or automatic-execution controls.
+
+Full decision: `docs/decisions/D-043-canary-open-diagnostic.md`.
+
+## D-044 — DXtrade SOL position-effect order-shape correction
+
+**Status:** IMPLEMENTED operational correction on 2026-08-23 under the owner's standing approval to complete the SOL live lifecycle canary and start the bot.
+
+Account-specific preflight confirmed SOL/USD minimum size and increment of 0.01, so size was not the blocker. The production order shape was corrected so opening quantity orders include `positionEffect: "OPEN"`, while exact linked-position closes use `positionEffect: "CLOSE"` plus the DXtrade `positionCode`. The abandoned V1 canary identifiers remain historical and are never resubmitted; the corrected V2 path uses unique identifiers after verifying the broker account is flat.
+
+This correction did not change the frozen SOL strategy, ring geometry, risk limits, or live-touch semantics.
+
+Full decision: `docs/decisions/D-044-dxtrade-position-effect-order-shape.md`.
+
+## D-045 — Final SOL live activation
+
+**Status:** APPROVED by owner on 2026-08-23 after the real SOL lifecycle canary completed successfully.
+
+The owner granted final approval to activate automatic production-grid execution after the verified V2 canary opened 0.01 SOL at $93.83, satisfied the 25-second minimum hold, closed the exact linked position at $93.88, and left the DXtrade account flat with no pending order. The governing production strategy remains `sol-outer-heavy-v1` under D-040 with D-041 live-touch semantics.
+
+D-045 authorizes automatic production-grid execution when the activation deployment is healthy and both execution controls are deliberately enabled: `config/strategy.json` → `execution.autoExecute=true`, and Railway `AUTO_EXECUTE=true` with `APP_MODE=live`. All independent account, feed, floor, exposure, pause, safety-halt, reconciliation, protective-flatten, and minimum-hold protections remain binding.
+
+Full decision: `docs/decisions/D-045-final-sol-live-activation.md`.
+
+## D-046 — Telegram SOL ring observability
+
+**Status:** APPROVED by owner on 2026-08-23; implemented and deployment-verified.
+
+Add owner-only, read-only `/rings` and `/levels` Telegram utilities derived from the frozen `sol-outer-heavy-v1` definition, the same completed-day 200-day MA, and the same live Binance SOLUSDT feed used by production. `/rings` reports where live SOL sits relative to the 8 BUY / 8 SHORT ladder; `/levels` reports the full trigger ladder, frozen USD sizes, estimated 0.01-SOL-rounded quantities, and persistent armed/occupied state. Both fail closed when price or MA is unavailable/stale and neither can submit an order or mutate strategy state. Matching owner-only inline buttons and synchronized `/help`/operator documentation are included.
+
+Full decision: `docs/decisions/D-046-telegram-ring-observability.md`.
