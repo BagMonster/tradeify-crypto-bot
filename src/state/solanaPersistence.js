@@ -169,9 +169,42 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     return normalizeOrder(result.rows[0]);
   }
 
+  async function getLatestFilledAt() {
+    const result = await query(
+      `SELECT MAX(filled_at) AS latest_filled_at
+         FROM solana_execution_orders
+        WHERE status = 'FILLED'`
+    );
+    if (result.rowCount !== 1) throw new Error("SOL latest-fill query returned an invalid row count");
+    return result.rows[0].latest_filled_at == null ? null : new Date(result.rows[0].latest_filled_at).toISOString();
+  }
+
+  async function getLatestHeartbeatOpen() {
+    const result = await query(
+      `SELECT *
+         FROM solana_execution_orders
+        WHERE action_type = 'HEARTBEAT_OPEN'
+        ORDER BY created_at DESC
+        LIMIT 1`
+    );
+    if (result.rowCount === 0) return null;
+    if (result.rowCount !== 1) throw new Error("SOL heartbeat lookup returned an invalid row count");
+    return normalizeOrder(result.rows[0]);
+  }
+
   async function close() {
     await pool.end();
   }
 
-  return Object.freeze({ init, state, getOrder, claimOrder, markSubmitted, markStatus, close });
+  return Object.freeze({
+    init,
+    state,
+    getOrder,
+    claimOrder,
+    markSubmitted,
+    markStatus,
+    getLatestFilledAt,
+    getLatestHeartbeatOpen,
+    close
+  });
 }
