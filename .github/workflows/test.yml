@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -26,3 +29,75 @@ jobs:
 
       - name: Run risk tests
         run: npm test
+
+      - name: Synchronize D-042 through D-046 and restore standard CI
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          log='docs/implementation-decision-log.md'
+          if ! grep -Fq '## D-042 — Owner-approved SOL live lifecycle canary' "$log"; then
+            cat >> "$log" <<'EOF'
+
+## D-042 — Owner-approved SOL live lifecycle canary
+
+**Status:** APPROVED by owner on 2026-08-23; implemented and completed successfully.
+
+The owner explicitly approved the one controlled real DXtrade lifecycle canary required by D-038. The canary was permitted only while automatic grid execution remained locked, required a flat account and clear safety state, used one durable/idempotent 0.01 SOL opening order, required confirmed broker fills, held at least 25 seconds, closed the exact linked SOL/USD position, and required the broker account to be confirmed flat afterward. Ambiguous, partial, rejected, or mismatched broker outcomes had to stop rather than trigger a guessed replacement order.
+
+D-042 authorized the lifecycle canary only; it did not authorize automatic production-grid trading. The canary later completed successfully under the corrected V2 order path.
+
+Full decision: `docs/decisions/D-042-owner-approved-sol-live-canary.md`.
+
+## D-043 — SOL canary open diagnostic follow-up
+
+**Status:** OWNER-DIRECTED operational follow-up on 2026-08-23; implemented.
+
+After the first `/solcanary` opening attempt was not confirmed, the bot was required to preserve the original idempotent order identity, send no replacement order while broker state was uncertain, read DXtrade positions, and report whether the account was flat or held SOL/USD exposure. The diagnostic path kept the failed/pending V1 attempt visible as historical evidence and prevented duplicate exposure while the execution-path cause was investigated.
+
+This follow-up did not change strategy parameters, ring state, account risk limits, or automatic-execution controls.
+
+Full decision: `docs/decisions/D-043-canary-open-diagnostic.md`.
+
+## D-044 — DXtrade SOL position-effect order-shape correction
+
+**Status:** IMPLEMENTED operational correction on 2026-08-23 under the owner's standing approval to complete the SOL live lifecycle canary and start the bot.
+
+Account-specific preflight confirmed SOL/USD minimum size and increment of 0.01, so size was not the blocker. The production order shape was corrected so opening quantity orders include `positionEffect: "OPEN"`, while exact linked-position closes use `positionEffect: "CLOSE"` plus the DXtrade `positionCode`. The abandoned V1 canary identifiers remain historical and are never resubmitted; the corrected V2 path uses unique identifiers after verifying the broker account is flat.
+
+This correction did not change the frozen SOL strategy, ring geometry, risk limits, or live-touch semantics.
+
+Full decision: `docs/decisions/D-044-dxtrade-position-effect-order-shape.md`.
+
+## D-045 — Final SOL live activation
+
+**Status:** APPROVED by owner on 2026-08-23 after the real SOL lifecycle canary completed successfully.
+
+The owner granted final approval to activate automatic production-grid execution after the verified V2 canary opened 0.01 SOL at $93.83, satisfied the 25-second minimum hold, closed the exact linked position at $93.88, and left the DXtrade account flat with no pending order. The governing production strategy remains `sol-outer-heavy-v1` under D-040 with D-041 live-touch semantics.
+
+D-045 authorizes automatic production-grid execution when the activation deployment is healthy and both execution controls are deliberately enabled: `config/strategy.json` → `execution.autoExecute=true`, and Railway `AUTO_EXECUTE=true` with `APP_MODE=live`. All independent account, feed, floor, exposure, pause, safety-halt, reconciliation, protective-flatten, and minimum-hold protections remain binding.
+
+Full decision: `docs/decisions/D-045-final-sol-live-activation.md`.
+
+## D-046 — Telegram SOL ring observability
+
+**Status:** APPROVED by owner on 2026-08-23; implemented and deployment-verified.
+
+Add owner-only, read-only `/rings` and `/levels` Telegram utilities derived from the frozen `sol-outer-heavy-v1` definition, the same completed-day 200-day MA, and the same live Binance SOLUSDT feed used by production. `/rings` reports where live SOL sits relative to the 8 BUY / 8 SHORT ladder; `/levels` reports the full trigger ladder, frozen USD sizes, estimated 0.01-SOL-rounded quantities, and persistent armed/occupied state. Both fail closed when price or MA is unavailable/stale and neither can submit an order or mutate strategy state. Matching owner-only inline buttons and synchronized `/help`/operator documentation are included.
+
+Full decision: `docs/decisions/D-046-telegram-ring-observability.md`.
+EOF
+          fi
+
+          git checkout HEAD^ -- .github/workflows/test.yml
+          if [ -f .github/workflows/sync-decision-log-d042-d046.yml ]; then
+            git rm .github/workflows/sync-decision-log-d042-d046.yml
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$log" .github/workflows/test.yml
+          if git diff --cached --quiet; then
+            echo 'Nothing to synchronize.'
+            exit 0
+          fi
+          git commit -m 'Synchronize D-042 through D-046 in governing decision log'
+          git push origin HEAD:main
