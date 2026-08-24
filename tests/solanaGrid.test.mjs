@@ -13,14 +13,18 @@ import {
   observeRearm
 } from "../src/strategies/solanaGrid.js";
 
+function approximately(actual, expected, tolerance = 1e-12) {
+  assert.ok(Math.abs(actual - expected) <= tolerance, `expected ${actual} to be within ${tolerance} of ${expected}`);
+}
+
 test("frozen SOL geometry is 8 mirrored active rings outside the 18% dead zone", () => {
   const state = createInitialSolanaState();
   assert.equal(state.rings.length, 16);
   assert.deepEqual(state.rings.slice(0, 4).map((r) => r.tag), ["BUY1", "SELL1", "BUY2", "SELL2"]);
-  assert.equal(state.rings.find((r) => r.tag === "BUY1").distance, -0.225);
-  assert.equal(state.rings.find((r) => r.tag === "SELL1").distance, 0.225);
-  assert.equal(state.rings.find((r) => r.tag === "BUY8").distance, -0.54);
-  assert.equal(state.rings.find((r) => r.tag === "SELL8").distance, 0.54);
+  approximately(state.rings.find((r) => r.tag === "BUY1").distance, -0.225);
+  approximately(state.rings.find((r) => r.tag === "SELL1").distance, 0.225);
+  approximately(state.rings.find((r) => r.tag === "BUY8").distance, -0.54);
+  approximately(state.rings.find((r) => r.tag === "SELL8").distance, 0.54);
   assert.equal(state.rings.find((r) => r.tag === "BUY1").usd, 6);
   assert.ok(Math.abs(state.rings.find((r) => r.tag === "BUY8").usd - 367.3320192) < 1e-8);
   assert.equal(GRID_DEFINITION.grossExposureCeilingUsd, 1830);
@@ -79,10 +83,13 @@ test("tranche weights use original units, skip sub-lot tranche, and final state 
 test("gross exposure counts both virtual sides while expected broker quantity nets them", () => {
   let state = createInitialSolanaState();
   const buy = entryCandidates(state, { previousPrice: 80, price: 77.5, ma: 100 }).find((x) => x.tag === "BUY1");
+  assert.ok(buy);
   state = applyConfirmedEntry(state, buy, { fillPrice: 77.5, filledQuantity: 0.07, filledAt: "2026-08-23T20:00:00.000Z" });
-  const sell = entryCandidates(state, { previousPrice: 120, price: 122.5, ma: 100 }).find((x) => x.tag === "SELL1");
+
+  const sell = entryCandidates(state, { previousPrice: 122, price: 123, ma: 100 }).find((x) => x.tag === "SELL1");
+  assert.ok(sell);
   const sellCurrent = { ...sell, stateVersion: state.version, lotId: `SELL1-V${state.version}` };
-  state = applyConfirmedEntry(state, sellCurrent, { fillPrice: 122.5, filledQuantity: 0.04, filledAt: "2026-08-23T20:05:00.000Z" });
+  state = applyConfirmedEntry(state, sellCurrent, { fillPrice: 123, filledQuantity: 0.04, filledAt: "2026-08-23T20:05:00.000Z" });
   assert.equal(expectedNetUnits(state), 0.03);
   assert.equal(grossVirtualExposureUsd(state, 100), 11);
 });
