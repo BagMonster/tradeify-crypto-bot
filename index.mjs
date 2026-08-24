@@ -13,6 +13,7 @@ import { formatDxtradeAccountDiagnostic } from "./src/account/dxtradeDiagnostics
 import { createSolanaPersistence } from "./src/state/solanaPersistence.js";
 import { createSolanaRuntime } from "./src/runtime/solanaRuntime.js";
 import { createSolanaHeartbeat } from "./src/runtime/solanaHeartbeat.js";
+import { createLiveTelegramNotifications } from "./src/notifications/liveTelegramNotifications.js";
 import { GRID_DEFINITION } from "./src/strategies/solanaGrid.js";
 import { createSolanaTradeifyService } from "./src/solanaTradeifyService.js";
 import { startTelegramBot } from "./src/telegramBot.js";
@@ -35,6 +36,11 @@ await database.init(account);
 
 const solPersistence = createSolanaPersistence(environment);
 await solPersistence.init();
+
+const liveNotifications = createLiveTelegramNotifications({
+  persistence: solPersistence,
+  addEvent: database.addEvent
+});
 
 const maProvider = createBinanceDailyMaProvider({ marketSymbol: instrument.binanceSymbol, days: 200 });
 await maProvider.refresh();
@@ -82,7 +88,16 @@ const liveCanary = createSolanaLiveCanary({
   minimumHoldSeconds: account.minimumHoldSeconds
 });
 
+function accountLockReasonCode(invariantError) {
+  if (typeof invariantError !== "string") return null;
+  if (invariantError.startsWith("A non-SOL/USD position exists")) return "FOREIGN_POSITION";
+  if (invariantError === "More than one open position exists on the Tradeify account") return "MULTIPLE_POSITIONS";
+  if (invariantError === "DXtrade open-position count does not match position metrics") return "POSITION_COUNT_MISMATCH";
+  return null;
+}
+
 let accountErrorLogged = false;
+let accountLockLatched = false;
 const accountMonitor = createDxtradeAccountMonitor({
   client: dxtradeClient,
   startingBalance: account.startingBalance,
@@ -91,6 +106,22 @@ const accountMonitor = createDxtradeAccountMonitor({
   onSnapshot: async (snapshot) => {
     accountErrorLogged = false;
     await database.syncAccountSnapshot(snapshot, account);
+    if (snapshot.accountLocked) {
+      if (!accountLockLatched) {
+        accountLockLatched = true;
+        const reasonCode = accountLockReasonCode(snapshot.invariantError);
+        if (reasonCode) {
+          const day = snapshot.fetchedAt.slice(0, 10).replaceAll("-", "");
+          liveNotifications.enqueue({
+            kind: "ACCOUNT_LOCKOUT",
+            eventKey: `SOL-ACCOUNT-LOCK:${day}:${reasonCode}`,
+            reasonCode
+          });
+        }
+      }
+    } else {
+      accountLockLatched = false;
+    }
   },
   onError: (error) => {
     if (!accountErrorLogged) {
@@ -119,6 +150,7 @@ const solanaRuntime = createSolanaRuntime({
   minimumHoldSeconds: account.minimumHoldSeconds,
   execution: solanaExecution,
   addEvent: database.addEvent,
+  notifications: liveNotifications,
   getRiskSnapshot: async () => {
     const [botState, accountStatus] = await Promise.all([
       database.getState(),
@@ -157,6 +189,16 @@ async function processLatestTrade(trade) {
     reconciliationHaltLatched = true;
     await database.setSafetyHalt("SOL virtual-lot state does not reconcile to the DXtrade net SOL position; owner review required");
     await database.addEvent("ERROR", "SOL_RECONCILIATION_SAFETY_HALT", { action: "SAFETY_HALT" });
+    const recon = result.reconciliation;
+    if (recon && Number.isFinite(recon.actual)) {
+      liveNotifications.enqueue({
+        kind: "RECONCILIATION_MISMATCH",
+        eventKey: `SOL-RECON:${result.state.version}:${Number(recon.expected).toFixed(8)}:${Number(recon.actual).toFixed(8)}`,
+        stateVersion: result.state.version,
+        expectedVirtualNetUnits: recon.expected,
+        brokerNetUnits: recon.actual
+      });
+    }
   }
 }
 
@@ -176,6 +218,12 @@ async function drainLatestTrades() {
       try {
         await database.setSafetyHalt("SOL production runtime error; owner review required");
         await database.addEvent("ERROR", "SOL_RUNTIME_ERROR", { action: "SAFETY_HALT" });
+        const hour = new Date().toISOString().slice(0, 13).replaceAll("-", "").replace("T", "-");
+        liveNotifications.enqueue({
+          kind: "SAFETY_HALT",
+          eventKey: `SOL-RUNTIME-HALT:${hour}`,
+          reasonCode: "SOL_RUNTIME_ERROR"
+        });
       } catch {
         console.error("Could not persist the SOL runtime safety halt.");
       }
@@ -199,7 +247,8 @@ const heartbeat = createSolanaHeartbeat({
     maintenanceBusy = false;
     if (pendingTrade && !runtimeErrorLatched) void drainLatestTrades();
   },
-  addEvent: database.addEvent
+  addEvent: database.addEvent,
+  notifications: liveNotifications
 });
 
 const binanceFeed = createBinanceLiveFeed({
@@ -222,23 +271,6 @@ const binanceFeed = createBinanceLiveFeed({
   }
 });
 
-await accountMonitor.start();
-binanceFeed.start();
-
-const HEARTBEAT_CHECK_MS = 60 * 60 * 1000;
-const heartbeatTimer = setInterval(() => {
-  void heartbeat.checkOnce().catch(async () => {
-    console.error("SOL inactivity heartbeat check failed; owner review may be required before the inactivity deadline.");
-    try {
-      await database.addEvent("ERROR", "SOL_HEARTBEAT_CHECK_FAILED", { action: "REVIEW" });
-    } catch {
-      console.error("Could not persist heartbeat failure event.");
-    }
-  });
-}, HEARTBEAT_CHECK_MS);
-heartbeatTimer.unref?.();
-void heartbeat.checkOnce().catch(() => console.error("Initial SOL heartbeat check failed."));
-
 const service = createSolanaTradeifyService({
   database,
   account,
@@ -256,7 +288,29 @@ const service = createSolanaTradeifyService({
   })
 });
 
-const telegramBot = await startTelegramBot({ environment, service });
+const telegramBot = await startTelegramBot({
+  environment,
+  service,
+  notifications: liveNotifications
+});
+
+// Start live inputs only after the owner notification destination is ready.
+await accountMonitor.start();
+binanceFeed.start();
+
+const HEARTBEAT_CHECK_MS = 60 * 60 * 1000;
+const heartbeatTimer = setInterval(() => {
+  void heartbeat.checkOnce().catch(async () => {
+    console.error("SOL inactivity heartbeat check failed; owner review may be required before the inactivity deadline.");
+    try {
+      await database.addEvent("ERROR", "SOL_HEARTBEAT_CHECK_FAILED", { action: "REVIEW" });
+    } catch {
+      console.error("Could not persist heartbeat failure event.");
+    }
+  });
+}, HEARTBEAT_CHECK_MS);
+heartbeatTimer.unref?.();
+void heartbeat.checkOnce().catch(() => console.error("Initial SOL heartbeat check failed."));
 
 const executionLive = solanaExecution.isEnabled();
 console.log(executionLive
@@ -264,6 +318,7 @@ console.log(executionLive
   : "Production SOL outer-heavy runtime started ARMED with automatic execution still blocked by the Railway control.");
 console.log("Market source: Binance SOLUSDT. Account source: DXtrade SOL/USD.");
 console.log("Live-touch semantics: exits before entries.");
+console.log("Owner Telegram broker-confirmed trade and safety notifications: armed.");
 if (executionLive) {
   console.log("Owner-triggered lifecycle canary is disabled while automatic grid execution is ON.");
 } else {
@@ -283,6 +338,7 @@ async function shutdown(signal) {
   try {
     await telegramBot.stopPolling();
   } finally {
+    try { await liveNotifications.drain(); } catch { console.error("Telegram notification queue did not drain cleanly."); }
     try { await dxtradeClient.logout(); } catch { console.error("DXtrade account-monitor logout did not complete cleanly."); }
     try { await solanaQuantityClient.logout(); } catch { console.error("DXtrade SOL execution logout did not complete cleanly."); }
     await Promise.allSettled([database.close(), solPersistence.close()]);
