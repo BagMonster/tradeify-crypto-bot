@@ -12,7 +12,10 @@ The user experience remains inside the existing owner-only Telegram bot. The exi
 
 Phase 1 is conversational/read-only:
 
-- `/code` enters or exits owner-only development conversation mode in the existing Telegram bot;
+- `/code` enters owner-only development conversation mode in the existing Telegram bot;
+- `/devexit` leaves development conversation mode;
+- `/devreset` starts a fresh OpenAI conversation while remaining in development mode;
+- `/devstatus` reports the development session and queue state;
 - ordinary owner text while `/code` mode is active is queued to the separate companion worker;
 - the companion worker calls the OpenAI Responses API and returns its answer through the existing Telegram bot;
 - conversation continuity is persisted so Railway restarts do not silently discard the development session;
