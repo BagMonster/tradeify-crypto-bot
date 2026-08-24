@@ -11,6 +11,7 @@ import { createDxtradeAccountMonitor } from "./src/account/dxtradeAccountMonitor
 import { formatDxtradeAccountDiagnostic } from "./src/account/dxtradeDiagnostics.js";
 import { createSolanaPersistence } from "./src/state/solanaPersistence.js";
 import { createSolanaRuntime } from "./src/runtime/solanaRuntime.js";
+import { createSolanaHeartbeat } from "./src/runtime/solanaHeartbeat.js";
 import { GRID_DEFINITION } from "./src/strategies/solanaGrid.js";
 import { createSolanaTradeifyService } from "./src/solanaTradeifyService.js";
 import { startTelegramBot } from "./src/telegramBot.js";
@@ -137,6 +138,7 @@ await solanaRuntime.init();
 
 let pendingTrade = null;
 let drainingTrades = false;
+let maintenanceBusy = false;
 
 async function processLatestTrade(trade) {
   const result = await solanaRuntime.processTrade(trade);
@@ -148,10 +150,10 @@ async function processLatestTrade(trade) {
 }
 
 async function drainLatestTrades() {
-  if (drainingTrades) return;
+  if (drainingTrades || maintenanceBusy) return;
   drainingTrades = true;
   try {
-    while (pendingTrade) {
+    while (pendingTrade && !maintenanceBusy) {
       const trade = pendingTrade;
       pendingTrade = null;
       await processLatestTrade(trade);
@@ -169,15 +171,31 @@ async function drainLatestTrades() {
     }
   } finally {
     drainingTrades = false;
-    if (pendingTrade && !runtimeErrorLatched) void drainLatestTrades();
+    if (pendingTrade && !runtimeErrorLatched && !maintenanceBusy) void drainLatestTrades();
   }
 }
+
+const heartbeat = createSolanaHeartbeat({
+  persistence: solPersistence,
+  adapter: solanaQuantityAdapter,
+  isExecutionEnabled: solanaExecution.isEnabled,
+  acquireMaintenance: async () => {
+    if (maintenanceBusy || drainingTrades) return false;
+    maintenanceBusy = true;
+    return true;
+  },
+  releaseMaintenance: async () => {
+    maintenanceBusy = false;
+    if (pendingTrade && !runtimeErrorLatched) void drainLatestTrades();
+  },
+  addEvent: database.addEvent
+});
 
 const binanceFeed = createBinanceLiveFeed({
   symbol: instrument.binanceSymbol,
   onPrice: (trade) => {
     pendingTrade = trade;
-    if (!drainingTrades && !runtimeErrorLatched) void drainLatestTrades();
+    if (!drainingTrades && !maintenanceBusy && !runtimeErrorLatched) void drainLatestTrades();
   },
   onState: (state) => {
     liveFeedState = state;
@@ -195,6 +213,20 @@ const binanceFeed = createBinanceLiveFeed({
 await accountMonitor.start();
 binanceFeed.start();
 
+const HEARTBEAT_CHECK_MS = 60 * 60 * 1000;
+const heartbeatTimer = setInterval(() => {
+  void heartbeat.checkOnce().catch(async () => {
+    console.error("SOL inactivity heartbeat check failed; owner review may be required before the inactivity deadline.");
+    try {
+      await database.addEvent("ERROR", "SOL_HEARTBEAT_CHECK_FAILED", { action: "REVIEW" });
+    } catch {
+      console.error("Could not persist heartbeat failure event.");
+    }
+  });
+}, HEARTBEAT_CHECK_MS);
+heartbeatTimer.unref?.();
+void heartbeat.checkOnce().catch(() => console.error("Initial SOL heartbeat check failed."));
+
 const service = createSolanaTradeifyService({
   database,
   account,
@@ -211,6 +243,7 @@ const telegramBot = await startTelegramBot({ environment, service });
 console.log("Production SOL outer-heavy runtime started in locked Stage A mode.");
 console.log("Market source: Binance SOLUSDT. Account source: DXtrade SOL/USD.");
 console.log("Live-touch semantics: exits before entries.");
+console.log("25-day inactivity heartbeat: armed for 0.01 SOL round trips after live activation.");
 console.log("Automatic execution remains OFF; both execution settings remain false.");
 
 let shuttingDown = false;
@@ -218,6 +251,7 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`Received ${signal}; shutting down cleanly.`);
+  clearInterval(heartbeatTimer);
   binanceFeed.stop();
   accountMonitor.stop();
   try {
