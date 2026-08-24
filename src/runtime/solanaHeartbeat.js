@@ -22,6 +22,7 @@ export function createSolanaHeartbeat({
   acquireMaintenance,
   releaseMaintenance,
   addEvent = async () => {},
+  notifications = null,
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 }) {
@@ -32,8 +33,22 @@ export function createSolanaHeartbeat({
   for (const [name, fn] of Object.entries({ isExecutionEnabled, acquireMaintenance, releaseMaintenance, addEvent, now, sleep })) {
     if (typeof fn !== "function") throw new TypeError(`${name} must be a function`);
   }
+  if (notifications !== null && typeof notifications?.enqueue !== "function") throw new TypeError("notifications.enqueue must be a function");
 
   let running = false;
+
+  function enqueueHeartbeat(openOrder, closeOrder, closeCode) {
+    if (notifications === null) return;
+    notifications.enqueue({
+      kind: "HEARTBEAT_CONFIRMED",
+      eventKey: `SOL-HEARTBEAT:${closeCode}`,
+      quantity: QUANTITY,
+      openFillPrice: openOrder.fillPrice,
+      closeFillPrice: closeOrder.fillPrice,
+      openedAt: openOrder.filledAt,
+      closedAt: closeOrder.filledAt
+    });
+  }
 
   async function placeHeartbeat({ orderCode, actionType, side }) {
     return adapter.place({
@@ -69,6 +84,7 @@ export function createSolanaHeartbeat({
 
     const existingClose = await persistence.getOrder(closeCode);
     if (existingClose?.status === "FILLED") {
+      enqueueHeartbeat(currentOpen, existingClose, closeCode);
       return Object.freeze({ status: "COMPLETE", openCode, closeCode, filledAt: existingClose.filledAt });
     }
 
@@ -84,6 +100,7 @@ export function createSolanaHeartbeat({
       openedAt: currentOpen.filledAt,
       closedAt: close.filledAt
     });
+    enqueueHeartbeat(currentOpen, close, closeCode);
     return Object.freeze({ status: "COMPLETE", openCode, closeCode, filledAt: close.filledAt });
   }
 
