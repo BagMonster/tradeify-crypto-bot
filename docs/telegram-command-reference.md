@@ -33,6 +33,22 @@ Reads/validates the active DXtrade `SOL/USD` instrument settings using the exist
 
 Use this for broker/instrument metadata checks, not as proof that an order has filled or can be placed.
 
+### `/solcanary`
+Runs the separately owner-approved real DXtrade lifecycle canary while automatic grid execution remains OFF.
+
+The command is intentionally owner-only and is not available as an inline button. It:
+1. requires no operator pause or safety halt, live equity above the active account floor, and a flat DXtrade account;
+2. submits exactly one `0.01 SOL` market BUY using a persistent canary order identity;
+3. waits at least 25 seconds from the confirmed broker fill;
+4. reads the exact resulting DXtrade `SOL/USD` position and closes that position using the broker position code and exact confirmed quantity;
+5. requires a confirmed close fill and then verifies the broker account is flat.
+
+The canary never arms, disarms, increments, fills, or otherwise mutates a SOL strategy ring or tranche. Re-running the command after a completed canary is idempotent and does not create a second round trip.
+
+If the open or close result is uncertain, partial, rejected, or inconsistent with the broker position, the command stops rather than guessing or sending a replacement order. Review DXtrade before retrying anything.
+
+Completing `/solcanary` verifies the real order lifecycle. It does **not** turn on the production grid. Both automatic-execution settings remain false until the separate final activation step.
+
 ### `/kill`
 Immediately enables the durable operator pause in PostgreSQL. The pause survives a Railway restart.
 
@@ -78,7 +94,7 @@ Shows the command list and opens the inline control menu.
 | `Flat Instructions` | `/flat` |
 | `Help` | `/help` |
 
-Inline buttons use the same owner authorization check as slash commands.
+Inline buttons use the same owner authorization check as slash commands. `/solcanary` is deliberately slash-command-only so it cannot be started by an accidental button tap.
 
 ## Safety and execution behavior
 
@@ -86,15 +102,17 @@ The production strategy is `sol-outer-heavy-v1`, using Binance `SOLUSDT` live to
 
 The worker keeps each ring fill as a durable virtual lot while the DXtrade account remains netted. If the signed total of virtual SOL inventory no longer reconciles to the broker's net SOL position, new strategy actions fail closed and require owner review.
 
-The automatic inactivity heartbeat is separate from ring state. After live activation, if 25 days pass without a confirmed bot trade, it is designed to perform a minimum-size `0.01 SOL` round trip with the project 25-second minimum hold and without changing any ring, tranche, or MA state.
+The automatic inactivity heartbeat is separate from ring state. After live activation, if the configured inactivity interval passes without a confirmed bot trade, it is designed to perform a minimum-size `0.01 SOL` round trip with the project 25-second minimum hold and without changing any ring, tranche, or MA state.
 
-Neither this reference nor `/help` authorizes automatic execution. Live automatic trading requires the separate activation decision and the required execution settings.
+Neither this reference nor `/help` authorizes automatic grid execution. `/solcanary` is the narrow exception approved for one controlled real lifecycle while the grid remains locked off.
 
 ## Common corrections
 
 - `Not authorized` — use the configured owner Telegram account. `/whoami` can show the numeric sender ID.
 - `The command failed` — check Railway logs; do not repeatedly retry an order-related action when broker state is uncertain.
+- Canary says account must be flat — close or reconcile the actual DXtrade `SOL/USD` position before trying the canary.
+- Canary open or close not confirmed — inspect DXtrade first; do not send repeated `/solcanary` commands while the broker outcome is uncertain.
 - Resume code rejected — run `/resume` again and use the newest six-digit code within 10 minutes.
 - Safety halt remains after resume — `/resume` removes only the operator pause. Resolve the stated safety condition first.
-- Feed/account data stale — new entries remain blocked until fresh data returns.
+- Feed/account data stale — new strategy entries remain blocked until fresh data returns.
 - Reconciliation mismatch — confirm the actual DXtrade `SOL/USD` net position before any further strategy action.

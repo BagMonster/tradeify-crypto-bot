@@ -25,6 +25,7 @@ const HELP_TEXT = [
   "/status - show account, floors, risk, and readiness",
   "/health - confirm the worker and PostgreSQL are reachable",
   "/dxpreflight - inspect active-instrument order settings without placing an order",
+  "/solcanary - run the approved 0.01 SOL live open/hold/close lifecycle canary",
   "/kill - pause the bot and persist the pause",
   "/resume - request a 6-digit resume code",
   "/confirmresume CODE - confirm the restart",
@@ -32,7 +33,7 @@ const HELP_TEXT = [
   "/whoami - show your Telegram numeric user ID",
   "/help - show this list",
   "",
-  "There are no /long or /short commands in Stage A."
+  "There are no /long or /short commands. Automatic grid execution remains separately gated."
 ].join("\n");
 
 export async function startTelegramBot({ environment, service }) {
@@ -84,6 +85,11 @@ export async function startTelegramBot({ environment, service }) {
   bot.onText(/^\/dxpreflight(?:@\w+)?$/i, withAuthorization(async (message) => {
     await bot.sendMessage(message.chat.id, "Running DXtrade validation-only preflight. No order will be placed.");
     await bot.sendMessage(message.chat.id, await service.dxPreflightText());
+  }));
+
+  bot.onText(/^\/solcanary(?:@\w+)?$/i, withAuthorization(async (message) => {
+    await bot.sendMessage(message.chat.id, "Starting the owner-approved 0.01 SOL live lifecycle canary. Automatic grid execution stays OFF.");
+    await bot.sendMessage(message.chat.id, await service.canaryText());
   }));
 
   bot.onText(/^\/kill(?:@\w+)?$/i, withAuthorization(async (message) => {
@@ -147,6 +153,7 @@ export async function startTelegramBot({ environment, service }) {
     { command: "status", description: "Show bot and risk status" },
     { command: "health", description: "Check worker and database" },
     { command: "dxpreflight", description: "Inspect active instrument settings" },
+    { command: "solcanary", description: "Run approved 0.01 SOL lifecycle canary" },
     { command: "kill", description: "Pause the bot" },
     { command: "resume", description: "Request a resume code" },
     { command: "flat", description: "Show flattening instructions" },
