@@ -5,6 +5,7 @@ const KINDS = new Set([
   "HEARTBEAT_CONFIRMED",
   "RECONCILIATION_MISMATCH",
   "ACCOUNT_LOCKOUT",
+  "SAFETY_HALT",
   "PROTECTIVE_FLATTEN_CONFIRMED"
 ]);
 
@@ -17,6 +18,10 @@ const ACCOUNT_LOCK_REASONS = new Set([
   "FOREIGN_POSITION",
   "MULTIPLE_POSITIONS",
   "POSITION_COUNT_MISMATCH"
+]);
+
+const SAFETY_HALT_REASONS = new Set([
+  "SOL_RUNTIME_ERROR"
 ]);
 
 function finite(name, value) {
@@ -209,6 +214,21 @@ function formatEvent(event) {
     };
   }
 
+  if (kind === "SAFETY_HALT") {
+    const reasonCode = safeText("reasonCode", event.reasonCode, { max: 32, pattern: /^[A-Z_]+$/ });
+    if (!SAFETY_HALT_REASONS.has(reasonCode)) throw new TypeError("safety halt reason is unsupported");
+    return {
+      kind,
+      eventKey,
+      message: [
+        "🚨 SOL SAFETY HALT — RUNTIME ERROR",
+        "The production runtime encountered an internal processing error.",
+        "New strategy actions are halted. Existing funded-account protections remain authoritative.",
+        "Owner review of Railway logs is required."
+      ].join("\n")
+    };
+  }
+
   if (kind === "PROTECTIVE_FLATTEN_CONFIRMED") {
     if (!PROTECTIVE_REASONS.has(event.reason)) throw new TypeError("protective reason is unsupported");
     const flattenQuantity = positive("quantity", event.quantity);
@@ -238,6 +258,7 @@ export function createLiveTelegramNotifications({ persistence, addEvent = async 
   if (typeof addEvent !== "function") throw new TypeError("addEvent must be a function");
 
   let sender = null;
+  let deliveryChain = Promise.resolve();
 
   async function safeAudit(level, kind, payload) {
     try {
@@ -317,7 +338,16 @@ export function createLiveTelegramNotifications({ persistence, addEvent = async 
     }
   }
 
-  return Object.freeze({ setSender, notify });
+  function enqueue(input) {
+    deliveryChain = deliveryChain.then(() => notify(input), () => notify(input));
+    return Object.freeze({ status: "QUEUED" });
+  }
+
+  async function drain() {
+    await deliveryChain;
+  }
+
+  return Object.freeze({ setSender, notify, enqueue, drain });
 }
 
 export { formatEvent as formatLiveTelegramNotification };
