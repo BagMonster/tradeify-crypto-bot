@@ -1,1 +1,0 @@
-D-043 is documented in `docs/decisions/D-043-canary-open-diagnostic.md`. The governing implementation decision log must be synchronized with D-043 before this diagnostic follow-up is considered complete. Automatic production-grid execution remains disabled.
