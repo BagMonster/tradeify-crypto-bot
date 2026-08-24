@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,33 +26,3 @@ jobs:
 
       - name: Run risk tests
         run: npm test
-
-      - name: One-time synchronize D-046 and clean temporary workflow
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: bash
-        run: |
-          marker='## D-046 — Telegram SOL ring observability'
-          if ! grep -Fq "$marker" docs/implementation-decision-log.md; then
-            cat >> docs/implementation-decision-log.md <<'EOF'
-
-## D-046 — Telegram SOL ring observability
-
-**Status:** APPROVED by owner on 2026-08-23; implemented and deployment-verified.
-
-Add owner-only, read-only `/rings` and `/levels` Telegram utilities. Both derive prices and sizes from the frozen `sol-outer-heavy-v1` production definition and the same completed-day 200-day MA used by the live strategy. `/rings` compares the same live Binance `SOLUSDT` feed used by the strategy with the current ring ladder and reports dead-zone/ring-zone position, crossed ring, next BUY and SHORT levels, distances, closer side, and crossed-ring USD size. `/levels` displays all 8 BUY and 8 SHORT trigger prices, frozen USD sizes, estimated 0.01-SOL-rounded quantities, and persistent armed/occupied state. Both commands fail closed on missing/stale live price or unavailable MA and never submit orders or mutate strategy state. Matching owner-only `Grid Levels` and `Ring Position` inline buttons are synchronized with `/help`, Telegram command registration, README, and the operator command reference.
-
-Full decision: `docs/decisions/D-046-telegram-ring-observability.md`.
-EOF
-          fi
-          if [ -f .github/workflows/sync-d046.yml ]; then
-            git rm .github/workflows/sync-d046.yml
-          fi
-          if git diff --quiet -- docs/implementation-decision-log.md .github/workflows/sync-d046.yml; then
-            echo "D-046 already synchronized."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/implementation-decision-log.md
-          git commit -m "Record D-046 Telegram SOL ring observability"
-          git push origin HEAD:main
