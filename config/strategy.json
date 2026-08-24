@@ -1,7 +1,7 @@
 {
   "strategyId": "sol-outer-heavy-v1",
   "strategyType": "moving-ma-outer-heavy-grid",
-  "strategyStatus": "production-implemented-locked",
+  "strategyStatus": "production-live-approved",
   "instruments": {
     "BTC/USD": {
       "enabled": false
@@ -30,6 +30,6 @@
   "execution": {
     "minHoldSeconds": 25,
     "slippageCapPct": 0.0005,
-    "autoExecute": false
+    "autoExecute": true
   }
 }
