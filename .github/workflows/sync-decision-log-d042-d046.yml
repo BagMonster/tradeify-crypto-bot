@@ -1,3 +1,4 @@
+# One-time governance repair; this workflow deletes itself after synchronizing the log.
 name: Sync D-042 through D-046 decision log
 
 on:
