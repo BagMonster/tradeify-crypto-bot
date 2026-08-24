@@ -136,6 +136,65 @@ test("SOL execution guard cannot submit while either execution lock is false", a
   assert.equal(placed, 0);
 });
 
+test("protective flatten closes exactly the one signed net SOL broker position", async () => {
+  const orders = new Map();
+  const persistence = {
+    async getOrder(code) { return orders.get(code) ?? null; },
+    async claimOrder(input) {
+      const row = {
+        orderCode: input.orderCode,
+        status: "CLAIMED",
+        requestedQuantity: input.requestedQuantity,
+        side: input.side
+      };
+      orders.set(input.orderCode, row);
+      return row;
+    },
+    async markSubmitted(code, brokerOrderId) {
+      const row = { ...orders.get(code), status: "SUBMITTED", brokerOrderId };
+      orders.set(code, row);
+      return row;
+    },
+    async markStatus(code, status, details) {
+      const row = { ...orders.get(code), status, ...details };
+      orders.set(code, row);
+      return row;
+    }
+  };
+  let closeRequest = null;
+  const guard = createSolanaExecutionGuard({
+    autoExecute: true,
+    strategyAutoExecute: true,
+    adapter: { place: async () => { throw new Error("grid adapter should not be used for protective close"); } },
+    client: {
+      getOpenPositions: async () => ({
+        positions: [{ symbol: "SOL/USD", quantity: -0.12, positionCode: "position-sol-1" }]
+      }),
+      placePositionClose: async (request) => {
+        closeRequest = request;
+        return { orderId: "broker-flat-1" };
+      },
+      reconcileQuantityOrder: async () => ({
+        status: "FILLED",
+        fillPrice: 101,
+        filledQuantity: 0.12,
+        filledAt: "2026-08-24T01:00:00.000Z"
+      })
+    },
+    persistence
+  });
+
+  const result = await guard.executeProtectiveFlatten({ stateVersion: 7, reason: "daily floor" });
+  assert.equal(result.status, "FILLED");
+  assert.deepEqual(closeRequest, {
+    orderCode: "SOLFLAT-7",
+    orderSide: "BUY",
+    quantity: 0.12,
+    positionCode: "position-sol-1"
+  });
+  assert.equal(orders.get("SOLFLAT-7").status, "FILLED");
+});
+
 test("live runtime executes eligible exits before an entry crossed on the same live update", async () => {
   let state = createInitialSolanaState();
   state = applyConfirmedEntry(state, {
