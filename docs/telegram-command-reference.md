@@ -128,6 +128,24 @@ Shows the command list and opens the inline control menu.
 
 Inline buttons use the same owner authorization check as slash commands. `/solcanary` is deliberately slash-command-only so it cannot be started by an accidental button tap.
 
+## Automatic live notifications
+
+Under D-047, the bot also sends owner-only push notifications without requiring a command. These messages are observational only; they do not place, retry, modify, cancel, or close orders.
+
+The notification classes are:
+- `🟢 SOL ENTRY CONFIRMED` — sent only after a DXtrade grid entry is broker-confirmed and the corresponding virtual-lot state is durably saved;
+- `💰 SOL TRANCHE EXIT CONFIRMED` — one message for each broker-confirmed tranche exit after durable state advancement;
+- `✅ SOL LOT FULLY CLOSED` — sent when the confirmed final exit removes the virtual lot;
+- `✅ SOL INACTIVITY HEARTBEAT COMPLETE` — sent only after both heartbeat legs are confirmed; heartbeat activity never mutates ring state;
+- `🚨 SOL SAFETY HALT — RECONCILIATION MISMATCH` — virtual net SOL and DXtrade net SOL disagree outside the reconciliation grace window;
+- `🚨 TRADEIFY ACCOUNT LOCKOUT` — a foreign position, multiple broker positions, or a position-count mismatch locks new SOL actions;
+- `🚨 SOL SAFETY HALT — RUNTIME ERROR` — the production runtime latches a safety halt after an internal processing failure;
+- `🚨 PROTECTIVE FLATTEN CONFIRMED` — the funded-account protective path has broker-confirmed a flatten and reset grid state.
+
+Trade notifications use broker-confirmed fill price, confirmed quantity, ring/lot identity, tranche where applicable, and current MA/target context when safely available. They never expose raw DXtrade payloads, credentials, session tokens, Telegram owner IDs, or arbitrary transport errors.
+
+Notification identities are persisted in PostgreSQL before Telegram delivery. The same durable event is not automatically resent after a retry or restart, which prevents duplicate success messages. If Telegram delivery fails, trading state remains authoritative and the bot does not retry an order or roll back a confirmed fill.
+
 ## Safety and execution behavior
 
 The production strategy is `sol-outer-heavy-v1`, using Binance `SOLUSDT` live touches and DXtrade `SOL/USD` account/execution state. Live strategy processing evaluates eligible exits before entries.
