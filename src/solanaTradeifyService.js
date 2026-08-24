@@ -1,6 +1,7 @@
 import { calculateAccountFloors } from "./risk/accountRules.js";
 import { createTradeifyService } from "./tradeifyService.js";
 import { expectedNetUnits, grossVirtualExposureUsd } from "./strategies/solanaGrid.js";
+import { buildSolanaRingLevels, summarizeSolanaRingPosition } from "./monitoring/solanaRingQueries.js";
 
 function money(value) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 }).format(value);
@@ -10,7 +11,36 @@ function price(value) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(value);
 }
 
-export function createSolanaTradeifyService({ database, account, strategy, environment, dxtradeClient, persistence, maProvider, execution, canary = null }) {
+function signedMoney(value) {
+  const sign = value >= 0 ? "+" : "−";
+  return `${sign}$${Math.abs(value).toFixed(2)}`;
+}
+
+function signedPct(value) {
+  const sign = value >= 0 ? "+" : "−";
+  return `${sign}${Math.abs(value).toFixed(1)}%`;
+}
+
+function ringStateLabel(ring) {
+  if (!ring) return "STATE UNKNOWN";
+  const count = Array.isArray(ring.lots) ? ring.lots.length : 0;
+  if (count >= 2) return "FULL 2/2";
+  if (ring.armed) return count > 0 ? `ARMED ${count}/2` : "ARMED";
+  return count > 0 ? `DISARMED ${count}/2` : "DISARMED";
+}
+
+export function createSolanaTradeifyService({
+  database,
+  account,
+  strategy,
+  environment,
+  dxtradeClient,
+  persistence,
+  maProvider,
+  execution,
+  canary = null,
+  getLiveMarketSnapshot = () => null
+}) {
   const base = createTradeifyService({ database, account, strategy, environment, dxtradeClient });
 
   async function statusText() {
@@ -87,6 +117,78 @@ export function createSolanaTradeifyService({ database, account, strategy, envir
     ].join("\n");
   }
 
+  async function ringInputs() {
+    const market = getLiveMarketSnapshot();
+    if (!market || !Number.isFinite(Number(market.price)) || Number(market.price) <= 0) {
+      return Object.freeze({ error: "SOL ring data unavailable: the live Binance SOLUSDT price has not been received yet." });
+    }
+    if (market.stale === true) {
+      return Object.freeze({ error: "SOL ring data unavailable: the Binance SOLUSDT feed is stale. No level was guessed." });
+    }
+    const maState = await maProvider.getCurrent();
+    if (!maState || !Number.isFinite(Number(maState.ma)) || Number(maState.ma) <= 0) {
+      return Object.freeze({ error: "SOL ring data unavailable: the current completed-day 200-day MA is unavailable." });
+    }
+    return Object.freeze({ price: Number(market.price), ma: Number(maState.ma), maState, market });
+  }
+
+  async function ringsText() {
+    const inputs = await ringInputs();
+    if (inputs.error) return inputs.error;
+    const view = summarizeSolanaRingPosition({ price: inputs.price, ma: inputs.ma });
+    const lines = [
+      `SOL ${price(view.price)} | MA ${price(view.ma)}`,
+      "",
+      `Status: ${view.status}`
+    ];
+
+    if (view.touched) {
+      lines.push(`${view.touched.tag} ${view.touched.status} @ ${price(view.touched.triggerPrice)}`);
+      lines.push(`Size: ${money(view.touched.usd)}`);
+      lines.push("");
+    }
+
+    if (view.nextBuy && view.nextBuyDistance) {
+      lines.push(`Next BUY   ${price(view.nextBuy.triggerPrice)}  (${signedMoney(view.nextBuyDistance.dollars)} / ${signedPct(view.nextBuyDistance.pct)})`);
+    } else {
+      lines.push("Next BUY   none below price (beyond BUY8)");
+    }
+    if (view.nextShort && view.nextShortDistance) {
+      lines.push(`Next SHORT ${price(view.nextShort.triggerPrice)}  (${signedMoney(view.nextShortDistance.dollars)} / ${signedPct(view.nextShortDistance.pct)})`);
+    } else {
+      lines.push("Next SHORT none above price (beyond SHORT8)");
+    }
+    if (view.closer) lines.push("", `Closer to ${view.closer}`);
+    return lines.join("\n");
+  }
+
+  async function levelsText() {
+    const inputs = await ringInputs();
+    if (inputs.error) return inputs.error;
+    const gridState = await persistence.state.load();
+    if (!gridState || !Array.isArray(gridState.rings)) {
+      return "SOL level data unavailable: persistent grid state has not initialized.";
+    }
+    const levels = buildSolanaRingLevels({ ma: inputs.ma });
+    const stateByTag = new Map(gridState.rings.map((ring) => [ring.tag, ring]));
+    const lines = [
+      "SOL GRID LEVELS",
+      `SOL ${price(inputs.price)} | MA ${price(inputs.ma)}`,
+      "",
+      "BUY RINGS"
+    ];
+
+    for (const ring of levels.buys) {
+      lines.push(`${ring.tag} ${price(ring.triggerPrice)} · ${money(ring.usd)} · ~${ring.estimatedUnitsAtTrigger.toFixed(2)} SOL · ${ringStateLabel(stateByTag.get(ring.engineTag))}`);
+    }
+    lines.push("", "SHORT RINGS");
+    for (const ring of levels.shorts) {
+      lines.push(`${ring.tag} ${price(ring.triggerPrice)} · ${money(ring.usd)} · ~${ring.estimatedUnitsAtTrigger.toFixed(2)} SOL · ${ringStateLabel(stateByTag.get(ring.engineTag))}`);
+    }
+    lines.push("", "Trigger prices use Binance SOLUSDT. Actual DXtrade SOL/USD fills may differ slightly.");
+    return lines.join("\n");
+  }
+
   async function canaryText() {
     if (!canary || typeof canary.run !== "function") return "SOL live canary is unavailable in this worker.";
     const [botState, gridState] = await Promise.all([
@@ -124,5 +226,5 @@ export function createSolanaTradeifyService({ database, account, strategy, envir
     return result.message ?? `SOL live canary ended with status ${result.status}.`;
   }
 
-  return Object.freeze({ ...base, statusText, healthText, canaryText });
+  return Object.freeze({ ...base, statusText, healthText, ringsText, levelsText, canaryText });
 }

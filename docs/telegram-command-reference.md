@@ -29,6 +29,37 @@ Checks that the Railway worker and PostgreSQL are reachable, the SOL 200-day mov
 
 This command never places an order.
 
+### `/levels`
+Shows the entire frozen SOL ladder using the same current 200-day MA as the production strategy.
+
+For all 8 BUY and 8 SHORT rings it reports:
+- current Binance `SOLUSDT` trigger price;
+- frozen USD size (`$6 × 1.8^(level-1)`);
+- estimated SOL quantity at that trigger price, floored to the `0.01 SOL` increment;
+- current persistent ring state: `ARMED`, `DISARMED`, or `FULL`, with open-lot count where relevant.
+
+The trigger is a Binance strategy price. The eventual DXtrade `SOL/USD` fill can differ slightly. The displayed SOL quantity is therefore an estimate until the actual live trigger/fill event.
+
+This command is read-only and never places an order or mutates ring state.
+
+### `/rings`
+Shows where the current live Binance `SOLUSDT` price sits relative to the current completed-day 200-day MA and the frozen ring geometry.
+
+It reports:
+- `Dead zone`, `BUY ring zone`, or `SHORT ring zone`;
+- a current crossed ring as `TOUCHED` or `THROUGH` when applicable;
+- the next BUY ring below the current price;
+- the next SHORT ring above the current price;
+- dollar and percentage distance to each next ring;
+- which side is closer;
+- the frozen USD size when a ring is currently crossed.
+
+`/rings` deliberately ignores whether a ring is armed or occupied. Use `/levels` when you want current ring availability/state.
+
+If the live Binance feed is stale/unavailable or the strategy MA is unavailable, the command returns a clear error and does not guess.
+
+This command is read-only and never places an order or mutates ring state.
+
 ### `/dxpreflight`
 Reads/validates the active DXtrade `SOL/USD` instrument settings using the existing preflight path. It does not call the order-placement endpoint.
 
@@ -88,6 +119,8 @@ Shows the command list and opens the inline control menu.
 |---|---|
 | `Status` | `/status` |
 | `Health` | `/health` |
+| `Grid Levels` | `/levels` |
+| `Ring Position` | `/rings` |
 | `Pause Bot` | `/kill` |
 | `Resume` | `/resume` |
 | `Flat Instructions` | `/flat` |
@@ -105,12 +138,23 @@ Automatic strategy orders require both execution controls: Railway `AUTO_EXECUTE
 
 The automatic inactivity heartbeat is separate from ring state. If 25 days pass without a confirmed bot trade, it is designed to perform a minimum-size `0.01 SOL` round trip with the project 25-second minimum hold, ahead of the 30-day inactivity deadline, without changing any ring, tranche, or MA state.
 
+## Manual/outside trades on the Tradeify account
+
+The SOL grid does not adopt manual trades into its virtual ring ledger.
+
+- A manual `SOL/USD` position changes the broker net SOL quantity without a matching bot virtual lot. The production reconciliation check therefore blocks strategy activity and can raise a safety halt until the broker position and bot virtual state are reconciled.
+- A manual position in another instrument such as `XRP/USD` is treated as a foreign open position. The account monitor marks the account locked for the SOL bot, so new SOL grid actions are blocked while that foreign position is open.
+- Realized P&L from manual trading still affects the Tradeify account balance/equity and therefore the account-level daily-loss and maximum-loss protections. It does not create, arm, disarm, or close a SOL ring lot.
+
+For clean autonomous operation, avoid manual trades in the same Tradeify account while the SOL bot is live unless you intentionally intend to stop/reconcile the bot afterward.
+
 ## Common corrections
 
 - `Not authorized` — use the configured owner Telegram account. `/whoami` can show the numeric sender ID.
 - `The command failed` — check Railway logs; do not repeatedly retry an order-related action when broker state is uncertain.
 - `/status` shows `ARMED` — the repository strategy control is ON but the Railway live execution control is still OFF.
 - `/status` shows `LIVE` and `Auto-execution: ON` — both controls are enabled; eligible strategy touches may place real orders when every safety gate passes.
+- `/rings` or `/levels` says feed unavailable/stale — the command intentionally refuses to calculate from an old live price.
 - Canary is blocked — automatic grid execution is already ON, or another safety precondition is blocking it.
 - Resume code rejected — run `/resume` again and use the newest six-digit code within 10 minutes.
 - Safety halt remains after resume — `/resume` removes only the operator pause. Resolve the stated safety condition first.

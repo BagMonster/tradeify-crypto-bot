@@ -8,6 +8,10 @@ const MAIN_MENU = {
         { text: "Health", callback_data: "health" }
       ],
       [
+        { text: "Grid Levels", callback_data: "levels" },
+        { text: "Ring Position", callback_data: "rings" }
+      ],
+      [
         { text: "Pause Bot", callback_data: "kill" },
         { text: "Resume", callback_data: "resume" }
       ],
@@ -24,6 +28,8 @@ const HELP_TEXT = [
   "",
   "/status - show account, floors, SOL strategy state, and live execution controls",
   "/health - confirm the worker, PostgreSQL, MA provider, and execution state",
+  "/levels - show all 8 BUY and 8 SHORT trigger prices, sizes, estimated SOL quantities, and ring state",
+  "/rings - show where live SOL sits relative to the frozen ring ladder and the next BUY/SHORT levels",
   "/dxpreflight - inspect active-instrument order settings without placing an order",
   "/solcanary - inspect/replay the approved lifecycle canary only while automatic execution is OFF",
   "/kill - pause the bot and persist the pause",
@@ -33,7 +39,7 @@ const HELP_TEXT = [
   "/whoami - show your Telegram numeric user ID",
   "/help - show this list",
   "",
-  "There are no /long or /short commands. The frozen SOL grid trades automatically only when both live execution controls are ON and every safety gate passes."
+  "There are no /long or /short commands. /levels and /rings are read-only. The frozen SOL grid trades automatically only when both live execution controls are ON and every safety gate passes."
 ].join("\n");
 
 export async function startTelegramBot({ environment, service }) {
@@ -82,6 +88,14 @@ export async function startTelegramBot({ environment, service }) {
     await bot.sendMessage(message.chat.id, await service.healthText());
   }));
 
+  bot.onText(/^\/levels(?:@\w+)?$/i, withAuthorization(async (message) => {
+    await bot.sendMessage(message.chat.id, await service.levelsText());
+  }));
+
+  bot.onText(/^\/rings(?:@\w+)?$/i, withAuthorization(async (message) => {
+    await bot.sendMessage(message.chat.id, await service.ringsText());
+  }));
+
   bot.onText(/^\/dxpreflight(?:@\w+)?$/i, withAuthorization(async (message) => {
     await bot.sendMessage(message.chat.id, "Running DXtrade validation-only preflight. No order will be placed.");
     await bot.sendMessage(message.chat.id, await service.dxPreflightText());
@@ -122,6 +136,12 @@ export async function startTelegramBot({ environment, service }) {
         case "health":
           await bot.sendMessage(chatId, await service.healthText());
           break;
+        case "levels":
+          await bot.sendMessage(chatId, await service.levelsText());
+          break;
+        case "rings":
+          await bot.sendMessage(chatId, await service.ringsText());
+          break;
         case "kill":
           await bot.sendMessage(chatId, await service.kill());
           break;
@@ -152,6 +172,8 @@ export async function startTelegramBot({ environment, service }) {
   await bot.setMyCommands([
     { command: "status", description: "Show bot and risk status" },
     { command: "health", description: "Check worker and database" },
+    { command: "levels", description: "Show all SOL grid levels and sizes" },
+    { command: "rings", description: "Show live SOL position versus grid rings" },
     { command: "dxpreflight", description: "Inspect active instrument settings" },
     { command: "solcanary", description: "Inspect approved 0.01 SOL lifecycle canary" },
     { command: "kill", description: "Pause the bot" },
