@@ -140,8 +140,36 @@ export function createSolanaLiveCanary({
         quantity: CANARY_QUANTITY
       });
       if (opened.confirmed !== true || opened.status !== "FILLED") {
-        await addEvent("ERROR", "SOL_CANARY_OPEN_NOT_CONFIRMED", { status: opened.status ?? "UNKNOWN" });
-        return Object.freeze({ status: opened.status ?? "NOT_CONFIRMED", message: "The SOL canary open was not confirmed; no second order was sent." });
+        const openStatus = opened.status ?? "NOT_CONFIRMED";
+        const brokerPositions = activePositions(await client.getOpenPositions());
+        const solPositions = brokerPositions.filter((position) => positionSymbol(position) === INSTRUMENT);
+        const foreignPositions = brokerPositions.filter((position) => positionSymbol(position) !== INSTRUMENT);
+        await addEvent("ERROR", "SOL_CANARY_OPEN_NOT_CONFIRMED", {
+          status: openStatus,
+          brokerPositionCount: brokerPositions.length,
+          solPositionCount: solPositions.length,
+          foreignPositionCount: foreignPositions.length
+        });
+
+        if (brokerPositions.length === 0) {
+          return Object.freeze({
+            status: openStatus,
+            message: `The SOL canary open is ${openStatus}. DXtrade currently reports the broker account flat. No second order was sent.`
+          });
+        }
+
+        if (foreignPositions.length === 0 && solPositions.length === 1) {
+          const signedQuantity = positionQuantity(solPositions[0]);
+          return Object.freeze({
+            status: "REVIEW_REQUIRED",
+            message: `The SOL canary open was not confirmed by order history (${openStatus}), but DXtrade currently reports a SOL/USD position of ${signedQuantity.toFixed(2)} SOL. No second order was sent.`
+          });
+        }
+
+        return Object.freeze({
+          status: "REVIEW_REQUIRED",
+          message: `The SOL canary open was not confirmed (${openStatus}) and DXtrade reports an unexpected broker position set. No second order was sent.`
+        });
       }
 
       await addEvent("WARN", "SOL_CANARY_OPEN_CONFIRMED", {
