@@ -3,9 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolveInstrumentProfile } from "./instrumentProfile.js";
 
 function requireText(name, value) {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${name} is required`);
-  }
+  if (typeof value !== "string" || value.trim() === "") throw new Error(`${name} is required`);
   return value.trim();
 }
 
@@ -17,15 +15,11 @@ function parseBoolean(name, value, defaultValue) {
 }
 
 function requirePositive(name, value) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    throw new Error(`${name} must be a positive number`);
-  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number`);
 }
 
 function requireNumber(name, value) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`${name} must be a finite number`);
-  }
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${name} must be a finite number`);
 }
 
 async function readJson(path) {
@@ -36,35 +30,17 @@ export async function loadAccountConfig(path = "config/account.json") {
   const account = await readJson(path);
   const provider = requireText("account.provider", account.provider);
   const accountType = requireText("account.accountType", account.accountType);
-  if (provider !== "tradeify-crypto") {
-    throw new Error("account.provider must equal tradeify-crypto");
-  }
-  if (accountType !== "instant-funding") {
-    throw new Error("account.accountType must equal instant-funding");
-  }
+  if (provider !== "tradeify-crypto") throw new Error("account.provider must equal tradeify-crypto");
+  if (accountType !== "instant-funding") throw new Error("account.accountType must equal instant-funding");
   for (const key of [
-    "startingBalance",
-    "dailyLossLimit",
-    "maxLossOffset",
-    "maxLossFloorCap",
-    "leverage",
-    "maxNotional",
-    "consistencyMax",
-    "minimumPayout",
-    "profitSplit",
-    "minimumHoldSeconds"
-  ]) {
-    requirePositive(`account.${key}`, account[key]);
-  }
+    "startingBalance", "dailyLossLimit", "maxLossOffset", "maxLossFloorCap", "leverage",
+    "maxNotional", "consistencyMax", "minimumPayout", "profitSplit", "minimumHoldSeconds"
+  ]) requirePositive(`account.${key}`, account[key]);
   requireText("account.dailySnapshotUtc", account.dailySnapshotUtc);
   if (account.consistencyMax > 1) throw new Error("account.consistencyMax must be <= 1");
   if (account.profitSplit > 1) throw new Error("account.profitSplit must be <= 1");
-  if (account.maxLossFloorCap !== account.startingBalance) {
-    throw new Error("account.maxLossFloorCap must equal account.startingBalance");
-  }
-  if (account.minimumHoldSeconds < 25) {
-    throw new Error("account.minimumHoldSeconds must be at least 25 seconds for the production grid");
-  }
+  if (account.maxLossFloorCap !== account.startingBalance) throw new Error("account.maxLossFloorCap must equal account.startingBalance");
+  if (account.minimumHoldSeconds < 25) throw new Error("account.minimumHoldSeconds must be at least 25 seconds for the production grid");
   return account;
 }
 
@@ -73,29 +49,52 @@ function validateExecution(strategy) {
     throw new Error("strategy.execution is required");
   }
   requireNumber("execution.minHoldSeconds", strategy.execution.minHoldSeconds);
-  if (strategy.execution.minHoldSeconds < 25) {
-    throw new Error("execution.minHoldSeconds must be at least 25");
-  }
-  if (typeof strategy.execution.autoExecute !== "boolean") {
-    throw new Error("execution.autoExecute must be boolean");
-  }
-  if (strategy.execution.slippageCapPct !== undefined) {
-    requireNumber("execution.slippageCapPct", strategy.execution.slippageCapPct);
-  }
+  if (strategy.execution.minHoldSeconds < 25) throw new Error("execution.minHoldSeconds must be at least 25");
+  if (typeof strategy.execution.autoExecute !== "boolean") throw new Error("execution.autoExecute must be boolean");
+  if (strategy.execution.slippageCapPct !== undefined) requireNumber("execution.slippageCapPct", strategy.execution.slippageCapPct);
+}
+
+function exact(name, actual, expected) {
+  if (actual !== expected) throw new Error(`${name} must equal ${expected}`);
+}
+
+function validateSolOuterHeavy(strategy) {
+  requireText("strategy.strategyId", strategy.strategyId);
+  exact("strategy.strategyId", strategy.strategyId, "sol-outer-heavy-v1");
+  const cfg = strategy.solOuterHeavy;
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("strategy.solOuterHeavy is required");
+  exact("solOuterHeavy.maDays", cfg.maDays, 200);
+  exact("solOuterHeavy.bandPct", cfg.bandPct, 0.045);
+  exact("solOuterHeavy.deadZoneBands", cfg.deadZoneBands, 4);
+  exact("solOuterHeavy.activeLevelsPerSide", cfg.activeLevelsPerSide, 8);
+  exact("solOuterHeavy.baseUsd", cfg.baseUsd, 6);
+  exact("solOuterHeavy.growth", cfg.growth, 1.8);
+  exact("solOuterHeavy.positionsPerRing", cfg.positionsPerRing, 2);
+  exact("solOuterHeavy.rearmBands", cfg.rearmBands, 0.5);
+  exact("solOuterHeavy.lotStep", cfg.lotStep, 0.01);
+  if (JSON.stringify(cfg.trancheWeights) !== JSON.stringify([1,2,3,4])) throw new Error("solOuterHeavy.trancheWeights must equal [1,2,3,4]");
+  exact("solOuterHeavy.roundTripCostFloorPct", cfg.roundTripCostFloorPct, 0.0018);
+  exact("solOuterHeavy.grossExposureCeilingUsd", cfg.grossExposureCeilingUsd, 1830);
+  exact("solOuterHeavy.heartbeatDays", cfg.heartbeatDays, 30);
+  exact("solOuterHeavy.heartbeatQuantitySol", cfg.heartbeatQuantitySol, 0.01);
+  exact("solOuterHeavy.liveSemantics", cfg.liveSemantics, "live-touch-exits-before-entries");
 }
 
 export async function loadStrategyConfig(path = "config/strategy.json") {
   const strategy = await readJson(path);
-  if (!strategy.instruments?.["BTC/USD"] || !strategy.instruments?.["SOL/USD"]) {
-    throw new Error("strategy must define BTC/USD and SOL/USD");
-  }
-  resolveInstrumentProfile(strategy);
+  if (!strategy.instruments?.["BTC/USD"] || !strategy.instruments?.["SOL/USD"]) throw new Error("strategy must define BTC/USD and SOL/USD");
+  const instrument = resolveInstrumentProfile(strategy);
   if (strategy.strategyStatus !== undefined) requireText("strategy.strategyStatus", strategy.strategyStatus);
-  if (strategy.strategyType !== undefined) requireText("strategy.strategyType", strategy.strategyType);
-
+  const type = requireText("strategy.strategyType", strategy.strategyType);
   validateExecution(strategy);
 
-  if (strategy.strategyType === "reference-reset-grid") {
+  if (type === "moving-ma-outer-heavy-grid") {
+    if (instrument.asset !== "SOL") throw new Error("moving-ma-outer-heavy-grid requires SOL/USD as the only enabled instrument");
+    validateSolOuterHeavy(strategy);
+    return strategy;
+  }
+
+  if (type === "reference-reset-grid") {
     requireText("strategy.strategyId", strategy.strategyId);
     return strategy;
   }
@@ -127,26 +126,16 @@ export async function loadStrategyConfig(path = "config/strategy.json") {
     "execution.slippageCapPct": strategy.execution?.slippageCapPct
   };
   for (const [name, value] of Object.entries(numericValues)) requireNumber(name, value);
-
-  if (typeof strategy.signal.requireCloseInsideBand !== "boolean") {
-    throw new Error("signal.requireCloseInsideBand must be boolean");
-  }
+  if (typeof strategy.signal.requireCloseInsideBand !== "boolean") throw new Error("signal.requireCloseInsideBand must be boolean");
   requireText("execution.hardFlatUtc", strategy.execution.hardFlatUtc);
-  if (strategy.risk.dailyHardStop >= strategy.risk.dailySoftStop) {
-    throw new Error("dailyHardStop must be more negative than dailySoftStop");
-  }
-  if (strategy.regime.adxStandDown <= strategy.regime.adxMax) {
-    throw new Error("adxStandDown must be greater than adxMax");
-  }
+  if (strategy.risk.dailyHardStop >= strategy.risk.dailySoftStop) throw new Error("dailyHardStop must be more negative than dailySoftStop");
+  if (strategy.regime.adxStandDown <= strategy.regime.adxMax) throw new Error("adxStandDown must be greater than adxMax");
   return strategy;
 }
 
 export function loadEnvironment() {
   const allowedUserId = Number(process.env.TELEGRAM_ALLOWED_USER_ID ?? "0");
-  if (!Number.isSafeInteger(allowedUserId) || allowedUserId < 0) {
-    throw new Error("TELEGRAM_ALLOWED_USER_ID must be a non-negative integer");
-  }
-
+  if (!Number.isSafeInteger(allowedUserId) || allowedUserId < 0) throw new Error("TELEGRAM_ALLOWED_USER_ID must be a non-negative integer");
   const environment = {
     telegramToken: requireText("TELEGRAM_BOT_TOKEN", process.env.TELEGRAM_BOT_TOKEN),
     telegramAllowedUserId: allowedUserId,
@@ -163,25 +152,15 @@ export function loadEnvironment() {
       accountCode: requireText("DXTRADE_ACCOUNT_CODE", process.env.DXTRADE_ACCOUNT_CODE)
     })
   };
-
-  if (environment.appMode !== "stage-a") {
-    throw new Error("The production grid remains in APP_MODE=stage-a until the final live activation decision");
-  }
-  if (environment.autoExecute) {
-    throw new Error("AUTO_EXECUTE must remain false until the final live activation approval");
-  }
+  if (environment.appMode !== "stage-a") throw new Error("The production grid remains in APP_MODE=stage-a until the final live activation decision");
+  if (environment.autoExecute) throw new Error("AUTO_EXECUTE must remain false until the final live activation approval");
   return Object.freeze(environment);
 }
 
 export async function loadConfiguration() {
-  const [account, strategy] = await Promise.all([
-    loadAccountConfig(),
-    loadStrategyConfig()
-  ]);
+  const [account, strategy] = await Promise.all([loadAccountConfig(), loadStrategyConfig()]);
   const environment = loadEnvironment();
-  if (strategy.execution.autoExecute) {
-    throw new Error("config/strategy.json execution.autoExecute must remain false");
-  }
+  if (strategy.execution.autoExecute) throw new Error("config/strategy.json execution.autoExecute must remain false");
   const instrument = resolveInstrumentProfile(strategy);
   return { account, strategy, environment, instrument };
 }
