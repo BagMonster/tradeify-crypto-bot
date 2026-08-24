@@ -43,6 +43,16 @@ function finiteOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function safeApiError(payload, status) {
+  const code = payload?.errorCode ?? payload?.code ?? payload?.rejectCode ?? null;
+  const description = payload?.description ?? payload?.message ?? payload?.error ?? payload?.rejectReason ?? null;
+  const safeCode = code == null ? "NONE" : String(code).replace(/[^A-Za-z0-9._-]/g, "").slice(0, 48) || "REDACTED";
+  const safeDescription = typeof description === "string"
+    ? description.replace(/[\r\n\t]/g, " ").slice(0, 180)
+    : "DXtrade rejected the request";
+  return `DXtrade SOL request failed (HTTP ${status}, code ${safeCode}): ${safeDescription}`;
+}
+
 export function reconcileSolQuantityOrder(payload, { orderCode, requestedQuantity }) {
   const code = text("orderCode", orderCode, 64);
   const requested = positive("requestedQuantity", requestedQuantity);
@@ -135,7 +145,7 @@ export class SolanaQuantityClient {
       if (raw) {
         try { payload = JSON.parse(raw); } catch { throw new Error(`DXtrade SOL response was malformed JSON (HTTP ${response.status})`); }
       }
-      if (!response.ok) throw new Error(`DXtrade SOL request failed (HTTP ${response.status})`);
+      if (!response.ok) throw new Error(safeApiError(payload, response.status));
       return payload;
     } finally {
       clearTimeout(timer);
@@ -170,6 +180,7 @@ export class SolanaQuantityClient {
         type: "MARKET",
         instrument: this.#instrument,
         quantity: positive("quantity", quantity),
+        positionEffect: "OPEN",
         side: side(orderSide),
         tif: "GTC"
       }
@@ -178,6 +189,7 @@ export class SolanaQuantityClient {
 
   async placePositionClose({ orderCode, orderSide, quantity, positionCode }) {
     await this.login();
+    positive("quantity", quantity);
     return this.#request({
       method: "POST",
       path: `/accounts/${encodeURIComponent(this.#accountCode)}/orders`,
@@ -185,7 +197,6 @@ export class SolanaQuantityClient {
         orderCode: text("orderCode", orderCode, 64),
         type: "MARKET",
         instrument: this.#instrument,
-        quantity: positive("quantity", quantity),
         positionEffect: "CLOSE",
         positionCode: text("positionCode", positionCode, 128),
         side: side(orderSide),

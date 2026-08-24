@@ -86,7 +86,7 @@ test("approved SOL canary performs one 0.01 open, hold, exact position close, an
       return { orderId: 802 };
     },
     reconcileQuantityOrder: async ({ orderCode, requestedQuantity }) => {
-      assert.equal(orderCode, "SOLCANARY-V1-CLOSE");
+      assert.equal(orderCode, "SOLCANARY-V2-CLOSE");
       assert.equal(requestedQuantity, 0.01);
       return {
         status: "FILLED",
@@ -115,13 +115,13 @@ test("approved SOL canary performs one 0.01 open, hold, exact position close, an
   assert.deepEqual(calls[1], {
     type: "CLOSE",
     request: {
-      orderCode: "SOLCANARY-V1-CLOSE",
+      orderCode: "SOLCANARY-V2-CLOSE",
       orderSide: "SELL",
       quantity: 0.01,
       positionCode: "sol-position-1"
     }
   });
-  assert.equal(persistence.rows.get("SOLCANARY-V1-CLOSE").status, "FILLED");
+  assert.equal(persistence.rows.get("SOLCANARY-V2-CLOSE").status, "FILLED");
 });
 
 test("SOL canary refuses to run while automatic grid execution is enabled", async () => {
@@ -144,15 +144,15 @@ test("SOL canary refuses to run while automatic grid execution is enabled", asyn
 
 test("completed canary is idempotent and never places a second round trip", async () => {
   const persistence = createPersistence({
-    "SOLCANARY-V1-OPEN": {
-      orderCode: "SOLCANARY-V1-OPEN",
+    "SOLCANARY-V2-OPEN": {
+      orderCode: "SOLCANARY-V2-OPEN",
       status: "FILLED",
       fillPrice: 140,
       filledQuantity: 0.01,
       filledAt: "2026-08-24T02:00:00.000Z"
     },
-    "SOLCANARY-V1-CLOSE": {
-      orderCode: "SOLCANARY-V1-CLOSE",
+    "SOLCANARY-V2-CLOSE": {
+      orderCode: "SOLCANARY-V2-CLOSE",
       status: "FILLED",
       fillPrice: 140.1,
       filledQuantity: 0.01,
