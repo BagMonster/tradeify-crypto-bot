@@ -7,8 +7,8 @@ The active production strategy is the frozen SOL research baseline **`sol-outer-
 ## Current architecture
 
 - One Node.js Railway worker
-- Railway PostgreSQL for durable account, audit, strategy, virtual-lot, and execution state
-- Owner-only Telegram control
+- Railway PostgreSQL for durable account, audit, strategy, virtual-lot, execution, and Telegram-notification state
+- Owner-only Telegram control and automatic live notifications
 - Binance `SOLUSDT` for live strategy price references
 - DXtrade `SOL/USD` for Tradeify account state, broker reconciliation, and execution
 - One net DXtrade SOL position; independent strategy lots are tracked virtually and reconciled to the broker net quantity
@@ -84,7 +84,22 @@ npm start
 
 `/levels` shows the complete live 8×8 SOL ladder, frozen USD sizes, estimated SOL quantities, and armed/occupied state. `/rings` gives a compact read-only view of where live SOL sits relative to the current MA and next BUY/SHORT rings.
 
-See the complete operator guide: [Telegram command reference](docs/telegram-command-reference.md).
+## Automatic Telegram notifications
+
+D-047 adds owner-only push notifications for authoritative production outcomes:
+
+- confirmed grid entries;
+- each confirmed tranche exit;
+- fully closed virtual lots;
+- completed inactivity-heartbeat round trips;
+- reconciliation mismatches and runtime safety halts;
+- Tradeify account lockouts;
+- confirmed protective flatten events.
+
+Trade notifications are emitted only after broker confirmation and durable strategy-state advancement where applicable. PostgreSQL stores a durable notification identity before Telegram delivery so retries and restarts do not automatically duplicate the same success message. Telegram delivery is observational only: a Telegram failure cannot roll back a fill, retry an order, mutate ring state, delay a protective action, or weaken a safety gate.
+
+See the complete operator guide: [Telegram command reference](docs/telegram-command-reference.md).  
+See the notification behavior summary: [Telegram live notifications](docs/telegram-live-notifications.md).
 
 ## Governance and implementation records
 
@@ -96,6 +111,7 @@ See the complete operator guide: [Telegram command reference](docs/telegram-comm
 - [D-044 — DXtrade SOL position-effect order shape](docs/decisions/D-044-dxtrade-position-effect-order-shape.md)
 - [D-045 — final SOL live activation](docs/decisions/D-045-final-sol-live-activation.md)
 - [D-046 — Telegram SOL ring observability](docs/decisions/D-046-telegram-ring-observability.md)
+- [D-047 — broker-confirmed live trade and safety notifications](docs/decisions/D-047-telegram-live-notifications.md)
 - [DXtrade API endpoint reference](docs/dxtrade-api-endpoint-reference.md)
 - [Post-Automation Addendum A](docs/post-automation-development-agent-addendum.md)
 

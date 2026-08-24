@@ -1,0 +1,22 @@
+# D-047 Verification Checklist
+
+- [ ] Syntax checks pass.
+- [ ] Full automated test suite passes.
+- [ ] No notification is emitted before a confirmed broker fill.
+- [ ] Entry notification occurs only after durable virtual-lot state save.
+- [ ] Tranche notification occurs only after durable exit state save.
+- [ ] Final tranche also produces a separate fully-closed-lot notification.
+- [ ] Heartbeat completion notification uses confirmed open and close fills and never mutates ring state.
+- [ ] Reconciliation mismatch produces a loud owner alert after the safety halt is persisted.
+- [ ] Account lockout produces a loud owner alert without exposing raw broker payloads.
+- [ ] Runtime safety halt produces a loud owner alert without arbitrary exception text.
+- [ ] Protective flatten notification occurs only after a confirmed broker close fill and state reset.
+- [ ] Durable notification identity suppresses duplicate delivery across retry/restart paths.
+- [ ] Telegram delivery failure cannot roll back state, retry an order, or delay protective action.
+- [ ] Automatic messages are sent only to the configured owner Telegram ID.
+- [ ] `docs/implementation-decision-log.md` contains approved D-047 before merge.
+- [ ] Temporary branch-note files are removed before merge.
+- [ ] GitHub Actions is green.
+- [ ] Focused security review has no unresolved critical/high finding.
+- [ ] Railway deployment is healthy after merge.
+- [ ] Owner receives a safe test notification or the first natural production notification as expected.

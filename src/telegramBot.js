@@ -42,8 +42,18 @@ const HELP_TEXT = [
   "There are no /long or /short commands. /levels and /rings are read-only. The frozen SOL grid trades automatically only when both live execution controls are ON and every safety gate passes."
 ].join("\n");
 
-export async function startTelegramBot({ environment, service }) {
+export async function startTelegramBot({ environment, service, notifications = null }) {
   const bot = new TelegramBot(environment.telegramToken, { polling: true });
+
+  if (notifications !== null) {
+    if (typeof notifications?.setSender !== "function") throw new TypeError("notifications.setSender must be a function");
+    notifications.setSender(async (text) => {
+      if (!Number.isSafeInteger(environment.telegramAllowedUserId) || environment.telegramAllowedUserId <= 0) {
+        throw new Error("Owner Telegram destination is unavailable");
+      }
+      await bot.sendMessage(environment.telegramAllowedUserId, text);
+    });
+  }
 
   function isAuthorized(from) {
     return environment.telegramAllowedUserId > 0
