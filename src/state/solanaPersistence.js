@@ -25,6 +25,23 @@ CREATE TABLE IF NOT EXISTS solana_execution_orders (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )`;
 
+const TELEGRAM_NOTIFICATION_SCHEMA = `
+CREATE TABLE IF NOT EXISTS solana_telegram_notifications (
+  event_key TEXT PRIMARY KEY CHECK (LENGTH(event_key) BETWEEN 1 AND 160),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'ENTRY_CONFIRMED',
+    'TRANCHE_EXIT_CONFIRMED',
+    'LOT_CLOSED',
+    'HEARTBEAT_CONFIRMED',
+    'RECONCILIATION_MISMATCH',
+    'ACCOUNT_LOCKOUT',
+    'PROTECTIVE_FLATTEN_CONFIRMED'
+  )),
+  status TEXT NOT NULL CHECK (status IN ('CLAIMED','SENT','FAILED')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`;
+
 function text(name, value, max = 128) {
   if (typeof value !== "string" || value.trim() === "") throw new TypeError(`${name} must be a non-empty string`);
   const out = value.trim();
@@ -65,6 +82,16 @@ function normalizeOrder(row) {
   });
 }
 
+function normalizeNotification(row, claimed = false) {
+  if (!row) return null;
+  return Object.freeze({
+    eventKey: String(row.event_key),
+    kind: String(row.kind),
+    status: String(row.status),
+    claimed
+  });
+}
+
 export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) {
   const pool = new PoolClass({
     connectionString: environment.databaseUrl,
@@ -79,6 +106,7 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
   async function init() {
     await state.init();
     await query(EXECUTION_SCHEMA);
+    await query(TELEGRAM_NOTIFICATION_SCHEMA);
   }
 
   async function getOrder(orderCode) {
@@ -192,6 +220,67 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     return normalizeOrder(result.rows[0]);
   }
 
+  async function claimTelegramNotification(input) {
+    const eventKey = text("eventKey", input?.eventKey, 160);
+    const kind = text("kind", input?.kind, 48).toUpperCase();
+    const allowed = [
+      "ENTRY_CONFIRMED",
+      "TRANCHE_EXIT_CONFIRMED",
+      "LOT_CLOSED",
+      "HEARTBEAT_CONFIRMED",
+      "RECONCILIATION_MISMATCH",
+      "ACCOUNT_LOCKOUT",
+      "PROTECTIVE_FLATTEN_CONFIRMED"
+    ];
+    if (!allowed.includes(kind)) throw new TypeError("notification kind is invalid");
+
+    const inserted = await query(
+      `INSERT INTO solana_telegram_notifications (event_key, kind, status)
+       VALUES ($1,$2,'CLAIMED')
+       ON CONFLICT (event_key) DO NOTHING
+       RETURNING *`,
+      [eventKey, kind]
+    );
+    if (inserted.rowCount === 1) return normalizeNotification(inserted.rows[0], true);
+    if (inserted.rowCount !== 0) throw new Error("SOL Telegram notification claim returned an invalid row count");
+
+    const existing = await query(
+      "SELECT * FROM solana_telegram_notifications WHERE event_key = $1",
+      [eventKey]
+    );
+    if (existing.rowCount !== 1) throw new Error("SOL Telegram notification claim could not resolve existing row");
+    const row = normalizeNotification(existing.rows[0], false);
+    if (row.kind !== kind) throw new Error("Existing Telegram notification identity has a different kind");
+    return row;
+  }
+
+  async function markTelegramNotificationSent(eventKey) {
+    const key = text("eventKey", eventKey, 160);
+    const result = await query(
+      `UPDATE solana_telegram_notifications
+          SET status='SENT', updated_at=NOW()
+        WHERE event_key=$1 AND status='CLAIMED'
+        RETURNING *`,
+      [key]
+    );
+    if (result.rowCount !== 1) throw new Error("SOL Telegram notification could not be marked sent");
+    return normalizeNotification(result.rows[0], false);
+  }
+
+  async function markTelegramNotificationFailed(eventKey) {
+    const key = text("eventKey", eventKey, 160);
+    const result = await query(
+      `UPDATE solana_telegram_notifications
+          SET status='FAILED', updated_at=NOW()
+        WHERE event_key=$1 AND status='CLAIMED'
+        RETURNING *`,
+      [key]
+    );
+    if (result.rowCount === 0) return null;
+    if (result.rowCount !== 1) throw new Error("SOL Telegram notification could not be marked failed");
+    return normalizeNotification(result.rows[0], false);
+  }
+
   async function close() {
     await pool.end();
   }
@@ -205,6 +294,9 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     markStatus,
     getLatestFilledAt,
     getLatestHeartbeatOpen,
+    claimTelegramNotification,
+    markTelegramNotificationSent,
+    markTelegramNotificationFailed,
     close
   });
 }
