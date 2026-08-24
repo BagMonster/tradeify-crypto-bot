@@ -1,0 +1,52 @@
+name: Sync D-042 canary approval
+
+on:
+  push:
+    branches:
+      - activation/sol-live-canary
+    paths:
+      - .github/workflows/sync-d042.yml
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: activation/sol-live-canary
+      - name: Append D-042 if missing
+        shell: bash
+        run: |
+          if grep -q '^## D-042 — Owner-approved SOL live lifecycle canary' docs/implementation-decision-log.md; then
+            echo "D-042 already synchronized."
+            exit 0
+          fi
+          cat >> docs/implementation-decision-log.md <<'EOF'
+
+## D-042 — Owner-approved SOL live lifecycle canary
+
+**Status:** APPROVED by owner on 2026-08-23.
+
+The owner explicitly approved proceeding with the real SOL live-touch execution checkpoint and directed the project to stop asking for repeated approval and get the bot started. This authorizes the one controlled real DXtrade lifecycle canary required by D-038 for the SOL production path.
+
+The canary is exactly one `0.01 SOL` DXtrade `SOL/USD` market BUY, confirmed broker fill, at least 25 seconds of hold time, exact broker-position close using the position code and confirmed quantity, confirmed close fill, and final flat-account verification. Canary records are durable and isolated from SOL ring, virtual-lot, tranche, MA, and re-arm state. Partial, rejected, ambiguous, mismatched, or uncertain broker outcomes stop rather than causing a guessed replacement order.
+
+The owner-only `/solcanary` command is the explicit trigger. It is intentionally not an inline button. During the canary, Railway `AUTO_EXECUTE=false` and `config/strategy.json` → `execution.autoExecute=false` remain required, so the production grid cannot trade automatically.
+
+D-042 authorizes this lifecycle canary only. It does not itself enable automatic production-grid execution. Full decision: `docs/decisions/D-042-owner-approved-sol-live-canary.md`.
+EOF
+      - name: Commit governing log update
+        shell: bash
+        run: |
+          if git diff --quiet -- docs/implementation-decision-log.md; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/implementation-decision-log.md
+          git commit -m "Record D-042 live canary approval"
+          git push origin HEAD:activation/sol-live-canary
