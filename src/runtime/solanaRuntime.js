@@ -52,7 +52,8 @@ export function createSolanaRuntime({
   getRiskSnapshot,
   execution,
   minimumHoldSeconds = 25,
-  addEvent = async () => {}
+  addEvent = async () => {},
+  notifications = null
 }) {
   for (const method of ["init","load","initializeIfMissing","save"]) {
     if (typeof stateStore?.[method] !== "function") throw new TypeError(`stateStore.${method} is required`);
@@ -64,9 +65,14 @@ export function createSolanaRuntime({
   }
   if (!Number.isInteger(minimumHoldSeconds) || minimumHoldSeconds < 25 || minimumHoldSeconds > 300) throw new TypeError("minimumHoldSeconds is invalid");
   if (typeof addEvent !== "function") throw new TypeError("addEvent must be a function");
+  if (notifications !== null && typeof notifications?.enqueue !== "function") throw new TypeError("notifications.enqueue must be a function");
 
   let previousPrice = null;
   let lastShadowKey = null;
+
+  function enqueueNotification(event) {
+    if (notifications !== null) notifications.enqueue(event);
+  }
 
   async function init() {
     await stateStore.init();
@@ -117,7 +123,7 @@ export function createSolanaRuntime({
         brokerNetUnits: recon.actual
       });
       previousPrice = trade.price;
-      return Object.freeze({ status: "RECONCILIATION_BLOCKED", state, ma });
+      return Object.freeze({ status: "RECONCILIATION_BLOCKED", state, ma, reconciliation: Object.freeze({ ...recon }) });
     }
 
     if (firstRisk.risk.protectiveAction === "FLATTEN_AND_LOCK") {
@@ -129,6 +135,16 @@ export function createSolanaRuntime({
         });
         state = await stateStore.save(state.version, reset);
         await addEvent("WARN", "SOL_PROTECTIVE_STATE_RESET", { reason: firstRisk.risk.reason, stateVersion: state.version });
+        if (result.status === "FILLED") {
+          enqueueNotification({
+            kind: "PROTECTIVE_FLATTEN_CONFIRMED",
+            eventKey: `SOL-PROTECTIVE-${state.version}`,
+            reason: firstRisk.risk.reason,
+            quantity: result.filledQuantity,
+            fillPrice: result.fillPrice,
+            filledAt: result.filledAt
+          });
+        }
         previousPrice = trade.price;
         return Object.freeze({ status: "PROTECTIVE_FILLED", state, ma });
       }
@@ -174,12 +190,42 @@ export function createSolanaRuntime({
         break;
       }
 
+      const lotBeforeExit = Object.freeze({ ...lot });
       const result = await execution.executeIntent(action);
       if (result.status !== "FILLED") {
         previousPrice = trade.price;
         return Object.freeze({ status: "EXIT_PENDING", state, ma, action, result });
       }
       state = await stateStore.save(state.version, applyConfirmedExit(state, action, result));
+      const lotAfterExit = findLot(state, action.lotId);
+      enqueueNotification({
+        kind: "TRANCHE_EXIT_CONFIRMED",
+        eventKey: `SOL-TRANCHE:${result.orderCode}`,
+        ringTag: action.ringTag,
+        virtualSide: action.virtualSide,
+        lotId: action.lotId,
+        tranche: action.tranche,
+        fillPrice: result.fillPrice,
+        filledQuantity: result.filledQuantity,
+        remainingQuantity: lotAfterExit?.remainingUnits ?? 0,
+        ma,
+        target: action.target,
+        filledAt: result.filledAt
+      });
+      if (!lotAfterExit) {
+        enqueueNotification({
+          kind: "LOT_CLOSED",
+          eventKey: `SOL-LOT-CLOSED:${result.orderCode}`,
+          ringTag: action.ringTag,
+          virtualSide: action.virtualSide,
+          lotId: action.lotId,
+          entryPrice: lotBeforeExit.entryPrice,
+          originalQuantity: lotBeforeExit.originalUnits,
+          finalFillPrice: result.fillPrice,
+          openedAt: lotBeforeExit.openedAt,
+          closedAt: result.filledAt
+        });
+      }
       lastShadowKey = null;
     }
 
@@ -233,6 +279,17 @@ export function createSolanaRuntime({
         return Object.freeze({ status: "ENTRY_PENDING", state, ma, intent, result });
       }
       state = await stateStore.save(state.version, applyConfirmedEntry(state, intent, result));
+      enqueueNotification({
+        kind: "ENTRY_CONFIRMED",
+        eventKey: `SOL-ENTRY:${result.orderCode}`,
+        ringTag: intent.ringTag,
+        side: intent.side,
+        fillPrice: result.fillPrice,
+        filledQuantity: result.filledQuantity,
+        lotId: intent.lotId,
+        ma,
+        filledAt: result.filledAt
+      });
       lastShadowKey = null;
     }
 
