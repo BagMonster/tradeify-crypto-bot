@@ -4,7 +4,7 @@
 **Operator:** owner-only  
 **Current deployment gate:** final live activation is owner-approved under D-045. Automatic grid execution is ON only when `APP_MODE=live`, Railway `AUTO_EXECUTE=true`, and strategy `execution.autoExecute=true` are all satisfied.
 
-All commands except `/whoami` require the configured owner Telegram user ID. Unauthorized users receive `Not authorized` and cannot invoke trading-control functions.
+All commands except `/whoami` require the configured owner Telegram user ID. Unauthorized users receive `Not authorized` and cannot invoke trading-control or development functions.
 
 ## Commands
 
@@ -105,6 +105,20 @@ Shows manual flattening instructions for `SOL/USD`.
 
 This owner command is informational. Automatic protective flattening is performed by the production execution path only when its risk/safety conditions require it.
 
+### `/code`
+Enters the owner-only OpenAI development conversation. While this mode is active, ordinary owner text is queued through PostgreSQL to the separate `Tradeify Dev Companion` Railway worker and its response is returned in the same Telegram bot.
+
+Phase 1 is conversational/read-only. It has no GitHub write capability and cannot place, modify, or close trades.
+
+### `/devstatus`
+Shows whether development mode is active, whether OpenAI conversation context exists, and how many development jobs are queued, processing, ready, or failed.
+
+### `/devreset`
+Starts a fresh OpenAI conversation by clearing the persisted response context. Development mode remains active.
+
+### `/devexit`
+Leaves development conversation mode. Existing OpenAI context is retained for a later `/code` session unless `/devreset` is used.
+
 ### `/whoami`
 Shows the sender's immutable Telegram numeric user ID. This command is intentionally available without owner authorization so the owner can discover the ID needed during initial setup.
 
@@ -123,10 +137,34 @@ Shows the command list and opens the inline control menu.
 | `Ring Position` | `/rings` |
 | `Pause Bot` | `/kill` |
 | `Resume` | `/resume` |
+| `Development` | `/code` |
 | `Flat Instructions` | `/flat` |
 | `Help` | `/help` |
 
 Inline buttons use the same owner authorization check as slash commands. `/solcanary` is deliberately slash-command-only so it cannot be started by an accidental button tap.
+
+## OpenAI development companion
+
+D-048 keeps the development experience inside the current Telegram bot while OpenAI processing runs in a separate Railway worker. The production Tradeify worker remains the only Telegram polling process.
+
+The Phase 1 path is:
+
+```text
+Owner Telegram message
+  -> production Telegram worker
+  -> PostgreSQL ai_dev_jobs
+  -> Tradeify Dev Companion worker
+  -> OpenAI Responses API
+  -> PostgreSQL completed job
+  -> production Telegram worker
+  -> owner Telegram reply
+```
+
+Slash commands are never forwarded to OpenAI. Ordinary text is forwarded only while `/code` mode is active and only for the configured owner numeric Telegram ID.
+
+The OpenAI API key exists only in the companion worker. The companion worker does not need the Telegram bot token or DXtrade credentials.
+
+Phase 1 intentionally leaves a reusable development-tool boundary for a later owner-approved phase that may add repository inspection and confirmed GitHub branch changes without replacing this Telegram conversation architecture.
 
 ## Automatic live notifications
 
@@ -178,3 +216,5 @@ For clean autonomous operation, avoid manual trades in the same Tradeify account
 - Safety halt remains after resume — `/resume` removes only the operator pause. Resolve the stated safety condition first.
 - Feed/account data stale — new strategy entries remain blocked until fresh data returns.
 - Reconciliation mismatch — confirm the actual DXtrade `SOL/USD` net position before any further strategy action.
+- `/code` says the companion is not configured — the production worker was deployed without the Phase 1 queue bridge.
+- Development request fails — check the `Tradeify Dev Companion` Railway worker and its OpenAI configuration; the trading runtime is independent of that failure.
