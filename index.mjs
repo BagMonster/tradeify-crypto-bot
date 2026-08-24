@@ -7,6 +7,7 @@ import { createPinnedDxtradeFetch } from "./src/execution/pinnedDxtradeFetch.js"
 import { SolanaQuantityClient } from "./src/execution/solanaQuantityClient.js";
 import { createSolanaQuantityAdapter } from "./src/execution/solanaQuantityAdapter.js";
 import { createSolanaExecutionGuard } from "./src/execution/solanaExecutionGuard.js";
+import { createSolanaLiveCanary } from "./src/execution/solanaCanary.js";
 import { createDxtradeAccountMonitor } from "./src/account/dxtradeAccountMonitor.js";
 import { formatDxtradeAccountDiagnostic } from "./src/account/dxtradeDiagnostics.js";
 import { createSolanaPersistence } from "./src/state/solanaPersistence.js";
@@ -70,6 +71,15 @@ const solanaExecution = createSolanaExecutionGuard({
   client: solanaQuantityClient,
   persistence: solPersistence,
   addEvent: database.addEvent
+});
+
+const liveCanary = createSolanaLiveCanary({
+  adapter: solanaQuantityAdapter,
+  client: solanaQuantityClient,
+  persistence: solPersistence,
+  addEvent: database.addEvent,
+  automaticExecutionEnabled: solanaExecution.isEnabled,
+  minimumHoldSeconds: account.minimumHoldSeconds
 });
 
 let accountErrorLogged = false;
@@ -235,7 +245,8 @@ const service = createSolanaTradeifyService({
   dxtradeClient,
   persistence: solPersistence,
   maProvider,
-  execution: solanaExecution
+  execution: solanaExecution,
+  canary: liveCanary
 });
 
 const telegramBot = await startTelegramBot({ environment, service });
@@ -243,6 +254,7 @@ const telegramBot = await startTelegramBot({ environment, service });
 console.log("Production SOL outer-heavy runtime started in locked Stage A mode.");
 console.log("Market source: Binance SOLUSDT. Account source: DXtrade SOL/USD.");
 console.log("Live-touch semantics: exits before entries.");
+console.log("Owner-triggered 0.01 SOL lifecycle canary is available while automatic execution remains OFF.");
 console.log("25-day inactivity heartbeat: armed for 0.01 SOL round trips after live activation.");
 console.log("Automatic execution remains OFF; both execution settings remain false.");
 
