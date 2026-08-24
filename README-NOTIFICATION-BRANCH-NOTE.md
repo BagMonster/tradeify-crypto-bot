@@ -1,1 +1,0 @@
-Temporary branch note: D-047 Telegram live notifications are under implementation on this branch. This file must be deleted before merge after the master decision log and permanent documentation are synchronized.
