@@ -1,7 +1,7 @@
 {
-  "strategyId": "sol-statistical-grid-pending",
-  "strategyType": "reference-reset-grid",
-  "strategyStatus": "pending-solana-statistical-grid",
+  "strategyId": "sol-outer-heavy-v1",
+  "strategyType": "moving-ma-outer-heavy-grid",
+  "strategyStatus": "production-implemented-locked",
   "instruments": {
     "BTC/USD": {
       "enabled": false
@@ -9,6 +9,23 @@
     "SOL/USD": {
       "enabled": true
     }
+  },
+  "solOuterHeavy": {
+    "maDays": 200,
+    "bandPct": 0.045,
+    "deadZoneBands": 4,
+    "activeLevelsPerSide": 8,
+    "baseUsd": 6,
+    "growth": 1.8,
+    "positionsPerRing": 2,
+    "rearmBands": 0.5,
+    "lotStep": 0.01,
+    "trancheWeights": [1, 2, 3, 4],
+    "roundTripCostFloorPct": 0.0018,
+    "grossExposureCeilingUsd": 1830,
+    "heartbeatDays": 30,
+    "heartbeatQuantitySol": 0.01,
+    "liveSemantics": "live-touch-exits-before-entries"
   },
   "execution": {
     "minHoldSeconds": 25,
