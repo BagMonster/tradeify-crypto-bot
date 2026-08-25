@@ -2,21 +2,27 @@ const STRATEGY_ID = "sol-outer-heavy-v1";
 const INSTRUMENT = "SOL/USD";
 const MARKET_SYMBOL = "SOLUSDT";
 const BAND = 0.045;
-const DEAD_ZONE_BANDS = 4;
-const ACTIVE_LEVELS = 8;
-const BASE_USD = 6;
-const GROWTH = 1.8;
+const DEAD_ZONE_BANDS = 2;
+const ACTIVE_LEVELS = 10;
+const BASE_USD = 28.68;
+const GROWTH = 1.5;
 const PER_RING = 2;
 const REARM_BANDS = 0.5;
 const LOT_STEP = 0.01;
 const ROUND_TRIP_COST_FLOOR = 0.0018;
-const GROSS_EXPOSURE_CEILING_USD = 1830;
+const GROSS_EXPOSURE_CEILING_USD = 6600;
 const TRANCHE_WEIGHTS = Object.freeze([1, 2, 3, 4]);
 const TRANCHE_WEIGHT_SUM = 10;
 
 function positive(name, value) {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n) || n <= 0) throw new TypeError(`${name} must be a positive finite number`);
+  return n;
+}
+
+function nonNegative(name, value) {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new TypeError(`${name} must be a non-negative finite number`);
   return n;
 }
 
@@ -39,6 +45,12 @@ function floorLot(units) {
   return Math.floor((n + 1e-12) / LOT_STEP) * LOT_STEP;
 }
 
+function floorLotOrZero(units) {
+  const n = nonNegative("units", units);
+  if (n < LOT_STEP) return 0;
+  return Math.floor((n + 1e-12) / LOT_STEP) * LOT_STEP;
+}
+
 function fixed8(value) {
   return Number(Number(value).toFixed(8));
 }
@@ -58,13 +70,16 @@ function ringLevel(ma, ring) {
 }
 
 function cloneLot(lot) {
+  const originalUnits = positive("lot.originalUnits", lot.originalUnits);
+  const remainingUnits = positive("lot.remainingUnits", lot.remainingUnits);
+  if (remainingUnits > originalUnits + 1e-8) throw new TypeError("lot.remainingUnits cannot exceed lot.originalUnits");
   return {
     id: String(lot.id),
     side: lot.side,
     ringTag: lot.ringTag,
     entryPrice: positive("lot.entryPrice", lot.entryPrice),
-    originalUnits: positive("lot.originalUnits", lot.originalUnits),
-    remainingUnits: positive("lot.remainingUnits", lot.remainingUnits),
+    originalUnits,
+    remainingUnits,
     done: nonNegativeInteger("lot.done", lot.done),
     openedAt: canonicalUtc("lot.openedAt", lot.openedAt)
   };
@@ -137,7 +152,7 @@ export function normalizeSolanaState(input) {
     throw new TypeError("SOL grid state identity is invalid");
   }
   if (!Array.isArray(input.rings) || input.rings.length !== ACTIVE_LEVELS * 2) {
-    throw new TypeError("SOL grid state must contain exactly 16 rings");
+    throw new TypeError("SOL grid state must contain exactly 20 rings");
   }
   const rings = input.rings.map(normalizeRing);
   const expected = buildRings().map((ring) => ring.tag);
@@ -149,7 +164,7 @@ export function normalizeSolanaState(input) {
   let lastFillPrice = null;
   if (hasFill) {
     lastFillAt = canonicalUtc("state.lastFillAt", input.lastFillAt);
-    if (!["BUY", "SELL", "PROTECTIVE_FLAT"].includes(input.lastFillSide)) {
+    if (!["BUY", "SELL", "PROTECTIVE_FLAT", "PROTECTIVE_CUT"].includes(input.lastFillSide)) {
       throw new TypeError("state.lastFillSide is invalid");
     }
     lastFillSide = input.lastFillSide;
@@ -371,6 +386,69 @@ export function applyConfirmedExit(state, intent, fill) {
   if (ring.lots.length === 0) ring.armed = true;
   next.lastFillAt = confirmed.filledAt;
   next.lastFillSide = intent.side;
+  next.lastFillPrice = confirmed.fillPrice;
+  return withVersionIncrement(next);
+}
+
+export function buildProtectiveCutPlan(state, fraction) {
+  const normalized = normalizeSolanaState(state);
+  const cutFraction = positive("fraction", fraction);
+  if (cutFraction >= 1) throw new TypeError("fraction must be less than 1");
+  const legs = [];
+  let virtualSide = null;
+
+  for (const ring of normalized.rings) {
+    for (const lot of ring.lots) {
+      if (virtualSide !== null && virtualSide !== lot.side) {
+        throw new Error("D-049 protective partial cut requires all open virtual lots to share one side");
+      }
+      virtualSide = lot.side;
+      const quantity = fixed8(floorLotOrZero(lot.remainingUnits * cutFraction));
+      if (quantity < LOT_STEP - 1e-12) continue;
+      legs.push(Object.freeze({ lotId: lot.id, ringTag: ring.tag, side: lot.side, quantity }));
+    }
+  }
+
+  const quantity = fixed8(legs.reduce((sum, leg) => sum + leg.quantity, 0));
+  return Object.freeze({
+    type: "PROTECTIVE_CUT",
+    strategyId: STRATEGY_ID,
+    instrument: INSTRUMENT,
+    stateVersion: normalized.version,
+    fraction: cutFraction,
+    virtualSide,
+    side: virtualSide === "BUY" ? "SELL" : virtualSide === "SELL" ? "BUY" : null,
+    quantity,
+    legs: Object.freeze(legs)
+  });
+}
+
+export function applyConfirmedProtectiveCut(state, plan, fill) {
+  if (plan?.type !== "PROTECTIVE_CUT") throw new TypeError("plan must be PROTECTIVE_CUT");
+  const next = mutableState(state);
+  if (plan.stateVersion !== next.version) throw new Error("protective cut plan state version is stale");
+  if (!Array.isArray(plan.legs) || plan.legs.length === 0 || plan.quantity < LOT_STEP - 1e-12) {
+    throw new Error("protective cut plan has no executable quantity");
+  }
+  const confirmed = confirmedFill(fill, plan.quantity);
+
+  for (const leg of plan.legs) {
+    const ring = next.rings.find((candidate) => candidate.tag === leg.ringTag);
+    const lotIndex = ring?.lots.findIndex((candidate) => candidate.id === leg.lotId) ?? -1;
+    if (!ring || lotIndex < 0) throw new Error("protective cut lot no longer exists");
+    const lot = ring.lots[lotIndex];
+    const quantity = positive("protective cut leg quantity", leg.quantity);
+    if (quantity > lot.remainingUnits + 1e-8 || quantity > lot.originalUnits + 1e-8) {
+      throw new Error("protective cut quantity exceeds virtual lot quantity");
+    }
+    lot.remainingUnits = fixed8(lot.remainingUnits - quantity);
+    lot.originalUnits = fixed8(lot.originalUnits - quantity);
+    if (lot.remainingUnits <= 1e-8 || lot.originalUnits <= 1e-8) ring.lots.splice(lotIndex, 1);
+    if (ring.lots.length === 0) ring.armed = true;
+  }
+
+  next.lastFillAt = confirmed.filledAt;
+  next.lastFillSide = "PROTECTIVE_CUT";
   next.lastFillPrice = confirmed.fillPrice;
   return withVersionIncrement(next);
 }

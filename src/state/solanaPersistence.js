@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS solana_execution_orders (
   strategy_id TEXT NOT NULL,
   instrument TEXT NOT NULL,
   state_version BIGINT NOT NULL CHECK (state_version >= 0),
-  action_type TEXT NOT NULL CHECK (action_type IN ('ENTRY','EXIT','PROTECTIVE_FLAT','HEARTBEAT_OPEN','HEARTBEAT_CLOSE','CANARY_OPEN','CANARY_CLOSE')),
+  action_type TEXT NOT NULL,
   ring_tag TEXT,
   lot_id TEXT,
   tranche SMALLINT,
@@ -25,21 +25,47 @@ CREATE TABLE IF NOT EXISTS solana_execution_orders (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )`;
 
+const EXECUTION_ACTION_CONSTRAINT = `
+ALTER TABLE solana_execution_orders DROP CONSTRAINT IF EXISTS solana_execution_orders_action_type_check;
+ALTER TABLE solana_execution_orders ADD CONSTRAINT solana_execution_orders_action_type_check
+CHECK (action_type IN ('ENTRY','EXIT','PROTECTIVE_FLAT','PROTECTIVE_CUT','HEARTBEAT_OPEN','HEARTBEAT_CLOSE','CANARY_OPEN','CANARY_CLOSE'))
+`;
+
 const TELEGRAM_NOTIFICATION_SCHEMA = `
 CREATE TABLE IF NOT EXISTS solana_telegram_notifications (
   event_key TEXT PRIMARY KEY CHECK (LENGTH(event_key) BETWEEN 1 AND 160),
-  kind TEXT NOT NULL CHECK (kind IN (
-    'ENTRY_CONFIRMED',
-    'TRANCHE_EXIT_CONFIRMED',
-    'LOT_CLOSED',
-    'HEARTBEAT_CONFIRMED',
-    'RECONCILIATION_MISMATCH',
-    'ACCOUNT_LOCKOUT',
-    'SAFETY_HALT',
-    'PROTECTIVE_FLATTEN_CONFIRMED'
-  )),
+  kind TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('CLAIMED','SENT','FAILED')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`;
+
+const TELEGRAM_KIND_CONSTRAINT = `
+ALTER TABLE solana_telegram_notifications DROP CONSTRAINT IF EXISTS solana_telegram_notifications_kind_check;
+ALTER TABLE solana_telegram_notifications ADD CONSTRAINT solana_telegram_notifications_kind_check
+CHECK (kind IN (
+  'ENTRY_CONFIRMED',
+  'TRANCHE_EXIT_CONFIRMED',
+  'LOT_CLOSED',
+  'HEARTBEAT_CONFIRMED',
+  'RECONCILIATION_MISMATCH',
+  'ACCOUNT_LOCKOUT',
+  'SAFETY_HALT',
+  'PROTECTIVE_FLATTEN_CONFIRMED',
+  'D049_PARTIAL_CUT',
+  'D049_FULL_FLATTEN'
+))
+`;
+
+const RISK_LADDER_SCHEMA = `
+CREATE TABLE IF NOT EXISTS sol_risk_ladder_state (
+  day_key TEXT PRIMARY KEY CHECK (day_key ~ '^\\d{4}-\\d{2}-\\d{2}$'),
+  baseline_closed_balance_usd NUMERIC(18,6) NOT NULL CHECK (baseline_closed_balance_usd > 0),
+  brake_engaged BOOLEAN NOT NULL DEFAULT FALSE,
+  partial_cut_done BOOLEAN NOT NULL DEFAULT FALSE,
+  flatten_done BOOLEAN NOT NULL DEFAULT FALSE,
+  halted_for_day BOOLEAN NOT NULL DEFAULT FALSE,
+  worst_drawdown_usd NUMERIC(18,6) NOT NULL DEFAULT 0 CHECK (worst_drawdown_usd <= 0),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )`;
 
@@ -56,9 +82,21 @@ function positive(name, value) {
   return n;
 }
 
+function finite(name, value) {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) throw new TypeError(`${name} must be finite`);
+  return n;
+}
+
 function version(value) {
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError("stateVersion must be a non-negative safe integer");
   return value;
+}
+
+function dayKey(value) {
+  const key = text("dayKey", value, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new TypeError("dayKey is invalid");
+  return key;
 }
 
 function normalizeOrder(row) {
@@ -93,6 +131,19 @@ function normalizeNotification(row, claimed = false) {
   });
 }
 
+function normalizeRiskLadder(row) {
+  if (!row) return null;
+  return Object.freeze({
+    dayKey: String(row.day_key),
+    baselineClosedBalanceUsd: Number(row.baseline_closed_balance_usd),
+    brakeEngaged: row.brake_engaged === true,
+    partialCutDone: row.partial_cut_done === true,
+    flattenDone: row.flatten_done === true,
+    haltedForDay: row.halted_for_day === true,
+    worstDrawdownUsd: Number(row.worst_drawdown_usd)
+  });
+}
+
 export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) {
   const pool = new PoolClass({
     connectionString: environment.databaseUrl,
@@ -107,7 +158,10 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
   async function init() {
     await state.init();
     await query(EXECUTION_SCHEMA);
+    await query(EXECUTION_ACTION_CONSTRAINT);
     await query(TELEGRAM_NOTIFICATION_SCHEMA);
+    await query(TELEGRAM_KIND_CONSTRAINT);
+    await query(RISK_LADDER_SCHEMA);
   }
 
   async function getOrder(orderCode) {
@@ -124,7 +178,7 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     const instrument = text("instrument", input.instrument, 64);
     const stateVersion = version(input.stateVersion);
     const actionType = text("actionType", input.actionType, 32);
-    if (!["ENTRY","EXIT","PROTECTIVE_FLAT","HEARTBEAT_OPEN","HEARTBEAT_CLOSE","CANARY_OPEN","CANARY_CLOSE"].includes(actionType)) {
+    if (!["ENTRY","EXIT","PROTECTIVE_FLAT","PROTECTIVE_CUT","HEARTBEAT_OPEN","HEARTBEAT_CLOSE","CANARY_OPEN","CANARY_CLOSE"].includes(actionType)) {
       throw new TypeError("actionType is invalid");
     }
     const side = text("side", input.side, 8).toUpperCase();
@@ -221,6 +275,53 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     return normalizeOrder(result.rows[0]);
   }
 
+  async function getRiskLadderState(key) {
+    const day = dayKey(key);
+    const result = await query("SELECT * FROM sol_risk_ladder_state WHERE day_key=$1", [day]);
+    if (result.rowCount === 0) return null;
+    if (result.rowCount !== 1) throw new Error("SOL risk ladder lookup returned an invalid row count");
+    return normalizeRiskLadder(result.rows[0]);
+  }
+
+  async function getLatestRiskLadderState() {
+    const result = await query("SELECT * FROM sol_risk_ladder_state ORDER BY day_key DESC LIMIT 1");
+    if (result.rowCount === 0) return null;
+    if (result.rowCount !== 1) throw new Error("SOL latest risk ladder lookup returned an invalid row count");
+    return normalizeRiskLadder(result.rows[0]);
+  }
+
+  async function saveRiskLadderState(input) {
+    const day = dayKey(input.dayKey);
+    const baseline = positive("baselineClosedBalanceUsd", input.baselineClosedBalanceUsd);
+    const worst = Math.min(0, finite("worstDrawdownUsd", input.worstDrawdownUsd ?? 0));
+    const result = await query(
+      `INSERT INTO sol_risk_ladder_state (
+         day_key, baseline_closed_balance_usd, brake_engaged, partial_cut_done,
+         flatten_done, halted_for_day, worst_drawdown_usd, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+       ON CONFLICT (day_key) DO UPDATE SET
+         baseline_closed_balance_usd=EXCLUDED.baseline_closed_balance_usd,
+         brake_engaged=EXCLUDED.brake_engaged,
+         partial_cut_done=EXCLUDED.partial_cut_done,
+         flatten_done=EXCLUDED.flatten_done,
+         halted_for_day=EXCLUDED.halted_for_day,
+         worst_drawdown_usd=LEAST(sol_risk_ladder_state.worst_drawdown_usd, EXCLUDED.worst_drawdown_usd),
+         updated_at=NOW()
+       RETURNING *`,
+      [
+        day,
+        baseline,
+        input.brakeEngaged === true,
+        input.partialCutDone === true,
+        input.flattenDone === true,
+        input.haltedForDay === true,
+        worst
+      ]
+    );
+    if (result.rowCount !== 1) throw new Error("SOL risk ladder state save failed");
+    return normalizeRiskLadder(result.rows[0]);
+  }
+
   async function claimTelegramNotification(input) {
     const eventKey = text("eventKey", input?.eventKey, 160);
     const kind = text("kind", input?.kind, 48).toUpperCase();
@@ -232,7 +333,9 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
       "RECONCILIATION_MISMATCH",
       "ACCOUNT_LOCKOUT",
       "SAFETY_HALT",
-      "PROTECTIVE_FLATTEN_CONFIRMED"
+      "PROTECTIVE_FLATTEN_CONFIRMED",
+      "D049_PARTIAL_CUT",
+      "D049_FULL_FLATTEN"
     ];
     if (!allowed.includes(kind)) throw new TypeError("notification kind is invalid");
 
@@ -296,6 +399,9 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     markStatus,
     getLatestFilledAt,
     getLatestHeartbeatOpen,
+    getRiskLadderState,
+    getLatestRiskLadderState,
+    saveRiskLadderState,
     claimTelegramNotification,
     markTelegramNotificationSent,
     markTelegramNotificationFailed,

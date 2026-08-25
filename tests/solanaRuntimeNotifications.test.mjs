@@ -29,6 +29,24 @@ function baseRisk(brokerNetUnits = 0) {
   };
 }
 
+function createRiskLadderStore() {
+  let row = null;
+  return {
+    async getLatestRiskLadderState() { return row; },
+    async saveRiskLadderState(input) { row = Object.freeze({ ...input }); return row; }
+  };
+}
+
+const riskLadderConfig = Object.freeze({
+  enabled: true,
+  entryBrakeUsd: 300,
+  partialCutUsd: 1000,
+  partialCutFraction: 0.5,
+  fullFlattenUsd: 1250,
+  protectiveOrdersBypassSlippageCap: true,
+  resumeAfterFlatten: "nextDailyRollover"
+});
+
 function stateAtFinalTranche() {
   let state = createInitialSolanaState();
   state = applyConfirmedEntry(state, {
@@ -82,11 +100,14 @@ test("final confirmed tranche emits both tranche-exit and fully-closed-lot notif
 
   const runtime = createSolanaRuntime({
     stateStore: store,
+    riskLadderStore: createRiskLadderStore(),
+    riskLadderConfig,
     maProvider: { getCurrent: async () => ({ ma: 120, completedThrough: "2026-08-24T00:00:00.000Z" }) },
     getRiskSnapshot: async () => baseRisk(expectedNetUnits(state)),
     minimumHoldSeconds: 25,
     execution: {
       isEnabled: () => true,
+      executeProtectiveCut: async () => ({ status: "ALREADY_FLAT" }),
       executeProtectiveFlatten: async () => ({ status: "ALREADY_FLAT" }),
       executeIntent: async (intent) => ({
         status: "FILLED",

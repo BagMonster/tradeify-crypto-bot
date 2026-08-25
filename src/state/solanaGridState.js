@@ -1,4 +1,4 @@
-import { normalizeSolanaState } from "../strategies/solanaGrid.js";
+import { createInitialSolanaState, normalizeSolanaState } from "../strategies/solanaGrid.js";
 
 export class SolanaGridStateConflictError extends Error {
   constructor(message = "SOL grid state changed before the update could be saved") {
@@ -22,6 +22,46 @@ function requireQuery(query) {
   return query;
 }
 
+export function migrateLegacySolanaStatePayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  if (!Array.isArray(payload.rings) || payload.rings.length !== 16) return payload;
+  if (payload.strategyId !== "sol-outer-heavy-v1" || payload.instrument !== "SOL/USD") return payload;
+
+  const fresh = createInitialSolanaState();
+  const oldByKey = new Map();
+  for (const ring of payload.rings) {
+    const side = ring?.side;
+    const level = Number(ring?.level);
+    if ((side !== "BUY" && side !== "SELL") || !Number.isInteger(level) || level < 1 || level > 8) {
+      throw new Error("Legacy SOL grid state cannot be mapped safely to D-049 geometry");
+    }
+    oldByKey.set(`${side}:${level}`, ring);
+  }
+  if (oldByKey.size !== 16) throw new Error("Legacy SOL grid state is incomplete or duplicated");
+
+  const rings = fresh.rings.map((ring) => {
+    if (ring.level <= 2) return { ...ring, lots: [] };
+    const old = oldByKey.get(`${ring.side}:${ring.level - 2}`);
+    if (!old) throw new Error("Legacy SOL grid state mapping is incomplete");
+    const newTag = ring.tag;
+    return {
+      ...ring,
+      armed: old.armed === true,
+      lots: Array.isArray(old.lots) ? old.lots.map((lot) => ({ ...lot, ringTag: newTag })) : []
+    };
+  });
+
+  return {
+    version: payload.version,
+    strategyId: payload.strategyId,
+    instrument: payload.instrument,
+    rings,
+    lastFillAt: payload.lastFillAt ?? null,
+    lastFillSide: payload.lastFillSide ?? null,
+    lastFillPrice: payload.lastFillPrice ?? null
+  };
+}
+
 export function createPostgresSolanaGridStateStore({ query }) {
   const run = requireQuery(query);
 
@@ -35,7 +75,8 @@ export function createPostgresSolanaGridStateStore({ query }) {
     if (result.rowCount === 0) return null;
     if (result.rowCount !== 1) throw new Error("solana_grid_state must contain at most one row");
     const row = result.rows[0];
-    const state = normalizeSolanaState(row.payload);
+    const migratedPayload = migrateLegacySolanaStatePayload(row.payload);
+    const state = normalizeSolanaState(migratedPayload);
     if (String(row.strategy_id) !== state.strategyId || String(row.instrument) !== state.instrument) {
       throw new Error("SOL grid state database identity does not match payload identity");
     }

@@ -1,5 +1,4 @@
 const DAY_MS = 86_400_000;
-const TRIGGER_DAYS = 25;
 const QUANTITY = 0.01;
 const HOLD_MS = 25_000;
 
@@ -19,8 +18,10 @@ export function createSolanaHeartbeat({
   persistence,
   adapter,
   isExecutionEnabled,
+  isRiskLadderHalted = async () => false,
   acquireMaintenance,
   releaseMaintenance,
+  triggerDays = 25,
   addEvent = async () => {},
   notifications = null,
   now = () => Date.now(),
@@ -30,9 +31,10 @@ export function createSolanaHeartbeat({
     if (typeof persistence?.[method] !== "function") throw new TypeError(`persistence.${method} is required`);
   }
   if (typeof adapter?.place !== "function") throw new TypeError("heartbeat requires the SOL quantity adapter");
-  for (const [name, fn] of Object.entries({ isExecutionEnabled, acquireMaintenance, releaseMaintenance, addEvent, now, sleep })) {
+  for (const [name, fn] of Object.entries({ isExecutionEnabled, isRiskLadderHalted, acquireMaintenance, releaseMaintenance, addEvent, now, sleep })) {
     if (typeof fn !== "function") throw new TypeError(`${name} must be a function`);
   }
+  if (!Number.isInteger(triggerDays) || triggerDays < 1 || triggerDays >= 30) throw new TypeError("triggerDays must be an integer below the 30-day inactivity deadline");
   if (notifications !== null && typeof notifications?.enqueue !== "function") throw new TypeError("notifications.enqueue must be a function");
 
   let running = false;
@@ -107,6 +109,7 @@ export function createSolanaHeartbeat({
   async function checkOnce() {
     if (running) return Object.freeze({ status: "BUSY" });
     if (!isExecutionEnabled()) return Object.freeze({ status: "LOCKED" });
+    if (await isRiskLadderHalted()) return Object.freeze({ status: "D049_HALTED_FOR_DAY" });
     running = true;
     let acquired = false;
     try {
@@ -132,7 +135,7 @@ export function createSolanaHeartbeat({
       const currentMs = now();
       if (!Number.isFinite(lastMs) || !Number.isFinite(currentMs)) throw new Error("Heartbeat activity time is invalid");
       const ageMs = Math.max(0, currentMs - lastMs);
-      if (ageMs < TRIGGER_DAYS * DAY_MS) {
+      if (ageMs < triggerDays * DAY_MS) {
         return Object.freeze({ status: "NOT_DUE", daysSinceTrade: ageMs / DAY_MS });
       }
 
@@ -167,7 +170,7 @@ export function createSolanaHeartbeat({
   return Object.freeze({
     checkOnce,
     isRunning: () => running,
-    triggerDays: TRIGGER_DAYS,
+    triggerDays,
     quantity: QUANTITY,
     holdMs: HOLD_MS
   });

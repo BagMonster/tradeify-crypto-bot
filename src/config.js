@@ -58,6 +58,18 @@ function exact(name, actual, expected) {
   if (actual !== expected) throw new Error(`${name} must equal ${expected}`);
 }
 
+function validateRiskLadder(strategy) {
+  const cfg = strategy.riskLadder;
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("strategy.riskLadder is required");
+  exact("riskLadder.enabled", cfg.enabled, true);
+  exact("riskLadder.entryBrakeUsd", cfg.entryBrakeUsd, 300);
+  exact("riskLadder.partialCutUsd", cfg.partialCutUsd, 1000);
+  exact("riskLadder.partialCutFraction", cfg.partialCutFraction, 0.5);
+  exact("riskLadder.fullFlattenUsd", cfg.fullFlattenUsd, 1250);
+  exact("riskLadder.protectiveOrdersBypassSlippageCap", cfg.protectiveOrdersBypassSlippageCap, true);
+  exact("riskLadder.resumeAfterFlatten", cfg.resumeAfterFlatten, "nextDailyRollover");
+}
+
 function validateSolOuterHeavy(strategy) {
   requireText("strategy.strategyId", strategy.strategyId);
   exact("strategy.strategyId", strategy.strategyId, "sol-outer-heavy-v1");
@@ -65,19 +77,20 @@ function validateSolOuterHeavy(strategy) {
   if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("strategy.solOuterHeavy is required");
   exact("solOuterHeavy.maDays", cfg.maDays, 200);
   exact("solOuterHeavy.bandPct", cfg.bandPct, 0.045);
-  exact("solOuterHeavy.deadZoneBands", cfg.deadZoneBands, 4);
-  exact("solOuterHeavy.activeLevelsPerSide", cfg.activeLevelsPerSide, 8);
-  exact("solOuterHeavy.baseUsd", cfg.baseUsd, 6);
-  exact("solOuterHeavy.growth", cfg.growth, 1.8);
+  exact("solOuterHeavy.deadZoneBands", cfg.deadZoneBands, 2);
+  exact("solOuterHeavy.activeLevelsPerSide", cfg.activeLevelsPerSide, 10);
+  exact("solOuterHeavy.baseUsd", cfg.baseUsd, 28.68);
+  exact("solOuterHeavy.growth", cfg.growth, 1.5);
   exact("solOuterHeavy.positionsPerRing", cfg.positionsPerRing, 2);
   exact("solOuterHeavy.rearmBands", cfg.rearmBands, 0.5);
   exact("solOuterHeavy.lotStep", cfg.lotStep, 0.01);
   if (JSON.stringify(cfg.trancheWeights) !== JSON.stringify([1,2,3,4])) throw new Error("solOuterHeavy.trancheWeights must equal [1,2,3,4]");
   exact("solOuterHeavy.roundTripCostFloorPct", cfg.roundTripCostFloorPct, 0.0018);
-  exact("solOuterHeavy.grossExposureCeilingUsd", cfg.grossExposureCeilingUsd, 1830);
-  exact("solOuterHeavy.heartbeatDays", cfg.heartbeatDays, 30);
+  exact("solOuterHeavy.grossExposureCeilingUsd", cfg.grossExposureCeilingUsd, 6600);
+  exact("solOuterHeavy.heartbeatDays", cfg.heartbeatDays, 25);
   exact("solOuterHeavy.heartbeatQuantitySol", cfg.heartbeatQuantitySol, 0.01);
   exact("solOuterHeavy.liveSemantics", cfg.liveSemantics, "live-touch-exits-before-entries");
+  validateRiskLadder(strategy);
 }
 
 export async function loadStrategyConfig(path = "config/strategy.json") {

@@ -1,9 +1,22 @@
 import { evaluateGridRisk } from "../risk/accountRules.js";
 import {
+  LADDER_ACTIONS,
+  accountDayKey,
+  createInitialLadderState,
+  evaluateRiskLadder,
+  markFlattenDone,
+  markPartialCutDone,
+  normalizeLadderState,
+  rollAccountDay,
+  withLadderObservation
+} from "../risk/dailyRiskLadder.js";
+import {
   GRID_DEFINITION,
   applyConfirmedEntry,
   applyConfirmedExit,
+  applyConfirmedProtectiveCut,
   applySkippedExit,
+  buildProtectiveCutPlan,
   createInitialSolanaState,
   entryCandidates,
   expectedNetUnits,
@@ -18,6 +31,11 @@ function positive(name, value) {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n) || n <= 0) throw new TypeError(`${name} must be positive`);
   return n;
+}
+
+function finite(value) {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function canonicalUtc(name, value) {
@@ -46,8 +64,20 @@ function findLot(state, lotId) {
   return null;
 }
 
+function ladderStateChanged(left, right) {
+  return left.dayKey !== right.dayKey ||
+    left.baselineClosedBalanceUsd !== right.baselineClosedBalanceUsd ||
+    left.brakeEngaged !== right.brakeEngaged ||
+    left.partialCutDone !== right.partialCutDone ||
+    left.flattenDone !== right.flattenDone ||
+    left.haltedForDay !== right.haltedForDay ||
+    Math.abs(left.worstDrawdownUsd - right.worstDrawdownUsd) >= 1;
+}
+
 export function createSolanaRuntime({
   stateStore,
+  riskLadderStore,
+  riskLadderConfig,
   maProvider,
   getRiskSnapshot,
   execution,
@@ -55,12 +85,17 @@ export function createSolanaRuntime({
   addEvent = async () => {},
   notifications = null
 }) {
-  for (const method of ["init","load","initializeIfMissing","save"]) {
+  for (const method of ["init", "load", "initializeIfMissing", "save"]) {
     if (typeof stateStore?.[method] !== "function") throw new TypeError(`stateStore.${method} is required`);
   }
+  for (const method of ["getLatestRiskLadderState", "saveRiskLadderState"]) {
+    if (typeof riskLadderStore?.[method] !== "function") throw new TypeError(`riskLadderStore.${method} is required`);
+  }
+  if (!riskLadderConfig || riskLadderConfig.enabled !== true) throw new TypeError("D-049 risk ladder config must be enabled");
   if (typeof maProvider?.getCurrent !== "function") throw new TypeError("maProvider.getCurrent is required");
   if (typeof getRiskSnapshot !== "function") throw new TypeError("getRiskSnapshot is required");
-  if (typeof execution?.isEnabled !== "function" || typeof execution?.executeIntent !== "function" || typeof execution?.executeProtectiveFlatten !== "function") {
+  if (typeof execution?.isEnabled !== "function" || typeof execution?.executeIntent !== "function" ||
+      typeof execution?.executeProtectiveCut !== "function" || typeof execution?.executeProtectiveFlatten !== "function") {
     throw new TypeError("SOL execution interface is invalid");
   }
   if (!Number.isInteger(minimumHoldSeconds) || minimumHoldSeconds < 25 || minimumHoldSeconds > 300) throw new TypeError("minimumHoldSeconds is invalid");
@@ -69,6 +104,7 @@ export function createSolanaRuntime({
 
   let previousPrice = null;
   let lastShadowKey = null;
+  let ladderState = createInitialLadderState();
 
   function enqueueNotification(event) {
     if (notifications !== null) notifications.enqueue(event);
@@ -78,7 +114,13 @@ export function createSolanaRuntime({
     await stateStore.init();
     let state = await stateStore.load();
     if (!state) state = await stateStore.initializeIfMissing(createInitialSolanaState());
+    const storedLadder = await riskLadderStore.getLatestRiskLadderState();
+    ladderState = storedLadder ? normalizeLadderState(storedLadder) : createInitialLadderState();
     return state;
+  }
+
+  function getRiskLadderState() {
+    return ladderState;
   }
 
   async function auditShadowOnce(key, kind, payload) {
@@ -104,9 +146,65 @@ export function createSolanaRuntime({
     return { ok: ageMs >= 0 && ageMs < 5_000, expected, actual, grace: ageMs >= 0 && ageMs < 5_000 };
   }
 
-  async function persistIfChanged(before, after) {
-    if (after.version === before.version) return before;
-    return stateStore.save(before.version, after);
+  async function saveLadder(next, force = false) {
+    const normalized = normalizeLadderState(next);
+    if (normalized.dayKey === null || normalized.baselineClosedBalanceUsd === null) {
+      ladderState = normalized;
+      return ladderState;
+    }
+    if (!force && !ladderStateChanged(ladderState, normalized)) {
+      ladderState = normalized;
+      return ladderState;
+    }
+    ladderState = normalizeLadderState(await riskLadderStore.saveRiskLadderState(normalized));
+    return ladderState;
+  }
+
+  async function ladderVerdict(snapshot, trade) {
+    const nowMs = Date.parse(trade.tradeTime);
+    const currentDay = accountDayKey(nowMs);
+
+    if (ladderState.dayKey === currentDay && ladderState.haltedForDay) {
+      const equity = finite(snapshot.liveEquity);
+      const drawdownUsd = equity === null || ladderState.baselineClosedBalanceUsd === null
+        ? 0
+        : equity - ladderState.baselineClosedBalanceUsd;
+      return Object.freeze({
+        verdict: Object.freeze({ action: LADDER_ACTIONS.HALTED_FOR_DAY, drawdownUsd, reason: "flattened-this-day" }),
+        issue: null
+      });
+    }
+
+    const baseline = finite(snapshot.previousDayClosingBalance);
+    const equity = finite(snapshot.liveEquity);
+    if (snapshot.accountDataFresh !== true || baseline === null || baseline <= 0 || equity === null) {
+      return Object.freeze({
+        verdict: Object.freeze({ action: LADDER_ACTIONS.BRAKE, drawdownUsd: 0, reason: "unknown-equity-or-baseline" }),
+        issue: "D049_ACCOUNT_INPUT_UNAVAILABLE"
+      });
+    }
+
+    if (ladderState.dayKey !== currentDay) {
+      const rolled = rollAccountDay(ladderState, nowMs, baseline);
+      ladderState = await saveLadder(rolled.state, true);
+      await addEvent("INFO", "SOL_D049_ACCOUNT_DAY_ROLLED", {
+        dayKey: ladderState.dayKey,
+        baselineClosedBalanceUsd: ladderState.baselineClosedBalanceUsd
+      });
+    }
+
+    if (Math.abs(ladderState.baselineClosedBalanceUsd - baseline) > 0.01) {
+      const drawdownUsd = equity - ladderState.baselineClosedBalanceUsd;
+      return Object.freeze({
+        verdict: Object.freeze({ action: LADDER_ACTIONS.BRAKE, drawdownUsd, reason: "baseline-mismatch" }),
+        issue: "D049_BASELINE_MISMATCH"
+      });
+    }
+
+    return Object.freeze({
+      verdict: evaluateRiskLadder(ladderState, riskLadderConfig, equity),
+      issue: null
+    });
   }
 
   async function processTrade(input) {
@@ -126,6 +224,7 @@ export function createSolanaRuntime({
       return Object.freeze({ status: "RECONCILIATION_BLOCKED", state, ma, reconciliation: Object.freeze({ ...recon }) });
     }
 
+    // Existing funded-account floor protections remain highest-priority emergency actions.
     if (firstRisk.risk.protectiveAction === "FLATTEN_AND_LOCK") {
       const result = await execution.executeProtectiveFlatten({ stateVersion: state.version, reason: firstRisk.risk.reason });
       if (result.status === "FILLED" || result.status === "ALREADY_FLAT") {
@@ -149,7 +248,126 @@ export function createSolanaRuntime({
         return Object.freeze({ status: "PROTECTIVE_FILLED", state, ma });
       }
       previousPrice = trade.price;
-      return Object.freeze({ status: "PROTECTIVE_PENDING", state, ma });
+      return Object.freeze({ status: "PROTECTIVE_PENDING", state, ma, result });
+    }
+
+    // D-049 is evaluated before normal re-arm, tranche exits, entries, or heartbeat work.
+    const ladder = await ladderVerdict(firstRisk.snapshot, trade);
+    let verdict = ladder.verdict;
+    let blockEntries = verdict.action !== LADDER_ACTIONS.NORMAL;
+
+    if (ladder.issue) {
+      await addEvent("ERROR", ladder.issue, {
+        dayKey: ladderState.dayKey,
+        reason: verdict.reason,
+        storedBaseline: ladderState.baselineClosedBalanceUsd,
+        brokerBaseline: firstRisk.snapshot.previousDayClosingBalance ?? null
+      });
+    }
+
+    if (verdict.action === LADDER_ACTIONS.HALTED_FOR_DAY) {
+      previousPrice = trade.price;
+      return Object.freeze({ status: "D049_HALTED_FOR_DAY", state, ma, ladderState, ladderVerdict: verdict });
+    }
+
+    if (verdict.action === LADDER_ACTIONS.FULL_FLATTEN) {
+      const result = await execution.executeProtectiveFlatten({
+        stateVersion: state.version,
+        reason: "D-049 full flatten",
+        dayKey: ladderState.dayKey,
+        bypassSlippageCap: true
+      });
+      if (result.status !== "FILLED" && result.status !== "ALREADY_FLAT") {
+        await addEvent("ERROR", "SOL_D049_FULL_FLATTEN_UNCONFIRMED", {
+          dayKey: ladderState.dayKey,
+          drawdownUsd: verdict.drawdownUsd,
+          brokerStatus: result.status ?? "UNKNOWN"
+        });
+        previousPrice = trade.price;
+        return Object.freeze({ status: "D049_FULL_FLATTEN_UNCONFIRMED", state, ma, ladderState, ladderVerdict: verdict, result });
+      }
+
+      const reset = resetAfterProtectiveFlatten(state, {
+        fillPrice: result.fillPrice ?? trade.price,
+        filledAt: result.filledAt ?? trade.tradeTime
+      });
+      state = await stateStore.save(state.version, reset);
+      ladderState = await saveLadder(markFlattenDone(ladderState, verdict.drawdownUsd), true);
+      await addEvent("WARN", "SOL_D049_FULL_FLATTEN_CONFIRMED", {
+        dayKey: ladderState.dayKey,
+        drawdownUsd: verdict.drawdownUsd,
+        brokerStatus: result.status,
+        stateVersion: state.version
+      });
+      enqueueNotification({
+        kind: "D049_FULL_FLATTEN",
+        eventKey: `SOL-D049-FLAT:${ladderState.dayKey}`,
+        drawdownUsd: verdict.drawdownUsd,
+        fillPrice: result.fillPrice ?? null,
+        filledQuantity: result.filledQuantity ?? 0,
+        confirmedFlat: true,
+        filledAt: result.filledAt ?? trade.tradeTime
+      });
+      previousPrice = trade.price;
+      return Object.freeze({ status: "D049_FULL_FLATTENED", state, ma, ladderState, ladderVerdict: verdict });
+    }
+
+    if (verdict.action === LADDER_ACTIONS.PARTIAL_CUT) {
+      let plan;
+      try {
+        plan = buildProtectiveCutPlan(state, riskLadderConfig.partialCutFraction);
+      } catch (error) {
+        await addEvent("ERROR", "SOL_D049_PARTIAL_CUT_PLAN_FAILED", { reason: error.message });
+        previousPrice = trade.price;
+        return Object.freeze({ status: "D049_PARTIAL_CUT_UNCONFIRMED", state, ma, ladderState, ladderVerdict: verdict, result: Object.freeze({ status: "PLAN_FAILED" }) });
+      }
+
+      if (plan.quantity >= GRID_DEFINITION.lotStep - 1e-12) {
+        const result = await execution.executeProtectiveCut({
+          stateVersion: state.version,
+          dayKey: ladderState.dayKey,
+          quantity: plan.quantity,
+          side: plan.side,
+          reason: "D-049 partial cut",
+          bypassSlippageCap: true
+        });
+        if (result.status !== "FILLED") {
+          await addEvent("ERROR", "SOL_D049_PARTIAL_CUT_UNCONFIRMED", {
+            dayKey: ladderState.dayKey,
+            drawdownUsd: verdict.drawdownUsd,
+            brokerStatus: result.status ?? "UNKNOWN"
+          });
+          previousPrice = trade.price;
+          return Object.freeze({ status: "D049_PARTIAL_CUT_UNCONFIRMED", state, ma, ladderState, ladderVerdict: verdict, result });
+        }
+        state = await stateStore.save(state.version, applyConfirmedProtectiveCut(state, plan, result));
+        ladderState = await saveLadder(markPartialCutDone(ladderState, verdict.drawdownUsd), true);
+        enqueueNotification({
+          kind: "D049_PARTIAL_CUT",
+          eventKey: `SOL-D049-CUT:${ladderState.dayKey}`,
+          drawdownUsd: verdict.drawdownUsd,
+          fraction: riskLadderConfig.partialCutFraction,
+          filledQuantity: result.filledQuantity,
+          fillPrice: result.fillPrice,
+          lotsAffected: plan.legs.length,
+          filledAt: result.filledAt
+        });
+      } else {
+        ladderState = await saveLadder(markPartialCutDone(ladderState, verdict.drawdownUsd), true);
+        await addEvent("WARN", "SOL_D049_PARTIAL_CUT_NO_EXECUTABLE_LOTS", {
+          dayKey: ladderState.dayKey,
+          drawdownUsd: verdict.drawdownUsd
+        });
+      }
+      blockEntries = true;
+    } else if (verdict.action === LADDER_ACTIONS.BRAKE || ladder.issue) {
+      const observed = withLadderObservation(ladderState, { drawdownUsd: verdict.drawdownUsd, brakeEngaged: true });
+      ladderState = await saveLadder(observed, ladderState.brakeEngaged !== true);
+      blockEntries = true;
+    } else {
+      const observed = withLadderObservation(ladderState, { drawdownUsd: verdict.drawdownUsd, brakeEngaged: false });
+      ladderState = await saveLadder(observed, ladderState.brakeEngaged === true);
+      blockEntries = false;
     }
 
     const observed = observeRearm(state, { price: trade.price, ma });
@@ -194,7 +412,7 @@ export function createSolanaRuntime({
       const result = await execution.executeIntent(action);
       if (result.status !== "FILLED") {
         previousPrice = trade.price;
-        return Object.freeze({ status: "EXIT_PENDING", state, ma, action, result });
+        return Object.freeze({ status: "EXIT_PENDING", state, ma, action, result, ladderState });
       }
       state = await stateStore.save(state.version, applyConfirmedExit(state, action, result));
       const lotAfterExit = findLot(state, action.lotId);
@@ -229,73 +447,76 @@ export function createSolanaRuntime({
       lastShadowKey = null;
     }
 
-    const candidates = entryCandidates(state, { previousPrice, price: trade.price, ma });
-    for (const original of candidates) {
-      const ring = state.rings.find((candidate) => candidate.tag === original.ringTag);
-      if (!ring || !ring.armed || ring.lots.length >= GRID_DEFINITION.perRing) continue;
-      const quantity = original.quantity;
-      const proposed = quantity * trade.price;
-      const gross = grossVirtualExposureUsd(state, trade.price);
-      if (gross + proposed > GRID_DEFINITION.grossExposureCeilingUsd + 1e-8) {
-        await auditShadowOnce(`CEILING:${state.version}:${original.tag}`, "SOL_ENTRY_BLOCKED_GROSS_EXPOSURE", {
-          tag: original.tag,
-          grossExposureUsd: gross,
-          proposedNotional: proposed,
-          ceilingUsd: GRID_DEFINITION.grossExposureCeilingUsd
-        });
-        continue;
-      }
+    if (!blockEntries) {
+      const candidates = entryCandidates(state, { previousPrice, price: trade.price, ma });
+      for (const original of candidates) {
+        const ring = state.rings.find((candidate) => candidate.tag === original.ringTag);
+        if (!ring || !ring.armed || ring.lots.length >= GRID_DEFINITION.perRing) continue;
+        const quantity = original.quantity;
+        const proposed = quantity * trade.price;
+        const gross = grossVirtualExposureUsd(state, trade.price);
+        if (gross + proposed > GRID_DEFINITION.grossExposureCeilingUsd + 1e-8) {
+          await auditShadowOnce(`CEILING:${state.version}:${original.tag}`, "SOL_ENTRY_BLOCKED_GROSS_EXPOSURE", {
+            tag: original.tag,
+            grossExposureUsd: gross,
+            proposedNotional: proposed,
+            ceilingUsd: GRID_DEFINITION.grossExposureCeilingUsd
+          });
+          continue;
+        }
 
-      const { risk } = await riskFor(state, trade, proposed);
-      if (!risk.allowNewGridAction) {
-        await auditShadowOnce(`RISK:${state.version}:${original.tag}:${risk.reason}`, "SOL_ENTRY_BLOCKED", {
-          tag: original.tag,
-          reason: risk.reason
-        });
-        continue;
-      }
+        const { risk } = await riskFor(state, trade, proposed);
+        if (!risk.allowNewGridAction) {
+          await auditShadowOnce(`RISK:${state.version}:${original.tag}:${risk.reason}`, "SOL_ENTRY_BLOCKED", {
+            tag: original.tag,
+            reason: risk.reason
+          });
+          continue;
+        }
 
-      const intent = Object.freeze({
-        ...original,
-        stateVersion: state.version,
-        lotId: `${original.tag}-V${state.version}`
-      });
-      if (!execution.isEnabled()) {
-        await auditShadowOnce(`ENTRY:${state.version}:${intent.tag}`, "SOL_SHADOW_ENTRY", {
-          tag: intent.tag,
+        const intent = Object.freeze({
+          ...original,
+          stateVersion: state.version,
+          lotId: `${original.tag}-V${state.version}`
+        });
+        if (!execution.isEnabled()) {
+          await auditShadowOnce(`ENTRY:${state.version}:${intent.tag}`, "SOL_SHADOW_ENTRY", {
+            tag: intent.tag,
+            side: intent.side,
+            quantity: intent.quantity,
+            usd: intent.usd,
+            ringLevel: intent.ringLevel,
+            observedPrice: trade.price,
+            ma
+          });
+          continue;
+        }
+
+        const result = await execution.executeIntent(intent);
+        if (result.status !== "FILLED") {
+          previousPrice = trade.price;
+          return Object.freeze({ status: "ENTRY_PENDING", state, ma, intent, result, ladderState });
+        }
+        state = await stateStore.save(state.version, applyConfirmedEntry(state, intent, result));
+        enqueueNotification({
+          kind: "ENTRY_CONFIRMED",
+          eventKey: `SOL-ENTRY:${result.orderCode}`,
+          ringTag: intent.ringTag,
           side: intent.side,
-          quantity: intent.quantity,
-          usd: intent.usd,
-          ringLevel: intent.ringLevel,
-          observedPrice: trade.price,
-          ma
+          fillPrice: result.fillPrice,
+          filledQuantity: result.filledQuantity,
+          lotId: intent.lotId,
+          ma,
+          filledAt: result.filledAt
         });
-        continue;
+        lastShadowKey = null;
       }
-
-      const result = await execution.executeIntent(intent);
-      if (result.status !== "FILLED") {
-        previousPrice = trade.price;
-        return Object.freeze({ status: "ENTRY_PENDING", state, ma, intent, result });
-      }
-      state = await stateStore.save(state.version, applyConfirmedEntry(state, intent, result));
-      enqueueNotification({
-        kind: "ENTRY_CONFIRMED",
-        eventKey: `SOL-ENTRY:${result.orderCode}`,
-        ringTag: intent.ringTag,
-        side: intent.side,
-        fillPrice: result.fillPrice,
-        filledQuantity: result.filledQuantity,
-        lotId: intent.lotId,
-        ma,
-        filledAt: result.filledAt
-      });
-      lastShadowKey = null;
     }
 
     previousPrice = trade.price;
-    return Object.freeze({ status: execution.isEnabled() ? "PROCESSED" : "SHADOW", state, ma, maCompletedThrough: maState.completedThrough });
+    const status = ladder.issue ?? (execution.isEnabled() ? "PROCESSED" : "SHADOW");
+    return Object.freeze({ status, state, ma, maCompletedThrough: maState.completedThrough, ladderState, ladderVerdict: verdict });
   }
 
-  return Object.freeze({ init, processTrade, definition: GRID_DEFINITION });
+  return Object.freeze({ init, processTrade, getRiskLadderState, definition: GRID_DEFINITION });
 }

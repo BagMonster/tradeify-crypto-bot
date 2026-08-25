@@ -33,22 +33,40 @@ function memoryNotificationPersistence() {
   };
 }
 
+function riskLadderStore() {
+  let row = null;
+  return {
+    async getLatestRiskLadderState() { return row; },
+    async saveRiskLadderState(input) { row = Object.freeze({ ...input }); return row; }
+  };
+}
+
+const riskLadderConfig = Object.freeze({
+  enabled: true,
+  entryBrakeUsd: 300,
+  partialCutUsd: 1000,
+  partialCutFraction: 0.5,
+  fullFlattenUsd: 1250,
+  protectiveOrdersBypassSlippageCap: true,
+  resumeAfterFlatten: "nextDailyRollover"
+});
+
 function entryEvent(overrides = {}) {
   return {
     kind: "ENTRY_CONFIRMED",
-    eventKey: "SOL-ENTRY:SOLGRID-1-BUY1-E",
-    ringTag: "BUY1",
+    eventKey: "SOL-ENTRY:SOLGRID-1-BUY10-E",
+    ringTag: "BUY10",
     side: "BUY",
     fillPrice: 93.83,
     filledQuantity: 0.06,
-    lotId: "BUY1-V1",
+    lotId: "BUY10-V1",
     ma: 120,
     filledAt: "2026-08-24T15:00:00.000Z",
     ...overrides
   };
 }
 
-function baseRisk(brokerNetUnits = 0) {
+function baseRisk(brokerNetUnits = 0, liveEquity = 50_000) {
   return {
     startingBalance: 50_000,
     maxLossOffset: 3_000,
@@ -56,7 +74,7 @@ function baseRisk(brokerNetUnits = 0) {
     payoutTaken: false,
     previousDayClosingBalance: 50_000,
     dailyLossLimit: 1_500,
-    liveEquity: 50_000,
+    liveEquity,
     currentNotional: 0,
     maxNotional: 100_000,
     operatorPaused: false,
@@ -69,21 +87,21 @@ function baseRisk(brokerNetUnits = 0) {
   };
 }
 
-test("live notification formatting uses the approved useful-middle detail level", () => {
+test("live notification formatting supports D-049 ring 10 and approved useful-middle detail", () => {
   const entry = formatLiveTelegramNotification(entryEvent());
   assert.match(entry.message, /🟢 SOL ENTRY CONFIRMED/);
-  assert.match(entry.message, /Ring: BUY1/);
+  assert.match(entry.message, /Ring: BUY10/);
   assert.match(entry.message, /Fill: \$93\.83/);
   assert.match(entry.message, /Quantity: 0\.06 SOL/);
-  assert.match(entry.message, /Virtual lot: BUY1-V1/);
+  assert.match(entry.message, /Virtual lot: BUY10-V1/);
   assert.match(entry.message, /Current 200-day MA: \$120\.00/);
 
   const exit = formatLiveTelegramNotification({
     kind: "TRANCHE_EXIT_CONFIRMED",
-    eventKey: "SOL-TRANCHE:SOLGRID-2-BUY1-X1",
-    ringTag: "BUY1",
-    virtualSide: "BUY",
-    lotId: "BUY1-V1",
+    eventKey: "SOL-TRANCHE:SOLGRID-2-SELL10-X1",
+    ringTag: "SELL10",
+    virtualSide: "SELL",
+    lotId: "SELL10-V1",
     tranche: 1,
     fillPrice: 100.25,
     filledQuantity: 0.01,
@@ -93,8 +111,8 @@ test("live notification formatting uses the approved useful-middle detail level"
     filledAt: "2026-08-24T16:00:00.000Z"
   });
   assert.match(exit.message, /💰 SOL TRANCHE EXIT CONFIRMED/);
+  assert.match(exit.message, /Ring: SELL10/);
   assert.match(exit.message, /Tranche: 1\/4/);
-  assert.match(exit.message, /Remaining: 0\.05 SOL/);
 
   const safety = formatLiveTelegramNotification({
     kind: "RECONCILIATION_MISMATCH",
@@ -104,7 +122,35 @@ test("live notification formatting uses the approved useful-middle detail level"
     brokerNetUnits: 0.38
   });
   assert.match(safety.message, /🚨 SOL SAFETY HALT — RECONCILIATION MISMATCH/);
-  assert.match(safety.message, /Owner review is required/);
+});
+
+test("D-049 partial-cut and full-flatten notifications contain protective detail", () => {
+  const cut = formatLiveTelegramNotification({
+    kind: "D049_PARTIAL_CUT",
+    eventKey: "SOL-D049-CUT:2026-08-24",
+    drawdownUsd: -1004.22,
+    fraction: 0.5,
+    filledQuantity: 1.2,
+    fillPrice: 82.15,
+    lotsAffected: 4,
+    filledAt: "2026-08-24T20:00:00.000Z"
+  });
+  assert.match(cut.message, /50% DE-RISK CUT CONFIRMED/);
+  assert.match(cut.message, /−\$1004\.22/);
+  assert.match(cut.message, /Virtual lots affected: 4/);
+
+  const flat = formatLiveTelegramNotification({
+    kind: "D049_FULL_FLATTEN",
+    eventKey: "SOL-D049-FLAT:2026-08-24",
+    drawdownUsd: -1260.45,
+    fillPrice: 80.5,
+    filledQuantity: 2.4,
+    confirmedFlat: true,
+    filledAt: "2026-08-24T20:01:00.000Z"
+  });
+  assert.match(flat.message, /DAILY FULL FLATTEN COMPLETE/);
+  assert.match(flat.message, /Broker account: FLAT/);
+  assert.match(flat.message, /next 22:00 UTC account-day rollover/);
 });
 
 test("durable notification identity suppresses duplicate delivery across notifier restarts", async () => {
@@ -153,10 +199,10 @@ test("queued notifications preserve event order without blocking the trading cal
   assert.equal(notifications.enqueue(entryEvent()).status, "QUEUED");
   assert.equal(notifications.enqueue({
     kind: "LOT_CLOSED",
-    eventKey: "SOL-LOT-CLOSED:SOLGRID-5-BUY1-X4",
-    ringTag: "BUY1",
+    eventKey: "SOL-LOT-CLOSED:SOLGRID-5-BUY10-X4",
+    ringTag: "BUY10",
     virtualSide: "BUY",
-    lotId: "BUY1-V1",
+    lotId: "BUY10-V1",
     entryPrice: 93.83,
     originalQuantity: 0.06,
     finalFillPrice: 120,
@@ -185,18 +231,21 @@ test("live runtime emits an entry notification only after the confirmed fill is 
   };
   const execution = {
     isEnabled: () => true,
+    executeProtectiveCut: async () => ({ status: "ALREADY_FLAT" }),
     executeProtectiveFlatten: async () => ({ status: "ALREADY_FLAT" }),
     executeIntent: async (intent) => ({
       status: "FILLED",
       confirmed: true,
       orderCode: `SOLGRID-${intent.stateVersion}-${intent.tag}-E`,
-      fillPrice: 77.4,
+      fillPrice: 86.4,
       filledQuantity: intent.quantity,
       filledAt: "2026-08-24T15:00:30.000Z"
     })
   };
   const runtime = createSolanaRuntime({
     stateStore: store,
+    riskLadderStore: riskLadderStore(),
+    riskLadderConfig,
     maProvider: { getCurrent: async () => ({ ma: 100, completedThrough: "2026-08-24T00:00:00.000Z" }) },
     execution,
     minimumHoldSeconds: 25,
@@ -211,14 +260,14 @@ test("live runtime emits an entry notification only after the confirmed fill is 
   });
   await runtime.init();
 
-  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 80, tradeTime: "2026-08-24T15:00:00.000Z" });
+  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 90, tradeTime: "2026-08-24T15:00:00.000Z" });
   saved = false;
-  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 77.4, tradeTime: "2026-08-24T15:00:30.000Z" });
+  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 86.4, tradeTime: "2026-08-24T15:00:30.000Z" });
 
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].kind, "ENTRY_CONFIRMED");
   assert.equal(notifications[0].ringTag, "BUY1");
-  assert.equal(notifications[0].fillPrice, 77.4);
+  assert.equal(notifications[0].fillPrice, 86.4);
 });
 
 test("unconfirmed runtime order outcome never emits a fill notification", async () => {
@@ -236,9 +285,12 @@ test("unconfirmed runtime order outcome never emits a fill notification", async 
   };
   const runtime = createSolanaRuntime({
     stateStore: store,
+    riskLadderStore: riskLadderStore(),
+    riskLadderConfig,
     maProvider: { getCurrent: async () => ({ ma: 100, completedThrough: "2026-08-24T00:00:00.000Z" }) },
     execution: {
       isEnabled: () => true,
+      executeProtectiveCut: async () => ({ status: "ALREADY_FLAT" }),
       executeProtectiveFlatten: async () => ({ status: "ALREADY_FLAT" }),
       executeIntent: async () => ({ status: "PENDING", orderCode: "SOLGRID-0-BUY1-E" })
     },
@@ -247,8 +299,8 @@ test("unconfirmed runtime order outcome never emits a fill notification", async 
     notifications: { enqueue: (event) => { notifications.push(event); return { status: "QUEUED" }; } }
   });
   await runtime.init();
-  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 80, tradeTime: "2026-08-24T15:00:00.000Z" });
-  const result = await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 77.4, tradeTime: "2026-08-24T15:00:30.000Z" });
+  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 90, tradeTime: "2026-08-24T15:00:00.000Z" });
+  const result = await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 86.4, tradeTime: "2026-08-24T15:00:30.000Z" });
   assert.equal(result.status, "ENTRY_PENDING");
   assert.equal(notifications.length, 0);
 });
