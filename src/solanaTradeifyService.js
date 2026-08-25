@@ -1,6 +1,7 @@
 import { calculateAccountFloors } from "./risk/accountRules.js";
+import { accountDayKey } from "./risk/dailyRiskLadder.js";
 import { createTradeifyService } from "./tradeifyService.js";
-import { expectedNetUnits, grossVirtualExposureUsd } from "./strategies/solanaGrid.js";
+import { GRID_DEFINITION, expectedNetUnits, grossVirtualExposureUsd } from "./strategies/solanaGrid.js";
 import { buildSolanaRingLevels, summarizeSolanaRingPosition } from "./monitoring/solanaRingQueries.js";
 
 function money(value) {
@@ -24,9 +25,27 @@ function signedPct(value) {
 function ringStateLabel(ring) {
   if (!ring) return "STATE UNKNOWN";
   const count = Array.isArray(ring.lots) ? ring.lots.length : 0;
-  if (count >= 2) return "FULL 2/2";
-  if (ring.armed) return count > 0 ? `ARMED ${count}/2` : "ARMED";
-  return count > 0 ? `DISARMED ${count}/2` : "DISARMED";
+  if (count >= GRID_DEFINITION.perRing) return `FULL ${GRID_DEFINITION.perRing}/${GRID_DEFINITION.perRing}`;
+  if (ring.armed) return count > 0 ? `ARMED ${count}/${GRID_DEFINITION.perRing}` : "ARMED";
+  return count > 0 ? `DISARMED ${count}/${GRID_DEFINITION.perRing}` : "DISARMED";
+}
+
+function ladderStatusLines(ladder, equity) {
+  const today = accountDayKey(Date.now());
+  if (!ladder || ladder.dayKey !== today || !Number.isFinite(Number(ladder.baselineClosedBalanceUsd))) {
+    return [
+      "D-049 daily risk ladder: awaiting the first fresh DXtrade account snapshot for this account day."
+    ];
+  }
+  const drawdown = Number(equity) - Number(ladder.baselineClosedBalanceUsd);
+  return [
+    `D-049 day baseline: ${money(ladder.baselineClosedBalanceUsd)}`,
+    `D-049 current drawdown: ${signedMoney(drawdown)}`,
+    `Entry brake (-$300): ${ladder.brakeEngaged ? "ACTIVE" : "READY"}`,
+    `50% cut (-$1,000): ${ladder.partialCutDone ? "DONE" : "READY"}`,
+    `Full flatten (-$1,250): ${ladder.flattenDone ? "DONE" : "READY"}`,
+    `Halted until rollover: ${ladder.haltedForDay ? "YES" : "NO"}`
+  ];
 }
 
 export function createSolanaTradeifyService({
@@ -43,11 +62,17 @@ export function createSolanaTradeifyService({
 }) {
   const base = createTradeifyService({ database, account, strategy, environment, dxtradeClient });
 
+  async function currentLadder() {
+    if (typeof persistence?.getLatestRiskLadderState !== "function") return null;
+    return persistence.getLatestRiskLadderState();
+  }
+
   async function statusText() {
-    const [botState, gridState, maState] = await Promise.all([
+    const [botState, gridState, maState, ladder] = await Promise.all([
       database.getState(),
       persistence.state.load(),
-      maProvider.getCurrent()
+      maProvider.getCurrent(),
+      currentLadder()
     ]);
     const floors = calculateAccountFloors({
       startingBalance: account.startingBalance,
@@ -60,6 +85,7 @@ export function createSolanaTradeifyService({
     const openLots = gridState?.rings.reduce((n, ring) => n + ring.lots.length, 0) ?? 0;
     const occupiedRings = gridState?.rings.filter((ring) => ring.lots.length > 0).length ?? 0;
     const armedRings = gridState?.rings.filter((ring) => ring.armed).length ?? 0;
+    const ringCount = GRID_DEFINITION.activeLevelsPerSide * 2;
     const mark = maState.ma;
     const gross = gridState ? grossVirtualExposureUsd(gridState, mark) : 0;
     const net = gridState ? expectedNetUnits(gridState) : 0;
@@ -74,7 +100,7 @@ export function createSolanaTradeifyService({
       `Railway execution control: ${environment.autoExecute ? "ON" : "OFF"}`,
       `Strategy execution control: ${strategy.execution.autoExecute ? "ON" : "OFF"}`,
       `Bot: ${operating}`,
-      "Strategy: sol-outer-heavy-v1",
+      "Strategy: sol-outer-heavy-v1 / D-049 resize",
       "Market source: Binance SOLUSDT",
       "Account source: DXtrade SOL/USD",
       "",
@@ -86,13 +112,15 @@ export function createSolanaTradeifyService({
       `Floor buffer: ${money(botState.equity - floors.activeFloor)}`,
       `SOL broker position open: ${botState.has_open_position ? "YES" : "NO"}`,
       "",
+      ...ladderStatusLines(ladder, botState.equity),
+      "",
       `200-day MA: ${price(maState.ma)}`,
       `MA completed through: ${maState.completedThrough}`,
       `Virtual net SOL: ${net.toFixed(2)}`,
-      `Virtual gross exposure @ MA: ${money(gross)} / $1,830.00`,
+      `Virtual gross exposure @ MA: ${money(gross)} / ${money(GRID_DEFINITION.grossExposureCeilingUsd)}`,
       `Open virtual lots: ${openLots}`,
-      `Occupied rings: ${occupiedRings}/16`,
-      `Armed rings: ${armedRings}/16`,
+      `Occupied rings: ${occupiedRings}/${ringCount}`,
+      `Armed rings: ${armedRings}/${ringCount}`,
       `SOL state version: ${gridState?.version ?? "N/A"}`,
       `Binance feed stale: ${botState.feed_stale ? "YES" : "NO"}`
     ];
@@ -110,7 +138,7 @@ export function createSolanaTradeifyService({
       "PostgreSQL: OK",
       `Database time: ${new Date(databaseTime).toISOString()}`,
       "Instrument: SOL/USD / Binance SOLUSDT",
-      "Strategy: sol-outer-heavy-v1",
+      "Strategy: sol-outer-heavy-v1 / D-049",
       `200-day MA: OK (${ma.completedThrough})`,
       `Auto-execution: ${execution.isEnabled() ? "ON" : "OFF"}`,
       `Mode: ${environment.appMode}`
@@ -132,6 +160,11 @@ export function createSolanaTradeifyService({
     return Object.freeze({ price: Number(market.price), ma: Number(maState.ma), maState, market });
   }
 
+  async function ringLadderLines() {
+    const [botState, ladder] = await Promise.all([database.getState(), currentLadder()]);
+    return ladderStatusLines(ladder, botState.equity);
+  }
+
   async function ringsText() {
     const inputs = await ringInputs();
     if (inputs.error) return inputs.error;
@@ -151,14 +184,15 @@ export function createSolanaTradeifyService({
     if (view.nextBuy && view.nextBuyDistance) {
       lines.push(`Next BUY   ${price(view.nextBuy.triggerPrice)}  (${signedMoney(view.nextBuyDistance.dollars)} / ${signedPct(view.nextBuyDistance.pct)})`);
     } else {
-      lines.push("Next BUY   none below price (beyond BUY8)");
+      lines.push(`Next BUY   none below price (beyond BUY${GRID_DEFINITION.activeLevelsPerSide})`);
     }
     if (view.nextShort && view.nextShortDistance) {
       lines.push(`Next SHORT ${price(view.nextShort.triggerPrice)}  (${signedMoney(view.nextShortDistance.dollars)} / ${signedPct(view.nextShortDistance.pct)})`);
     } else {
-      lines.push("Next SHORT none above price (beyond SHORT8)");
+      lines.push(`Next SHORT none above price (beyond SHORT${GRID_DEFINITION.activeLevelsPerSide})`);
     }
     if (view.closer) lines.push("", `Closer to ${view.closer}`);
+    lines.push("", ...(await ringLadderLines()));
     return lines.join("\n");
   }
 
@@ -185,6 +219,7 @@ export function createSolanaTradeifyService({
     for (const ring of levels.shorts) {
       lines.push(`${ring.tag} ${price(ring.triggerPrice)} · ${money(ring.usd)} · ~${ring.estimatedUnitsAtTrigger.toFixed(2)} SOL · ${ringStateLabel(stateByTag.get(ring.engineTag))}`);
     }
+    lines.push("", ...(await ringLadderLines()));
     lines.push("", "Trigger prices use Binance SOLUSDT. Actual DXtrade SOL/USD fills may differ slightly.");
     return lines.join("\n");
   }
