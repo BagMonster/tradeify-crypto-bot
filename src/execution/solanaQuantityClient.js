@@ -67,7 +67,7 @@ export function reconcileSolQuantityOrder(payload, { orderCode, requestedQuantit
   const filledQuantity = Math.abs(finiteOrNull(leg.filledQuantity) ?? 0);
   const remainingQuantity = Math.abs(finiteOrNull(leg.remainingQuantity) ?? 0);
   const tolerance = Math.max(1e-10, requested * 1e-8);
-  const complete = filledQuantity + tolerance >= requested && remainingQuantity <= tolerance;
+  const complete = Math.abs(filledQuantity - requested) <= tolerance && remainingQuantity <= tolerance;
   const executions = Array.isArray(order.executions) ? order.executions : [];
   const lastExecution = [...executions].reverse().find((e) => Math.abs(finiteOrNull(e?.lastQuantity) ?? 0) > 0) ?? null;
   const fillPrice = [finiteOrNull(leg.averagePrice), finiteOrNull(lastExecution?.averagePrice), finiteOrNull(lastExecution?.lastPrice)]
@@ -187,6 +187,28 @@ export class SolanaQuantityClient {
     });
   }
 
+  // D-049 partial de-risk path. Unlike a full linked-position close, this request
+  // explicitly carries the quantity that must be reduced. It is separately gated
+  // and must be broker-validated before the D-049 branch is deployed live.
+  async placePositionPartialClose({ orderCode, orderSide, quantity, positionCode }) {
+    await this.login();
+    return this.#request({
+      method: "POST",
+      path: `/accounts/${encodeURIComponent(this.#accountCode)}/orders`,
+      body: {
+        orderCode: text("orderCode", orderCode, 64),
+        type: "MARKET",
+        instrument: this.#instrument,
+        quantity: positive("quantity", quantity),
+        positionEffect: "CLOSE",
+        positionCode: text("positionCode", positionCode, 128),
+        side: side(orderSide),
+        tif: "GTC"
+      }
+    });
+  }
+
+  // Full linked-position close, already verified by the production lifecycle canary.
   async placePositionClose({ orderCode, orderSide, quantity, positionCode }) {
     await this.login();
     positive("quantity", quantity);
