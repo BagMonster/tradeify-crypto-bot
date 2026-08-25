@@ -10,7 +10,7 @@ function response(payload, status = 200, headers = {}) {
   return new Response(payload == null ? "" : JSON.stringify(payload), { status, headers });
 }
 
-function baseRisk(brokerNetUnits = 0) {
+function baseRisk(brokerNetUnits = 0, liveEquity = 50_000) {
   return {
     startingBalance: 50_000,
     maxLossOffset: 3_000,
@@ -18,7 +18,7 @@ function baseRisk(brokerNetUnits = 0) {
     payoutTaken: false,
     previousDayClosingBalance: 50_000,
     dailyLossLimit: 1_500,
-    liveEquity: 50_000,
+    liveEquity,
     currentNotional: 0,
     maxNotional: 100_000,
     operatorPaused: false,
@@ -30,6 +30,24 @@ function baseRisk(brokerNetUnits = 0) {
     brokerNetUnits
   };
 }
+
+function createRiskLadderStore() {
+  let row = null;
+  return {
+    async getLatestRiskLadderState() { return row; },
+    async saveRiskLadderState(input) { row = Object.freeze({ ...input }); return row; }
+  };
+}
+
+const riskLadderConfig = Object.freeze({
+  enabled: true,
+  entryBrakeUsd: 300,
+  partialCutUsd: 1000,
+  partialCutFraction: 0.5,
+  fullFlattenUsd: 1250,
+  protectiveOrdersBypassSlippageCap: true,
+  resumeAfterFlatten: "nextDailyRollover"
+});
 
 test("200-day SOL MA uses exactly completed UTC daily closes", async () => {
   const day = 86_400_000;
@@ -177,6 +195,10 @@ test("protective flatten closes exactly the one signed net SOL broker position",
     async claimOrder(input) {
       const row = {
         orderCode: input.orderCode,
+        strategyId: input.strategyId,
+        instrument: input.instrument,
+        stateVersion: input.stateVersion,
+        actionType: input.actionType,
         status: "CLAIMED",
         requestedQuantity: input.requestedQuantity,
         side: input.side
@@ -229,6 +251,59 @@ test("protective flatten closes exactly the one signed net SOL broker position",
   assert.equal(orders.get("SOLFLAT-7").status, "FILLED");
 });
 
+test("D-049 protective partial cut uses the linked broker position, unique daily identity, and slippage bypass", async () => {
+  const orders = new Map();
+  let closeRequest = null;
+  const persistence = {
+    async getOrder(code) { return orders.get(code) ?? null; },
+    async claimOrder(input) {
+      const row = { ...input, requestedQuantity: input.requestedQuantity, status: "CLAIMED" };
+      orders.set(input.orderCode, row);
+      return row;
+    },
+    async markSubmitted(code, brokerOrderId) {
+      const row = { ...orders.get(code), status: "SUBMITTED", brokerOrderId };
+      orders.set(code, row);
+      return row;
+    },
+    async markStatus(code, status, details) {
+      const row = { ...orders.get(code), status, ...details };
+      orders.set(code, row);
+      return row;
+    }
+  };
+  const guard = createSolanaExecutionGuard({
+    autoExecute: true,
+    strategyAutoExecute: true,
+    protectiveOrdersBypassSlippageCap: true,
+    adapter: { place: async () => { throw new Error("grid adapter should not be used for protective cut"); } },
+    client: {
+      getOpenPositions: async () => ({ positions: [{ symbol: "SOL/USD", quantity: 1.2, positionCode: "sol-pos" }] }),
+      placePositionClose: async (request) => { closeRequest = request; return { orderId: "cut-1" }; },
+      reconcileQuantityOrder: async () => ({
+        status: "FILLED", fillPrice: 82, filledQuantity: 0.6, filledAt: "2026-08-24T20:00:00.000Z"
+      })
+    },
+    persistence
+  });
+  const result = await guard.executeProtectiveCut({
+    stateVersion: 9,
+    dayKey: "2026-08-24",
+    quantity: 0.6,
+    side: "SELL",
+    reason: "D-049 partial cut",
+    bypassSlippageCap: true
+  });
+  assert.equal(result.status, "FILLED");
+  assert.deepEqual(closeRequest, {
+    orderCode: "SOLCUT-20260824-9",
+    orderSide: "SELL",
+    quantity: 0.6,
+    positionCode: "sol-pos"
+  });
+  assert.equal(orders.get("SOLCUT-20260824-9").actionType, "PROTECTIVE_CUT");
+});
+
 test("live runtime executes eligible exits before an entry crossed on the same live update", async () => {
   let state = createInitialSolanaState();
   state = applyConfirmedEntry(state, {
@@ -256,9 +331,11 @@ test("live runtime executes eligible exits before an entry crossed on the same l
       return state;
     }
   };
+  const ladderStore = createRiskLadderStore();
   const actions = [];
   const execution = {
     isEnabled: () => true,
+    executeProtectiveCut: async () => ({ status: "ALREADY_FLAT" }),
     executeProtectiveFlatten: async () => ({ status: "ALREADY_FLAT" }),
     executeIntent: async (intent) => {
       actions.push(intent.type === "EXIT" ? `EXIT${intent.tranche}` : intent.tag);
@@ -274,6 +351,8 @@ test("live runtime executes eligible exits before an entry crossed on the same l
   };
   const runtime = createSolanaRuntime({
     stateStore: store,
+    riskLadderStore: ladderStore,
+    riskLadderConfig,
     maProvider: { getCurrent: async () => ({ ma: 100, completedThrough: "2026-08-24T00:00:00.000Z" }) },
     execution,
     minimumHoldSeconds: 25,
@@ -281,10 +360,10 @@ test("live runtime executes eligible exits before an entry crossed on the same l
   });
   await runtime.init();
 
-  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 122, tradeTime: "2026-08-24T00:00:10.000Z" });
+  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 112, tradeTime: "2026-08-24T00:00:10.000Z" });
   assert.deepEqual(actions, []);
 
-  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 123, tradeTime: "2026-08-24T00:00:30.000Z" });
+  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 114, tradeTime: "2026-08-24T00:00:30.000Z" });
   const firstEntryIndex = actions.findIndex((x) => x === "SELL1");
   assert.ok(firstEntryIndex > 0, `expected exits before SELL1, got ${actions.join(",")}`);
   assert.ok(actions.slice(0, firstEntryIndex).every((x) => x.startsWith("EXIT")));
