@@ -15,6 +15,7 @@ import { createSolanaPersistence } from "./src/state/solanaPersistence.js";
 import { createSolanaRuntime } from "./src/runtime/solanaRuntime.js";
 import { createSolanaHeartbeat } from "./src/runtime/solanaHeartbeat.js";
 import { createLiveTelegramNotifications } from "./src/notifications/liveTelegramNotifications.js";
+import { accountDayKey } from "./src/risk/dailyRiskLadder.js";
 import { GRID_DEFINITION } from "./src/strategies/solanaGrid.js";
 import { createSolanaTradeifyService } from "./src/solanaTradeifyService.js";
 import { startTelegramBot } from "./src/telegramBot.js";
@@ -83,6 +84,7 @@ const solanaExecution = createSolanaExecutionGuard({
   adapter: solanaQuantityAdapter,
   client: solanaQuantityClient,
   persistence: solPersistence,
+  protectiveOrdersBypassSlippageCap: strategy.riskLadder.protectiveOrdersBypassSlippageCap,
   addEvent: database.addEvent
 });
 
@@ -150,9 +152,12 @@ let lastLiveTrade = null;
 let persistedFeedStale = true;
 let runtimeErrorLatched = false;
 let reconciliationHaltLatched = false;
+const d049HaltNotifications = new Set();
 
 const solanaRuntime = createSolanaRuntime({
   stateStore: solPersistence.state,
+  riskLadderStore: solPersistence,
+  riskLadderConfig: strategy.riskLadder,
   maProvider,
   minimumHoldSeconds: account.minimumHoldSeconds,
   execution: solanaExecution,
@@ -190,6 +195,33 @@ let pendingTrade = null;
 let drainingTrades = false;
 let maintenanceBusy = false;
 
+async function persistD049SafetyHalt(result) {
+  const code = result.status;
+  const reasonCode = code === "D049_PARTIAL_CUT_UNCONFIRMED"
+    ? "D049_PARTIAL_CUT_UNCONFIRMED"
+    : code === "D049_FULL_FLATTEN_UNCONFIRMED"
+      ? "D049_FULL_FLATTEN_UNCONFIRMED"
+      : code === "D049_BASELINE_MISMATCH"
+        ? "D049_BASELINE_MISMATCH"
+        : null;
+  if (!reasonCode) return;
+
+  const reason = reasonCode === "D049_PARTIAL_CUT_UNCONFIRMED"
+    ? "D-049 protective partial cut did not confirm; owner review required"
+    : reasonCode === "D049_FULL_FLATTEN_UNCONFIRMED"
+      ? "D-049 protective full flatten did not confirm flat; manual intervention required"
+      : "D-049 persisted daily baseline does not match fresh DXtrade account data; owner review required";
+
+  await database.setSafetyHalt(reason);
+  await database.addEvent("ERROR", "SOL_D049_SAFETY_HALT", { reasonCode, status: code });
+  const day = accountDayKey(Date.now()).replaceAll("-", "");
+  const eventKey = `SOL-D049-HALT:${day}:${reasonCode}`;
+  if (!d049HaltNotifications.has(eventKey)) {
+    d049HaltNotifications.add(eventKey);
+    liveNotifications.enqueue({ kind: "SAFETY_HALT", eventKey, reasonCode });
+  }
+}
+
 async function processLatestTrade(trade) {
   const result = await solanaRuntime.processTrade(trade);
   if (result.status === "RECONCILIATION_BLOCKED" && !reconciliationHaltLatched) {
@@ -206,6 +238,9 @@ async function processLatestTrade(trade) {
         brokerNetUnits: recon.actual
       });
     }
+  }
+  if (new Set(["D049_PARTIAL_CUT_UNCONFIRMED", "D049_FULL_FLATTEN_UNCONFIRMED", "D049_BASELINE_MISMATCH"]).has(result.status)) {
+    await persistD049SafetyHalt(result);
   }
 }
 
@@ -245,6 +280,11 @@ const heartbeat = createSolanaHeartbeat({
   persistence: solPersistence,
   adapter: solanaQuantityAdapter,
   isExecutionEnabled: solanaExecution.isEnabled,
+  isRiskLadderHalted: async () => {
+    const ladder = solanaRuntime.getRiskLadderState();
+    return ladder?.haltedForDay === true && ladder.dayKey === accountDayKey(Date.now());
+  },
+  triggerDays: strategy.solOuterHeavy.heartbeatDays,
   acquireMaintenance: async () => {
     if (maintenanceBusy || drainingTrades) return false;
     maintenanceBusy = true;
@@ -325,6 +365,8 @@ console.log(executionLive
   ? "Production SOL outer-heavy runtime started with automatic execution LIVE."
   : "Production SOL outer-heavy runtime started ARMED with automatic execution still blocked by the Railway control.");
 console.log("Market source: Binance SOLUSDT. Account source: DXtrade SOL/USD.");
+console.log("D-049 geometry: 10 rings per side from ±13.5% through ±54%, $6,600 gross virtual-exposure ceiling.");
+console.log("D-049 daily risk ladder: entry brake -$300, 50% cut -$1,000, full flatten -$1,250.");
 console.log("Live-touch semantics: exits before entries.");
 console.log("Owner Telegram broker-confirmed trade and safety notifications: armed.");
 console.log("Owner Telegram OpenAI development mode: queue bridge armed; companion processing runs in the separate Railway worker.");
@@ -333,7 +375,7 @@ if (executionLive) {
 } else {
   console.log("Owner-triggered 0.01 SOL lifecycle canary remains available while automatic execution is OFF.");
 }
-console.log("25-day inactivity heartbeat: armed for 0.01 SOL round trips after live activation.");
+console.log(`${strategy.solOuterHeavy.heartbeatDays}-day inactivity heartbeat: armed for 0.01 SOL round trips after live activation.`);
 console.log(`Automatic execution: ${executionLive ? "ON" : "OFF"} (Railway=${environment.autoExecute ? "ON" : "OFF"}, strategy=${strategy.execution.autoExecute ? "ON" : "OFF"}, mode=${environment.appMode}).`);
 
 let shuttingDown = false;
