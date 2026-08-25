@@ -74,7 +74,8 @@ export function createSolanaExecutionGuard({
 }) {
   if (typeof autoExecute !== "boolean" || typeof strategyAutoExecute !== "boolean") throw new TypeError("execution locks must be boolean");
   if (typeof adapter?.place !== "function") throw new TypeError("SOL quantity adapter is invalid");
-  if (typeof client?.getOpenPositions !== "function" || typeof client?.placePositionClose !== "function" || typeof client?.reconcileQuantityOrder !== "function") {
+  if (typeof client?.getOpenPositions !== "function" || typeof client?.placePositionClose !== "function" ||
+      typeof client?.placePositionPartialClose !== "function" || typeof client?.reconcileQuantityOrder !== "function") {
     throw new TypeError("SOL quantity client lacks protective-close methods");
   }
   if (typeof persistence?.claimOrder !== "function") throw new TypeError("SOL persistence is invalid");
@@ -231,7 +232,7 @@ export function createSolanaExecutionGuard({
         slippagePolicy: "BYPASS"
       });
       try {
-        const response = await client.placePositionClose({
+        const response = await client.placePositionPartialClose({
           orderCode: code,
           orderSide: requestedSide,
           quantity: qty,
