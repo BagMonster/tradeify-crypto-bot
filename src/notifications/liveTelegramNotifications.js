@@ -6,7 +6,9 @@ const KINDS = new Set([
   "RECONCILIATION_MISMATCH",
   "ACCOUNT_LOCKOUT",
   "SAFETY_HALT",
-  "PROTECTIVE_FLATTEN_CONFIRMED"
+  "PROTECTIVE_FLATTEN_CONFIRMED",
+  "D049_PARTIAL_CUT",
+  "D049_FULL_FLATTEN"
 ]);
 
 const PROTECTIVE_REASONS = new Set([
@@ -21,7 +23,10 @@ const ACCOUNT_LOCK_REASONS = new Set([
 ]);
 
 const SAFETY_HALT_REASONS = new Set([
-  "SOL_RUNTIME_ERROR"
+  "SOL_RUNTIME_ERROR",
+  "D049_PARTIAL_CUT_UNCONFIRMED",
+  "D049_FULL_FLATTEN_UNCONFIRMED",
+  "D049_BASELINE_MISMATCH"
 ]);
 
 function finite(name, value) {
@@ -60,6 +65,11 @@ function money(value) {
   return `$${finite("money", value).toFixed(2)}`;
 }
 
+function signedMoney(value) {
+  const n = finite("signed money", value);
+  return `${n < 0 ? "−" : "+"}$${Math.abs(n).toFixed(2)}`;
+}
+
 function quantity(value) {
   const n = nonNegative("quantity", value);
   return `${Number(n.toFixed(8))} SOL`;
@@ -69,15 +79,19 @@ function timestamp(value) {
   return canonicalUtc("timestamp", value).replace("T", " ").replace(".000Z", "Z");
 }
 
+function ringTag(value) {
+  return safeText("ringTag", value, { max: 16, pattern: /^(BUY|SELL)(?:[1-9]|10)$/ });
+}
+
 function formatEvent(event) {
   if (!event || typeof event !== "object" || Array.isArray(event)) throw new TypeError("notification event must be an object");
-  const kind = safeText("kind", event.kind, { max: 48, pattern: /^[A-Z_]+$/ });
+  const kind = safeText("kind", event.kind, { max: 48, pattern: /^[A-Z0-9_]+$/ });
   if (!KINDS.has(kind)) throw new TypeError("notification kind is unsupported");
   const eventKey = safeText("eventKey", event.eventKey, { max: 160, pattern: /^[A-Za-z0-9_.:-]+$/ });
 
   if (kind === "ENTRY_CONFIRMED") {
     const side = safeText("side", event.side, { max: 4, pattern: /^(BUY|SELL)$/ });
-    const ringTag = safeText("ringTag", event.ringTag, { max: 16, pattern: /^(BUY|SELL)[1-8]$/ });
+    const tag = ringTag(event.ringTag);
     const lotId = safeText("lotId", event.lotId, { max: 64 });
     const fillPrice = positive("fillPrice", event.fillPrice);
     const filledQuantity = positive("filledQuantity", event.filledQuantity);
@@ -88,7 +102,7 @@ function formatEvent(event) {
       eventKey,
       message: [
         "🟢 SOL ENTRY CONFIRMED",
-        `Ring: ${ringTag}`,
+        `Ring: ${tag}`,
         `Side: ${side}`,
         `Fill: ${money(fillPrice)}`,
         `Quantity: ${quantity(filledQuantity)}`,
@@ -100,7 +114,7 @@ function formatEvent(event) {
   }
 
   if (kind === "TRANCHE_EXIT_CONFIRMED") {
-    const ringTag = safeText("ringTag", event.ringTag, { max: 16, pattern: /^(BUY|SELL)[1-8]$/ });
+    const tag = ringTag(event.ringTag);
     const virtualSide = safeText("virtualSide", event.virtualSide, { max: 4, pattern: /^(BUY|SELL)$/ });
     const lotId = safeText("lotId", event.lotId, { max: 64 });
     const tranche = Number(event.tranche);
@@ -116,7 +130,7 @@ function formatEvent(event) {
       eventKey,
       message: [
         "💰 SOL TRANCHE EXIT CONFIRMED",
-        `Ring: ${ringTag}`,
+        `Ring: ${tag}`,
         `Lot: ${lotId}`,
         `Position side: ${virtualSide}`,
         `Tranche: ${tranche}/4`,
@@ -131,7 +145,7 @@ function formatEvent(event) {
   }
 
   if (kind === "LOT_CLOSED") {
-    const ringTag = safeText("ringTag", event.ringTag, { max: 16, pattern: /^(BUY|SELL)[1-8]$/ });
+    const tag = ringTag(event.ringTag);
     const virtualSide = safeText("virtualSide", event.virtualSide, { max: 4, pattern: /^(BUY|SELL)$/ });
     const lotId = safeText("lotId", event.lotId, { max: 64 });
     const entryPrice = positive("entryPrice", event.entryPrice);
@@ -144,7 +158,7 @@ function formatEvent(event) {
       eventKey,
       message: [
         "✅ SOL LOT FULLY CLOSED",
-        `Ring: ${ringTag}`,
+        `Ring: ${tag}`,
         `Lot: ${lotId}`,
         `Position side: ${virtualSide}`,
         `Entry fill: ${money(entryPrice)}`,
@@ -215,16 +229,22 @@ function formatEvent(event) {
   }
 
   if (kind === "SAFETY_HALT") {
-    const reasonCode = safeText("reasonCode", event.reasonCode, { max: 32, pattern: /^[A-Z_]+$/ });
+    const reasonCode = safeText("reasonCode", event.reasonCode, { max: 48, pattern: /^[A-Z0-9_]+$/ });
     if (!SAFETY_HALT_REASONS.has(reasonCode)) throw new TypeError("safety halt reason is unsupported");
+    const detail = reasonCode === "D049_PARTIAL_CUT_UNCONFIRMED"
+      ? "The D-049 50% protective cut did not reach a confirmed broker fill."
+      : reasonCode === "D049_FULL_FLATTEN_UNCONFIRMED"
+        ? "The D-049 emergency flatten did not confirm the account flat."
+        : reasonCode === "D049_BASELINE_MISMATCH"
+          ? "The persisted D-049 daily baseline does not match the fresh DXtrade account baseline."
+          : "The production runtime encountered an internal processing error.";
     return {
       kind,
       eventKey,
       message: [
-        "🚨 SOL SAFETY HALT — RUNTIME ERROR",
-        "The production runtime encountered an internal processing error.",
-        "New strategy actions are halted. Existing funded-account protections remain authoritative.",
-        "Owner review of Railway logs is required."
+        `🚨 SOL SAFETY HALT — ${reasonCode}`,
+        detail,
+        "New strategy entries are halted. Owner review is required."
       ].join("\n")
     };
   }
@@ -246,6 +266,49 @@ function formatEvent(event) {
         "SOL grid state was reset and new entries remain subject to all account locks."
       ].join("\n")
     };
+  }
+
+  if (kind === "D049_PARTIAL_CUT") {
+    const drawdownUsd = finite("drawdownUsd", event.drawdownUsd);
+    const fraction = positive("fraction", event.fraction);
+    if (fraction >= 1) throw new TypeError("fraction must be less than 1");
+    const filledQuantity = positive("filledQuantity", event.filledQuantity);
+    const fillPrice = positive("fillPrice", event.fillPrice);
+    const lotsAffected = Number(event.lotsAffected);
+    if (!Number.isSafeInteger(lotsAffected) || lotsAffected < 1) throw new TypeError("lotsAffected is invalid");
+    const filledAt = canonicalUtc("filledAt", event.filledAt);
+    return {
+      kind,
+      eventKey,
+      message: [
+        "⚠️ D-049 50% DE-RISK CUT CONFIRMED",
+        `Daily drawdown at trigger: ${signedMoney(drawdownUsd)}`,
+        `Fraction cut: ${(fraction * 100).toFixed(0)}% of each executable virtual lot`,
+        `Broker quantity closed: ${quantity(filledQuantity)}`,
+        `Broker fill: ${money(fillPrice)}`,
+        `Virtual lots affected: ${lotsAffected}`,
+        `Confirmed: ${timestamp(filledAt)}`,
+        "New grid entries remain braked while the daily drawdown is below the entry-brake threshold."
+      ].join("\n")
+    };
+  }
+
+  if (kind === "D049_FULL_FLATTEN") {
+    const drawdownUsd = finite("drawdownUsd", event.drawdownUsd);
+    if (event.confirmedFlat !== true) throw new TypeError("D049 full flatten must confirm flat");
+    const filledAt = canonicalUtc("filledAt", event.filledAt);
+    const lines = [
+      "🚨 D-049 DAILY FULL FLATTEN COMPLETE",
+      `Daily drawdown at trigger: ${signedMoney(drawdownUsd)}`
+    ];
+    if (event.fillPrice != null) lines.push(`Broker fill: ${money(positive("fillPrice", event.fillPrice))}`);
+    if (Number(event.filledQuantity) > 0) lines.push(`Quantity closed: ${quantity(event.filledQuantity)}`);
+    lines.push(
+      "Broker account: FLAT",
+      `Confirmed: ${timestamp(filledAt)}`,
+      "Automatic grid activity is halted until the next 22:00 UTC account-day rollover."
+    );
+    return { kind, eventKey, message: lines.join("\n") };
   }
 
   throw new TypeError("notification kind is unsupported");
