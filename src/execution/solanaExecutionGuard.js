@@ -44,13 +44,33 @@ function positionCode(position) {
   return text("DXtrade position code", code == null ? "" : String(code), 128);
 }
 
+function compactDayKey(dayKey) {
+  const key = text("dayKey", dayKey, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new TypeError("dayKey is invalid");
+  return key.replaceAll("-", "");
+}
+
+function sameProtectiveOrder(row, { stateVersion, actionType, side, quantity }) {
+  return row &&
+    row.strategyId === "sol-outer-heavy-v1" &&
+    row.instrument === "SOL/USD" &&
+    row.stateVersion === stateVersion &&
+    row.actionType === actionType &&
+    row.side === side &&
+    Math.abs(row.requestedQuantity - quantity) <= 1e-10;
+}
+
 export function createSolanaExecutionGuard({
   autoExecute,
   strategyAutoExecute,
   adapter,
   client,
   persistence,
-  addEvent = async () => {}
+  protectiveOrdersBypassSlippageCap = true,
+  addEvent = async () => {},
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  confirmationTimeoutMs = 12_000,
+  pollIntervalMs = 750
 }) {
   if (typeof autoExecute !== "boolean" || typeof strategyAutoExecute !== "boolean") throw new TypeError("execution locks must be boolean");
   if (typeof adapter?.place !== "function") throw new TypeError("SOL quantity adapter is invalid");
@@ -58,7 +78,11 @@ export function createSolanaExecutionGuard({
     throw new TypeError("SOL quantity client lacks protective-close methods");
   }
   if (typeof persistence?.claimOrder !== "function") throw new TypeError("SOL persistence is invalid");
+  if (typeof protectiveOrdersBypassSlippageCap !== "boolean") throw new TypeError("protectiveOrdersBypassSlippageCap must be boolean");
   if (typeof addEvent !== "function") throw new TypeError("addEvent must be a function");
+  if (typeof sleep !== "function") throw new TypeError("sleep must be a function");
+  if (!Number.isFinite(confirmationTimeoutMs) || confirmationTimeoutMs < 0) throw new TypeError("confirmationTimeoutMs is invalid");
+  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs < 0) throw new TypeError("pollIntervalMs is invalid");
 
   const inFlight = new Set();
 
@@ -110,21 +134,132 @@ export function createSolanaExecutionGuard({
     }
   }
 
-  async function executeProtectiveFlatten({ stateVersion, reason }) {
-    text("reason", reason, 300);
-    if (!isEnabled()) return Object.freeze({ status: "BLOCKED", reason: "Automatic execution locks are off" });
+  async function resolveSingleSolPosition() {
     const payload = await client.getOpenPositions();
     const rows = positionRows(payload).filter((row) => positionSymbol(row) === "SOL/USD" && Math.abs(positionQuantity(row)) > 1e-12);
-    if (rows.length === 0) return Object.freeze({ status: "ALREADY_FLAT" });
-    if (rows.length !== 1) throw new Error("Protective flatten requires exactly one net SOL/USD broker position");
-
+    if (rows.length === 0) return null;
+    if (rows.length !== 1) throw new Error("Protective close requires exactly one net SOL/USD broker position");
     const position = rows[0];
     const signedQty = positionQuantity(position);
-    const qty = positive("protective quantity", Math.abs(signedQty));
     const direction = positionSide(position, signedQty);
-    const closeSide = direction === "SHORT" ? "BUY" : "SELL";
-    const pCode = positionCode(position);
-    const code = `SOLFLAT-${stateVersion}`;
+    return Object.freeze({
+      position,
+      signedQty,
+      quantity: positive("protective broker quantity", Math.abs(signedQty)),
+      closeSide: direction === "SHORT" ? "BUY" : "SELL",
+      positionCode: positionCode(position)
+    });
+  }
+
+  async function reconcileProtectiveClose({ code, quantity, reason, actionType }) {
+    const deadline = Date.now() + confirmationTimeoutMs;
+    while (true) {
+      const result = await client.reconcileQuantityOrder({ orderCode: code, requestedQuantity: quantity });
+      if (result.status === "FILLED") {
+        await persistence.markStatus(code, "FILLED", {
+          fillPrice: result.fillPrice,
+          filledQuantity: result.filledQuantity,
+          filledAt: result.filledAt
+        });
+        await addEvent("WARN", actionType === "PROTECTIVE_CUT" ? "SOL_D049_PARTIAL_CUT_CONFIRMED" : "SOL_PROTECTIVE_FLATTEN_CONFIRMED", {
+          reason,
+          quantity,
+          fillPrice: result.fillPrice,
+          slippagePolicy: protectiveOrdersBypassSlippageCap ? "BYPASS" : "NOT_CONFIGURED"
+        });
+        return Object.freeze({ status: "FILLED", orderCode: code, ...result });
+      }
+      if (["REJECTED", "CANCELED", "EXPIRED", "PARTIAL", "FAILED"].includes(result.status)) {
+        await persistence.markStatus(code, result.status, { lastError: `Protective ${actionType} ended ${result.status}` });
+        return Object.freeze({ status: result.status, orderCode: code });
+      }
+      if (Date.now() >= deadline) {
+        await persistence.markStatus(code, "PENDING", { lastError: `Protective ${actionType} confirmation timed out` });
+        return Object.freeze({ status: "PENDING", orderCode: code });
+      }
+      await sleep(pollIntervalMs);
+    }
+  }
+
+  async function executeProtectiveCut({ stateVersion, dayKey, quantity, side, reason, bypassSlippageCap = true }) {
+    text("reason", reason, 300);
+    if (!Number.isSafeInteger(stateVersion) || stateVersion < 0) throw new TypeError("stateVersion is invalid");
+    const qty = positive("protective cut quantity", quantity);
+    const requestedSide = text("protective cut side", side, 4).toUpperCase();
+    if (requestedSide !== "BUY" && requestedSide !== "SELL") throw new TypeError("protective cut side must be BUY or SELL");
+    if (bypassSlippageCap !== true || protectiveOrdersBypassSlippageCap !== true) {
+      throw new Error("D-049 protective cut requires the approved slippage-cap bypass");
+    }
+    if (!isEnabled()) return Object.freeze({ status: "BLOCKED", reason: "Automatic execution locks are off" });
+
+    const broker = await resolveSingleSolPosition();
+    if (!broker) return Object.freeze({ status: "ALREADY_FLAT" });
+    if (broker.closeSide !== requestedSide) throw new Error("Protective cut side does not match the broker net position");
+    if (qty > broker.quantity + 0.0050001) throw new Error("Protective cut quantity exceeds the broker net SOL position");
+
+    const code = `SOLCUT-${compactDayKey(dayKey)}-${stateVersion}`;
+    let row = await persistence.getOrder(code);
+    if (!row) row = await persistence.claimOrder({
+      orderCode: code,
+      strategyId: "sol-outer-heavy-v1",
+      instrument: "SOL/USD",
+      stateVersion,
+      actionType: "PROTECTIVE_CUT",
+      side: requestedSide,
+      requestedQuantity: qty
+    });
+    if (!sameProtectiveOrder(row, { stateVersion, actionType: "PROTECTIVE_CUT", side: requestedSide, quantity: qty })) {
+      throw new Error("Persistent D-049 protective-cut order does not match the current request");
+    }
+    if (row.status === "FILLED") return Object.freeze({
+      status: "FILLED",
+      orderCode: row.orderCode,
+      fillPrice: row.fillPrice,
+      filledQuantity: row.filledQuantity,
+      filledAt: row.filledAt
+    });
+    if (["REJECTED", "CANCELED", "EXPIRED", "PARTIAL", "FAILED"].includes(row.status)) {
+      return Object.freeze({ status: row.status, orderCode: code });
+    }
+
+    if (row.status === "CLAIMED") {
+      await addEvent("WARN", "SOL_D049_PARTIAL_CUT_SUBMITTING", {
+        orderCode: code,
+        reason,
+        quantity: qty,
+        side: requestedSide,
+        slippagePolicy: "BYPASS"
+      });
+      try {
+        const response = await client.placePositionClose({
+          orderCode: code,
+          orderSide: requestedSide,
+          quantity: qty,
+          positionCode: broker.positionCode
+        });
+        await persistence.markSubmitted(code, response?.orderId ?? null);
+      } catch {
+        await persistence.markStatus(code, "PENDING", { lastError: "D-049 protective cut submission outcome is uncertain" });
+      }
+    }
+
+    return reconcileProtectiveClose({ code, quantity: qty, reason, actionType: "PROTECTIVE_CUT" });
+  }
+
+  async function executeProtectiveFlatten({ stateVersion, reason, dayKey = null, bypassSlippageCap = null }) {
+    text("reason", reason, 300);
+    if (!Number.isSafeInteger(stateVersion) || stateVersion < 0) throw new TypeError("stateVersion is invalid");
+    const d049 = dayKey !== null;
+    if (d049 && (bypassSlippageCap !== true || protectiveOrdersBypassSlippageCap !== true)) {
+      throw new Error("D-049 protective flatten requires the approved slippage-cap bypass");
+    }
+    if (!isEnabled()) return Object.freeze({ status: "BLOCKED", reason: "Automatic execution locks are off" });
+
+    const broker = await resolveSingleSolPosition();
+    if (!broker) return Object.freeze({ status: "ALREADY_FLAT" });
+    const qty = broker.quantity;
+    const closeSide = broker.closeSide;
+    const code = d049 ? `SOLFLAT-${compactDayKey(dayKey)}-${stateVersion}` : `SOLFLAT-${stateVersion}`;
 
     let row = await persistence.getOrder(code);
     if (!row) row = await persistence.claimOrder({
@@ -136,44 +271,43 @@ export function createSolanaExecutionGuard({
       side: closeSide,
       requestedQuantity: qty
     });
+    if (!sameProtectiveOrder(row, { stateVersion, actionType: "PROTECTIVE_FLAT", side: closeSide, quantity: qty })) {
+      throw new Error("Persistent protective-flatten order does not match the current request");
+    }
     if (row.status === "FILLED") return Object.freeze({
       status: "FILLED",
+      orderCode: row.orderCode,
       fillPrice: row.fillPrice,
       filledQuantity: row.filledQuantity,
       filledAt: row.filledAt
     });
+    if (["REJECTED", "CANCELED", "EXPIRED", "PARTIAL", "FAILED"].includes(row.status)) {
+      return Object.freeze({ status: row.status, orderCode: code });
+    }
 
     if (row.status === "CLAIMED") {
-      const response = await client.placePositionClose({
+      await addEvent("WARN", "SOL_PROTECTIVE_FLATTEN_SUBMITTING", {
         orderCode: code,
-        orderSide: closeSide,
+        reason,
         quantity: qty,
-        positionCode: pCode
+        side: closeSide,
+        slippagePolicy: d049 ? "BYPASS" : "DIRECT_PROTECTIVE_CLOSE"
       });
-      await persistence.markSubmitted(code, response?.orderId ?? null);
+      try {
+        const response = await client.placePositionClose({
+          orderCode: code,
+          orderSide: closeSide,
+          quantity: qty,
+          positionCode: broker.positionCode
+        });
+        await persistence.markSubmitted(code, response?.orderId ?? null);
+      } catch {
+        await persistence.markStatus(code, "PENDING", { lastError: "Protective flatten submission outcome is uncertain" });
+      }
     }
 
-    const deadline = Date.now() + 12_000;
-    while (Date.now() <= deadline) {
-      const result = await client.reconcileQuantityOrder({ orderCode: code, requestedQuantity: qty });
-      if (result.status === "FILLED") {
-        await persistence.markStatus(code, "FILLED", {
-          fillPrice: result.fillPrice,
-          filledQuantity: result.filledQuantity,
-          filledAt: result.filledAt
-        });
-        await addEvent("WARN", "SOL_PROTECTIVE_FLATTEN_CONFIRMED", { reason, quantity: qty, fillPrice: result.fillPrice });
-        return Object.freeze({ status: "FILLED", ...result });
-      }
-      if (["REJECTED","CANCELED","EXPIRED","PARTIAL"].includes(result.status)) {
-        await persistence.markStatus(code, result.status, { lastError: `Protective flatten ended ${result.status}` });
-        return Object.freeze({ status: result.status });
-      }
-      await new Promise((resolve) => setTimeout(resolve, 750));
-    }
-    await persistence.markStatus(code, "PENDING", { lastError: "Protective flatten confirmation timed out" });
-    return Object.freeze({ status: "PENDING" });
+    return reconcileProtectiveClose({ code, quantity: qty, reason, actionType: "PROTECTIVE_FLAT" });
   }
 
-  return Object.freeze({ isEnabled, executeIntent, executeProtectiveFlatten });
+  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten });
 }
