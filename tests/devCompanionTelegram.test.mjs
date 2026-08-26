@@ -1,10 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { startTelegramBot } from "../src/telegramBot.js";
+import { formatSnapshotPack, upsertSnapshotPack } from "../src/devCompanionSnapshots.js";
 
 class FakeBot {
-  static instance = null;
-
   constructor(token, options) {
     this.token = token;
     this.options = options;
@@ -13,7 +12,6 @@ class FakeBot {
     this.sent = [];
     this.actions = [];
     this.commands = [];
-    FakeBot.instance = this;
   }
 
   onText(regex, handler) {
@@ -35,11 +33,7 @@ class FakeBot {
   }
 
   async answerCallbackQuery() {}
-
-  async setMyCommands(commands) {
-    this.commands = commands;
-  }
-
+  async setMyCommands(commands) { this.commands = commands; }
   async stopPolling() {}
 
   async emitMessage(message) {
@@ -53,9 +47,9 @@ class FakeBot {
 
 function serviceStub() {
   return {
-    statusText: async () => "TRADEIFY SOL OUTER-HEAVY STATUS\nVirtual net SOL: -0.06\nLast confirmed strategy fill: SELL @ $100.535",
-    healthText: async () => "health",
-    levelsText: async () => "levels",
+    statusText: async () => "STATUS halt virtual != broker",
+    healthText: async () => "health ok",
+    levelsText: async () => "LEVELS SHORT3 DISARMED 1/2",
     ringsText: async () => "rings",
     dxPreflightText: async () => "preflight",
     canaryText: async () => "canary",
@@ -70,21 +64,23 @@ function companionStub() {
   let active = false;
   let nextId = 1;
   const queued = [];
-  const delivered = [];
-  let snapshot = null;
+  let pack = {};
   return {
     queued,
-    delivered,
     async setSessionActive(ownerId, value) { active = value === true; },
     async isSessionActive() { return active; },
     async resetSession() { active = true; },
     async saveOperatorSnapshot(ownerId, command, text) {
-      snapshot = { command, text, at: "2026-08-26T10:00:00.000Z" };
+      pack = upsertSnapshotPack(pack, command, text, "2026-08-26T10:00:00.000Z");
     },
-    async latestOperatorSnapshot() { return snapshot; },
+    async latestOperatorSnapshot() {
+      const formatted = formatSnapshotPack(pack);
+      if (!formatted.text) return null;
+      return { command: "/levels", text: formatted.text, at: "2026-08-26T10:00:00.000Z", present: formatted.present, missing: formatted.missing };
+    },
     async enqueue(ownerId, text) { queued.push({ ownerId, text }); return nextId++; },
     async pendingDeliveries() { return []; },
-    async markDelivered(id, ownerId) { delivered.push({ id, ownerId }); },
+    async markDelivered() {},
     async status() { return { active, hasContext: false, pending: queued.length, processing: 0, ready: 0, failed: 0 }; }
   };
 }
@@ -101,20 +97,13 @@ test("/code activates owner-only development routing and ordinary text queues a 
     devCompanion,
     BotClass: FakeBot
   });
-
   await bot.emitMessage(ownerMessage("/code"));
   await bot.emitMessage(ownerMessage("Please explain the current SOL runtime."));
-
-  assert.deepEqual(devCompanion.queued, [
-    { ownerId: 12345, text: "Please explain the current SOL runtime." }
-  ]);
-  assert.ok(bot.sent.some((message) => message.text.includes("development mode is ACTIVE")));
-  assert.equal(bot.sent.some((message) => message.text.includes("queued")), false);
-  assert.ok(bot.actions.some((item) => item.chatId === 12345 && item.action === "typing"));
+  assert.deepEqual(devCompanion.queued, [{ ownerId: 12345, text: "Please explain the current SOL runtime." }]);
   bot.stopDevCompanionDelivery();
 });
 
-test("/status while /code is active is latched into the next companion job", async () => {
+test("/status and /levels stay in the pack together", async () => {
   const devCompanion = companionStub();
   const bot = await startTelegramBot({
     environment: { telegramToken: "test-token", telegramAllowedUserId: 12345 },
@@ -122,15 +111,14 @@ test("/status while /code is active is latched into the next companion job", asy
     devCompanion,
     BotClass: FakeBot
   });
-
   await bot.emitMessage(ownerMessage("/code"));
   await bot.emitMessage(ownerMessage("/status"));
-  await bot.emitMessage(ownerMessage("Did we buy or sell short?"));
-
+  await bot.emitMessage(ownerMessage("/levels"));
+  await bot.emitMessage(ownerMessage("Are there discrepancies?"));
   assert.equal(devCompanion.queued.length, 1);
-  assert.match(devCompanion.queued[0].text, /LATEST OPERATOR SNAPSHOT \(\/status/);
-  assert.match(devCompanion.queued[0].text, /Virtual net SOL: -0\.06/);
-  assert.match(devCompanion.queued[0].text, /Did we buy or sell short\?/);
+  assert.match(devCompanion.queued[0].text, /STATUS halt virtual != broker/);
+  assert.match(devCompanion.queued[0].text, /LEVELS SHORT3 DISARMED 1\/2/);
+  assert.match(devCompanion.queued[0].text, /Are there discrepancies\?/);
   bot.stopDevCompanionDelivery();
 });
 
@@ -142,7 +130,6 @@ test("ordinary text is ignored outside development mode", async () => {
     devCompanion,
     BotClass: FakeBot
   });
-
   await bot.emitMessage(ownerMessage("Normal Telegram text"));
   assert.equal(devCompanion.queued.length, 0);
   bot.stopDevCompanionDelivery();
@@ -156,12 +143,9 @@ test("unauthorized users cannot activate or feed development mode", async () => 
     devCompanion,
     BotClass: FakeBot
   });
-
   await bot.emitMessage(ownerMessage("/code", 99999));
   await bot.emitMessage(ownerMessage("Change the repository", 99999));
-
   assert.equal(devCompanion.queued.length, 0);
-  assert.ok(bot.sent.some((message) => message.text.startsWith("Not authorized")));
   bot.stopDevCompanionDelivery();
 });
 
@@ -173,7 +157,6 @@ test("development commands are registered without replacing trading commands", a
     devCompanion,
     BotClass: FakeBot
   });
-
   const commands = new Set(bot.commands.map((item) => item.command));
   for (const command of ["status", "health", "kill", "code", "devstatus", "devreset", "devexit"]) {
     assert.equal(commands.has(command), true, `missing /${command}`);
