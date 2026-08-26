@@ -152,13 +152,7 @@ export async function startTelegramBot({
   async function queueDevelopmentMessage(chatId, text) {
     const snapshot = await devCompanion.latestOperatorSnapshot(environment.telegramAllowedUserId);
     const payload = snapshot?.text
-      ? [
-        `LATEST OPERATOR SNAPSHOT (${snapshot.command} at ${snapshot.at ?? "unknown time"}):`,
-        snapshot.text,
-        "---",
-        "Owner message:",
-        text
-      ].join("\n")
+      ? [snapshot.text, "---", "Owner message:", text].join("\n\n")
       : text;
     await devCompanion.enqueue(environment.telegramAllowedUserId, payload);
     await sendTyping(chatId);
@@ -200,29 +194,29 @@ export async function startTelegramBot({
 
   bot.onText(/^\/dxpreflight(?:@\w+)?$/i, withAuthorization(async (message) => {
     await bot.sendMessage(message.chat.id, "Running DXtrade validation-only preflight. No order will be placed.");
-    await bot.sendMessage(message.chat.id, await service.dxPreflightText());
+    await sendLatched(message.chat.id, "/dxpreflight", await service.dxPreflightText());
   }));
 
   bot.onText(/^\/solcanary(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, "Checking the owner-approved 0.01 SOL lifecycle canary. It can run only while automatic grid execution is OFF.");
-    await bot.sendMessage(message.chat.id, await service.canaryText());
+    await bot.sendMessage(message.chat.id, "Checking the owner-approved 0.01 SOL lifecycle canary. It can run only while automatic execution is OFF.");
+    await sendLatched(message.chat.id, "/solcanary", await service.canaryText());
   }));
 
   bot.onText(/^\/kill(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, await service.kill());
+    await sendLatched(message.chat.id, "/kill", await service.kill());
   }));
 
   bot.onText(/^\/resume(?:@\w+)?$/i, withAuthorization(async (message) => {
     const result = await service.requestResume();
-    await bot.sendMessage(message.chat.id, result.message);
+    await sendLatched(message.chat.id, "/resume", result.message);
   }));
 
   bot.onText(/^\/confirmresume(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
-    await bot.sendMessage(message.chat.id, await service.confirmResume(match?.[1] ?? ""));
+    await sendLatched(message.chat.id, "/confirmresume", await service.confirmResume(match?.[1] ?? ""));
   }));
 
   bot.onText(/^\/flat(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, service.flatInstructions());
+    await sendLatched(message.chat.id, "/flat", service.flatInstructions());
   }));
 
   bot.onText(/^\/code(?:@\w+)?$/i, withAuthorization(async (message) => {
@@ -279,15 +273,15 @@ export async function startTelegramBot({
           await sendLatched(chatId, "/rings", await service.ringsText());
           break;
         case "kill":
-          await bot.sendMessage(chatId, await service.kill());
+          await sendLatched(chatId, "/kill", await service.kill());
           break;
         case "resume": {
           const result = await service.requestResume();
-          await bot.sendMessage(chatId, result.message);
+          await sendLatched(chatId, "/resume", result.message);
           break;
         }
         case "flat":
-          await bot.sendMessage(chatId, service.flatInstructions());
+          await sendLatched(chatId, "/flat", service.flatInstructions());
           break;
         case "code":
           await enterDevelopment(chatId);
