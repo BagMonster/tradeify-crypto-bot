@@ -42,7 +42,7 @@ async function createResponse(job) {
     store: true,
     max_output_tokens: 3000
   };
-  if (job.previousResponseId) body.previousResponseId = job.previousResponseId;
+  if (job.previousResponseId) body.previous_response_id = job.previousResponseId;
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
