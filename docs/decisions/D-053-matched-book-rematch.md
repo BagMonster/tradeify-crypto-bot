@@ -14,13 +14,15 @@ On 2026-08-26 the grid confirmed SHORT2: **0.44 SOL SELL @ $95.91**. DXtrade sho
 1. Account monitor also reads `/positions`. If metrics claim flat (or disagree) and the positions endpoint shows the SOL net, the snapshot uses the signed positions net.
 2. Signed quantity: `side=SELL|SHORT` is negative even when the API returns `+0.44`.
 3. Owner commands `/rematch` + `/confirmrematch CODE`:
+   - require an **active exact reconciliation halt** (`safety_halt === true` and `halt_reason ===` the live reconciliation-mismatch string). No halt, or any other halt whose wording merely contains “reconcil”, is refused — rematch is not an alternate `/resume`;
    - fresh DXtrade positions read;
    - require virtual net and broker net to agree within 0.005 SOL;
    - keep every virtual lot;
-   - clear **only** a reconciliation-mismatch safety halt (the live text that the books do not reconcile). Runtime, D-049, and protective-order halts are refused;
+   - clear **only** that exact reconciliation-mismatch safety halt. Runtime, D-049, and protective-order halts are refused;
    - lift the operator pause;
    - place no order and flatten nothing.
 4. Runtime `accountDataFresh` uses the monitor **healthy** flag, not age-only `fresh`. A failed `/positions` read is stale for trading even if the metrics poll is recent.
+5. `/status` from the owner service appends DXtrade broker net, net source, and account-data freshness from the monitor snapshot.
 
 ## Operator path for this incident
 
@@ -43,8 +45,8 @@ On 2026-08-26 the grid confirmed SHORT2: **0.44 SOL SELL @ $95.91**. DXtrade sho
 - `src/account/dxtradeSignedNet.js` — signed SELL/SHORT quantity and positions overlay
 - `src/account/dxtradeAccountMonitor.js` — required overlay; `positionsReadFailed` is unhealthy
 - `src/state/solanaRematch.js` — `/rematch` + `/confirmrematch` handlers
-- `src/solanaTradeifyService.js` — exposes `requestRematch` / `confirmRematch` and `/status` broker snapshot lines
-- `src/solanaOwnerService.js` — production wrapper used by `index.mjs`
+- `src/solanaTradeifyService.js` — `/status` account/grid text and D-050 `/reconcile` only; does not expose rematch
+- `src/solanaOwnerService.js` — production wrapper used by `index.mjs`; exposes `requestRematch` / `confirmRematch` and appends `/status` broker snapshot lines
 - `src/telegramBot.js` — slash handlers and command menu
 - `index.mjs` — `onBooksRematched` clears the in-process reconciliation latch
 - `tests/dxtradeSignedNet.test.mjs`
