@@ -1,3 +1,5 @@
+import { applyOpenPositionsOverlay, signedPositionQuantity } from "./dxtradeSignedNet.js";
+
 const DEFAULT_INSTRUMENT = "BTC/USD";
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_FRESH_AFTER_MS = 3_000;
@@ -95,6 +97,7 @@ export function normalizeDxtradeAccountMetrics(payload, {
     ? Math.abs(instrumentPosition.quantity * instrumentPosition.markPrice)
     : 0;
   if (!Number.isFinite(currentNotional)) throw new Error(`DXtrade ${activeInstrument} notional is invalid`);
+  const signedNetUnits = instrumentPosition ? signedPositionQuantity(instrumentPosition) : 0;
 
   return Object.freeze({
     account: metric.account == null ? null : String(metric.account),
@@ -110,6 +113,8 @@ export function normalizeDxtradeAccountMetrics(payload, {
     instrumentPosition,
     btcPosition: activeInstrument === "BTC/USD" ? instrumentPosition : null,
     currentNotional,
+    signedNetUnits,
+    positionSource: "metrics",
     invariantError,
     accountLocked: invariantError !== null,
     fetchedAt: new Date(fetched).toISOString(),
@@ -155,16 +160,22 @@ export function createDxtradeAccountMonitor({
     busy = true;
     try {
       await client.login();
-      const [payload, persistedPeak] = await Promise.all([
+      const [payload, persistedPeak, openPositions] = await Promise.all([
         client.getAccountMetrics({ includePositions: true }),
-        getPeak()
+        getPeak(),
+        typeof client.getOpenPositions === "function"
+          ? client.getOpenPositions().catch(() => null)
+          : Promise.resolve(null)
       ]);
-      const snapshot = normalizeDxtradeAccountMetrics(payload, {
+      let snapshot = normalizeDxtradeAccountMetrics(payload, {
         startingBalance,
         persistedPeakClosedBalance: persistedPeak,
         instrument: activeInstrument,
         fetchedAtMs: clock()
       });
+      if (openPositions != null) {
+        snapshot = applyOpenPositionsOverlay(snapshot, openPositions, activeInstrument);
+      }
       latest = snapshot;
       lastError = null;
       await publish(snapshot);
