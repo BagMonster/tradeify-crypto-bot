@@ -99,7 +99,10 @@ export function diagnoseLiveSnapshot(snapshot, now = Date.now()) {
   if (snapshot.mismatch) {
     const virtual = snapshot.virtualNetUnits == null ? "?" : snapshot.virtualNetUnits.toFixed(2);
     const broker = snapshot.brokerNetUnits == null ? "?" : snapshot.brokerNetUnits.toFixed(2);
-    lines.push(`Virtual/broker mismatch: virtual ${virtual} SOL vs broker ${broker} SOL. Do not /resume until reconciled.`);
+    const next = snapshot.brokerOpen
+      ? "Flatten the broker first, then /status."
+      : "Use /reconcile, then /confirmreconcile. Do not /resume until the books match.";
+    lines.push(`Virtual/broker mismatch: virtual ${virtual} SOL vs broker ${broker} SOL. ${next}`);
   }
   if (snapshot.ladder?.haltedForDay) lines.push("D-049 ladder flatten halt is ACTIVE until the next 22:00 UTC rollover.");
   else if (snapshot.ladder?.brakeEngaged) lines.push("D-049 entry brake is ACTIVE.");
