@@ -84,3 +84,11 @@ State must be 20 rings. Old 16-ring state fails closed until flat re-init or mig
 Restore D-040 sizing constants; set `riskLadder.enabled=false`; keep `heartbeatDays=25`.
 
 Full decision: `docs/decisions/D-049-sol-risk-ladder-and-resize.md`.
+
+## D-050 — Audited two-step virtual reconcile
+
+**Status:** APPROVED by owner 2026-08-26; implemented on `feature/d050-reconcile-command`.
+
+Owner-only `/reconcile` + `/confirmreconcile CODE` flattens stale virtual lots and clears the reconciliation safety halt when DXtrade is already flat. It does not place orders and does not remove the operator pause.
+
+Full decision: `docs/decisions/D-050-audited-virtual-reconcile.md`.
