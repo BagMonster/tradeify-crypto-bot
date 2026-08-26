@@ -27,13 +27,13 @@ If snapshot or `/status` shows pause, halt, or virtual≠broker, the first sente
 
 ## Phase 2c — repo inspection tools
 
-Owner-confirmed, read-only GitHub tools limited to `BagMonster/tradeify-crypto-bot`:
+Implemented under D-052. Owner-confirmed, read-only GitHub tools limited to `BagMonster/tradeify-crypto-bot`:
 
-- list files
-- read a path
-- search code
+- `list_repo_files`
+- `read_repo_file`
+- `search_repo_code`
 
-No write, no merge, no Railway deploy control.
+No write, no merge, no Railway deploy control. Requires `GITHUB_TOKEN` on the companion worker only.
 
 ## Phase 2d — proposal-bound writes
 

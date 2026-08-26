@@ -39,6 +39,7 @@ Required variables on the companion worker only:
 DATABASE_URL=<Railway PostgreSQL reference>
 DATABASE_SSL=false
 OPENAI_API_KEY=<OpenAI project API key>
+GITHUB_TOKEN=<fine-grained contents:read token for BagMonster/tradeify-crypto-bot>
 ```
 
 Optional:
@@ -47,10 +48,10 @@ Optional:
 OPENAI_MODEL=gpt-5.6
 ```
 
-Do not add `TELEGRAM_BOT_TOKEN` or any DXtrade credential to the companion worker. The production Tradeify worker already owns Telegram polling and DXtrade execution.
+`GITHUB_TOKEN` is required for Phase 2c repo inspection. Do not add `TELEGRAM_BOT_TOKEN` or any DXtrade credential to the companion worker. The production Tradeify worker already owns Telegram polling and DXtrade execution.
 
 ## Phase 1 boundary
 
-The companion can converse with the owner and maintain conversation continuity. It has no GitHub write tool, no merge/deploy capability, no DXtrade client, and no trading-state mutation capability.
+The companion can converse with the owner and maintain conversation continuity. D-052 adds read-only GitHub inspection of this repository. It still has no GitHub write tool, no merge/deploy capability, no DXtrade client, and no trading-state mutation capability.
 
-The queue/tool boundary is intentionally reusable so a later owner-approved phase can add repository inspection and proposal-bound GitHub writes without replacing the Telegram conversation architecture.
+The queue/tool boundary stays reusable for a later owner-approved Phase 2d that may add proposal-bound GitHub writes without replacing the Telegram conversation architecture.
