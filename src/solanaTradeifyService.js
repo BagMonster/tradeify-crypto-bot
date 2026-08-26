@@ -1,8 +1,10 @@
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { calculateAccountFloors } from "./risk/accountRules.js";
 import { accountDayKey } from "./risk/dailyRiskLadder.js";
 import { createTradeifyService } from "./tradeifyService.js";
 import { GRID_DEFINITION, expectedNetUnits, grossVirtualExposureUsd } from "./strategies/solanaGrid.js";
 import { buildSolanaRingLevels, summarizeSolanaRingPosition } from "./monitoring/solanaRingQueries.js";
+import { describeVirtualBook, resetVirtualInventoryToEmpty } from "./state/solanaReconcile.js";
 
 function money(value) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 }).format(value);
@@ -46,6 +48,15 @@ function ladderStatusLines(ladder, equity) {
     `Full flatten (-$1,250): ${ladder.flattenDone ? "DONE" : "READY"}`,
     `Halted until rollover: ${ladder.haltedForDay ? "YES" : "NO"}`
   ];
+}
+
+function hashReconcileCode(code, salt) {
+  return createHash("sha256").update(`${salt}:reconcile:${code}`).digest("hex");
+}
+
+function safeHexEqual(left, right) {
+  if (!left || !right || left.length !== right.length) return false;
+  return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 }
 
 export function createSolanaTradeifyService({
@@ -261,5 +272,112 @@ export function createSolanaTradeifyService({
     return result.message ?? `SOL live canary ended with status ${result.status}.`;
   }
 
-  return Object.freeze({ ...base, statusText, healthText, ringsText, levelsText, canaryText });
+  async function requestReconcile() {
+    const [botState, gridState] = await Promise.all([
+      database.getState(),
+      persistence.state.load()
+    ]);
+    if (!gridState) return { code: null, message: "SOL grid state is not initialized. Reconcile is unavailable." };
+    if (botState.has_open_position) {
+      return {
+        code: null,
+        message: "Reconcile refused: DXtrade still shows an open SOL position. Flatten the broker first, then send /status."
+      };
+    }
+    const book = describeVirtualBook(gridState);
+    const code = String(randomInt(100000, 1000000));
+    const salt = randomBytes(16).toString("hex");
+    const hash = hashReconcileCode(code, salt);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await database.setResumeChallenge(hash, salt, expiresAt);
+    await database.addEvent("WARN", "SOL_RECONCILE_REQUESTED", {
+      source: "telegram",
+      virtualNet: book.netUnits,
+      openLots: book.openLots,
+      occupiedRings: book.occupiedRings,
+      stateVersion: book.version,
+      brokerOpen: botState.has_open_position === true
+    });
+    return {
+      code,
+      message: [
+        "AUDITED VIRTUAL RECONCILE",
+        "",
+        `Broker SOL position: ${botState.has_open_position ? "OPEN" : "FLAT"}`,
+        `Virtual net: ${book.netUnits.toFixed(2)} SOL`,
+        `Open virtual lots: ${book.openLots}`,
+        `Occupied rings: ${book.occupiedRings.join(", ") || "none"}`,
+        "",
+        "This will empty virtual lots, rearm all 20 D-049 rings, write an audit event, and clear the reconciliation safety halt.",
+        "It will NOT place a DXtrade order and will NOT remove the operator pause.",
+        "After confirm, send /status. If the books match, then /resume.",
+        "",
+        `To apply, send /confirmreconcile ${code} within 10 minutes.`
+      ].join("\n")
+    };
+  }
+
+  async function confirmReconcile(code) {
+    const [botState, gridState] = await Promise.all([
+      database.getState(),
+      persistence.state.load()
+    ]);
+    if (!/^\d{6}$/.test(code ?? "")) return "Use /confirmreconcile followed by the 6-digit code from /reconcile.";
+    if (!botState.resume_code_hash || !botState.resume_code_salt || !botState.resume_code_expires_at) {
+      return "No reconcile request is pending. Send /reconcile first.";
+    }
+    if (new Date(botState.resume_code_expires_at).getTime() < Date.now()) {
+      await database.clearResumeChallenge();
+      return "That reconcile code expired. Send /reconcile for a new code.";
+    }
+    const suppliedHash = hashReconcileCode(code, botState.resume_code_salt);
+    if (!safeHexEqual(suppliedHash, botState.resume_code_hash)) {
+      await database.addEvent("WARN", "SOL_RECONCILE_CODE_REJECTED", { source: "telegram" });
+      return "The reconcile code is incorrect. A /resume code will not work here.";
+    }
+    if (botState.has_open_position) {
+      await database.clearResumeChallenge();
+      return "Reconcile aborted: DXtrade now shows an open SOL position. Flatten the broker first.";
+    }
+    if (!gridState) {
+      await database.clearResumeChallenge();
+      return "Reconcile aborted: SOL grid state is missing.";
+    }
+
+    const before = describeVirtualBook(gridState);
+    const next = resetVirtualInventoryToEmpty(gridState);
+    await persistence.state.save(gridState.version, next);
+    if (typeof database.clearSafetyHalt === "function") await database.clearSafetyHalt();
+    await database.clearResumeChallenge();
+    const after = describeVirtualBook(next);
+    await database.addEvent("WARN", "SOL_VIRTUAL_RECONCILE_APPLIED", {
+      source: "telegram",
+      reason: "owner-audited flatten after manual broker close",
+      before,
+      after
+    });
+    return [
+      "AUDITED VIRTUAL RECONCILE APPLIED",
+      "",
+      `Previous virtual net: ${before.netUnits.toFixed(2)} SOL across ${before.openLots} lot(s)`,
+      `New virtual net: ${after.netUnits.toFixed(2)} SOL`,
+      `New open lots: ${after.openLots}`,
+      `State version: ${gridState.version} → ${next.version}`,
+      "Safety halt: cleared",
+      "Operator pause: unchanged",
+      "",
+      "Send /status. If broker is still FLAT and virtual net is 0, then /resume."
+    ].join("\n");
+  }
+
+  return Object.freeze({
+    ...base,
+    statusText,
+    healthText,
+    ringsText,
+    levelsText,
+    canaryText,
+    requestReconcile,
+    confirmReconcile
+  });
 }
