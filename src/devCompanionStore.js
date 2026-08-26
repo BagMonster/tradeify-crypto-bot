@@ -1,4 +1,5 @@
 import pg from "pg";
+import { formatSnapshotPack, parseSnapshotPack, upsertSnapshotPack } from "./devCompanionSnapshots.js";
 
 const { Pool } = pg;
 
@@ -13,6 +14,14 @@ function requireText(name, value, maxLength) {
   const text = value.trim();
   if (text.length > maxLength) throw new Error(`${name} must be at most ${maxLength} characters`);
   return text;
+}
+
+function packFromRow(row) {
+  if (row?.last_operator_pack) return parseSnapshotPack(row.last_operator_pack);
+  if (row?.last_operator_snapshot) {
+    return upsertSnapshotPack({}, row.last_operator_command || "/other", row.last_operator_snapshot, row.last_operator_at);
+  }
+  return parseSnapshotPack({});
 }
 
 export function createDevCompanionStore({ databaseUrl, databaseSsl = false, PoolClass = Pool }) {
@@ -36,6 +45,7 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     await pool.query("ALTER TABLE ai_dev_sessions ADD COLUMN IF NOT EXISTS last_operator_command TEXT");
     await pool.query("ALTER TABLE ai_dev_sessions ADD COLUMN IF NOT EXISTS last_operator_snapshot TEXT");
     await pool.query("ALTER TABLE ai_dev_sessions ADD COLUMN IF NOT EXISTS last_operator_at TIMESTAMPTZ");
+    await pool.query("ALTER TABLE ai_dev_sessions ADD COLUMN IF NOT EXISTS last_operator_pack JSONB");
     await pool.query(`
       CREATE TABLE IF NOT EXISTS ai_dev_jobs (
         id BIGSERIAL PRIMARY KEY,
@@ -89,38 +99,48 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     const ownerId = requireOwnerId(ownerIdValue);
     const command = requireText("command", commandValue, 32);
     const snapshot = requireText("snapshot", textValue, 12000);
+    const current = await pool.query(
+      "SELECT last_operator_command, last_operator_snapshot, last_operator_at, last_operator_pack FROM ai_dev_sessions WHERE owner_id = $1",
+      [ownerId]
+    );
+    const pack = upsertSnapshotPack(packFromRow(current.rows[0] ?? {}), command, snapshot);
     await pool.query(`
       INSERT INTO ai_dev_sessions (
-        owner_id, active, last_operator_command, last_operator_snapshot, last_operator_at, updated_at
+        owner_id, active, last_operator_command, last_operator_snapshot, last_operator_at, last_operator_pack, updated_at
       )
-      VALUES ($1, TRUE, $2, $3, NOW(), NOW())
+      VALUES ($1, TRUE, $2, $3, NOW(), $4::jsonb, NOW())
       ON CONFLICT (owner_id) DO UPDATE SET
         last_operator_command = EXCLUDED.last_operator_command,
         last_operator_snapshot = EXCLUDED.last_operator_snapshot,
         last_operator_at = EXCLUDED.last_operator_at,
+        last_operator_pack = EXCLUDED.last_operator_pack,
         updated_at = NOW()
-    `, [ownerId, command, snapshot]);
+    `, [ownerId, command, snapshot, JSON.stringify(pack)]);
   }
 
   async function latestOperatorSnapshot(ownerIdValue) {
     const ownerId = requireOwnerId(ownerIdValue);
     const result = await pool.query(`
-      SELECT last_operator_command, last_operator_snapshot, last_operator_at
+      SELECT last_operator_command, last_operator_snapshot, last_operator_at, last_operator_pack
       FROM ai_dev_sessions
       WHERE owner_id = $1
     `, [ownerId]);
-    if (result.rowCount !== 1 || !result.rows[0].last_operator_snapshot) return null;
+    if (result.rowCount !== 1) return null;
+    const formatted = formatSnapshotPack(packFromRow(result.rows[0]));
+    if (!formatted.text) return null;
     const row = result.rows[0];
     return Object.freeze({
       command: row.last_operator_command,
-      text: row.last_operator_snapshot,
-      at: row.last_operator_at ? new Date(row.last_operator_at).toISOString() : null
+      text: formatted.text,
+      at: row.last_operator_at ? new Date(row.last_operator_at).toISOString() : null,
+      present: formatted.present,
+      missing: formatted.missing
     });
   }
 
   async function enqueue(ownerIdValue, inputValue) {
     const ownerId = requireOwnerId(ownerIdValue);
-    const inputText = requireText("inputText", inputValue, 16000);
+    const inputText = requireText("inputText", inputValue, 24000);
     const result = await pool.query(
       "INSERT INTO ai_dev_jobs (owner_id, input_text) VALUES ($1, $2) RETURNING id",
       [ownerId, inputText]
