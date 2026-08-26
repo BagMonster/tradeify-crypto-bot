@@ -35,3 +35,18 @@ On 2026-08-26 the grid confirmed SHORT2: **0.44 SOL SELL @ $95.91**. DXtrade sho
 
 - `/reconcile` while DXtrade still holds the 0.44 short
 - a command that invents a virtual lot from an unexplained broker position
+
+## Related code
+
+- `src/execution/dxtradeExecutionClient.js` — `getOpenPositions()` `GET /accounts/{code}/positions`
+- `src/account/dxtradeSignedNet.js` — signed SELL/SHORT quantity and positions overlay
+- `src/account/dxtradeAccountMonitor.js` — required overlay; `positionsReadFailed` is unhealthy
+- `src/state/solanaRematch.js` — `/rematch` + `/confirmrematch` handlers
+- `src/solanaTradeifyService.js` — exposes `requestRematch` / `confirmRematch` and `/status` broker snapshot lines
+- `src/solanaOwnerService.js` — production wrapper used by `index.mjs`
+- `src/telegramBot.js` — slash handlers and command menu
+- `index.mjs` — `onBooksRematched` clears the in-process reconciliation latch
+- `tests/dxtradeSignedNet.test.mjs`
+- `tests/dxtradeAccountMonitor.test.mjs`
+- `tests/solanaRematchCommand.test.mjs`
+- `tests/devCompanionTelegram.test.mjs`
