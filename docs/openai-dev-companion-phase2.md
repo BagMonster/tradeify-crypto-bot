@@ -2,13 +2,15 @@
 
 Phase 1 stays conversational. Phase 2 is the first time BMTB1 can inspect live body state without the owner pasting Telegram output, then propose GitHub changes under owner confirmation.
 
-## Do not start Phase 2 until
+## Gates
 
-- The current reconciliation halt is cleared: virtual lots match DXtrade net SOL, or the virtual book is intentionally flattened.
-- Five-slot operator latches are live and `/status` + `/levels` can be reasoned about together.
+- Reconciliation halt cleared via D-050: **done 2026-08-26**.
+- Five-slot operator latches live: **done**.
 - Automatic execution remains owner-gated. Companion still must not place orders.
 
 ## Phase 2a — live body snapshot (read-only)
+
+**Status:** implemented under D-051.
 
 Trading worker writes a sanitized row to Postgres on each status refresh:
 
@@ -21,9 +23,13 @@ Trading worker writes a sanitized row to Postgres on each status refresh:
 
 Companion reads that row on every job. No DXtrade credentials on the companion service.
 
+Trading worker publish path: 15-second timer plus `/status`. Table: `sol_companion_live_snapshot`.
+
 ## Phase 2b — halt-first diagnosis
 
-If snapshot or `/status` shows pause, halt, or virtual≠broker, the first sentence must say that and name the exact command still needed (`/rings`, `/health`) instead of asking for a generic paste.
+**Status:** implemented under D-051.
+
+If snapshot or `/status` shows pause, halt, or virtual≠broker, the first sentence must say that and name the exact command still needed (`/rings`, `/health`, `/reconcile`) instead of asking for a generic paste.
 
 ## Phase 2c — repo inspection tools
 
