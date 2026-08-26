@@ -11,6 +11,7 @@ class FakeBot {
     this.textHandlers = [];
     this.handlers = new Map();
     this.sent = [];
+    this.actions = [];
     this.commands = [];
     FakeBot.instance = this;
   }
@@ -27,6 +28,10 @@ class FakeBot {
   async sendMessage(chatId, text, options) {
     this.sent.push({ chatId, text, options });
     return { chat: { id: chatId }, text };
+  }
+
+  async sendChatAction(chatId, action) {
+    this.actions.push({ chatId, action });
   }
 
   async answerCallbackQuery() {}
@@ -99,7 +104,8 @@ test("/code activates owner-only development routing and ordinary text queues a 
     { ownerId: 12345, text: "Please explain the current SOL runtime." }
   ]);
   assert.ok(bot.sent.some((message) => message.text.includes("development mode is ACTIVE")));
-  assert.ok(bot.sent.some((message) => message.text.includes("Development request #1 queued")));
+  assert.equal(bot.sent.some((message) => message.text.includes("queued")), false);
+  assert.ok(bot.actions.some((item) => item.chatId === 12345 && item.action === "typing"));
   bot.stopDevCompanionDelivery();
 });
 

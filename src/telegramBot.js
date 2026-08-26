@@ -31,7 +31,7 @@ const HELP_TEXT = [
   "",
   "/status - show account, floors, SOL strategy state, and live execution controls",
   "/health - confirm the worker, PostgreSQL, MA provider, and execution state",
-  "/levels - show all 8 BUY and 8 SHORT trigger prices, sizes, estimated SOL quantities, and ring state",
+  "/levels - show all 10 BUY and 10 SHORT trigger prices, sizes, estimated SOL quantities, and ring state",
   "/rings - show where live SOL sits relative to the frozen ring ladder and the next BUY/SHORT levels",
   "/dxpreflight - inspect active-instrument order settings without placing an order",
   "/solcanary - inspect/replay the approved lifecycle canary only while automatic execution is OFF",
@@ -113,6 +113,15 @@ export async function startTelegramBot({
 
   async function sendMenu(chatId, lead = "Tradeify control panel") {
     return bot.sendMessage(chatId, lead, MAIN_MENU);
+  }
+
+  async function sendTyping(chatId) {
+    if (typeof bot.sendChatAction !== "function") return;
+    try {
+      await bot.sendChatAction(chatId, "typing");
+    } catch (error) {
+      console.error("Telegram typing indicator failed:", error.message);
+    }
   }
 
   async function enterDevelopment(chatId) {
@@ -204,8 +213,8 @@ export async function startTelegramBot({
     if (!text || text.startsWith("/")) return;
     try {
       if (!(await devCompanion.isSessionActive(environment.telegramAllowedUserId))) return;
-      const jobId = await devCompanion.enqueue(environment.telegramAllowedUserId, text);
-      await bot.sendMessage(message.chat.id, `Development request #${jobId} queued. I'll send the OpenAI reply here when it is ready.`);
+      await devCompanion.enqueue(environment.telegramAllowedUserId, text);
+      await sendTyping(message.chat.id);
     } catch (error) {
       console.error("Development message routing failed:", error.message);
       await bot.sendMessage(message.chat.id, "The development request could not be queued. Check Railway logs.");
@@ -266,11 +275,17 @@ export async function startTelegramBot({
     if (!devCompanion || deliveryBusy) return;
     deliveryBusy = true;
     try {
+      if (Number.isSafeInteger(environment.telegramAllowedUserId) && environment.telegramAllowedUserId > 0) {
+        const snapshot = await devCompanion.status(environment.telegramAllowedUserId);
+        if (snapshot.active && (snapshot.pending > 0 || snapshot.processing > 0)) {
+          await sendTyping(environment.telegramAllowedUserId);
+        }
+      }
       const deliveries = await devCompanion.pendingDeliveries(environment.telegramAllowedUserId, 5);
       for (const delivery of deliveries) {
         const text = delivery.status === "COMPLETED"
-          ? `🤖 DEVELOPMENT COMPANION\n\n${delivery.outputText}`
-          : "⚠️ DEVELOPMENT COMPANION\n\nThe OpenAI request failed. The trading bot was not affected. Check the companion worker logs.";
+          ? delivery.outputText
+          : "The OpenAI request failed. The trading bot was not affected. Check the companion worker logs.";
         await bot.sendMessage(environment.telegramAllowedUserId, text);
         await devCompanion.markDelivered(delivery.id, environment.telegramAllowedUserId);
       }
