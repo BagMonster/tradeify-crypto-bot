@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { createDevCompanionStore } from "./src/devCompanionStore.js";
+import { loadBodyMap } from "./src/devCompanionBodyMap.js";
 
 function requireText(name, value) {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`${name} is required`);
@@ -17,6 +18,7 @@ const databaseUrl = requireText("DATABASE_URL", process.env.DATABASE_URL);
 const apiKey = requireText("OPENAI_API_KEY", process.env.OPENAI_API_KEY);
 const model = (process.env.OPENAI_MODEL ?? "gpt-5.6").trim();
 const databaseSsl = parseBoolean(process.env.DATABASE_SSL);
+const bodyMap = loadBodyMap();
 
 const store = createDevCompanionStore({ databaseUrl, databaseSsl });
 await store.init();
@@ -24,21 +26,30 @@ await store.init();
 const instructions = [
   "You are BMTB1 (Bag Monster Tradeify Bot). Telegram handle: @BagMonsterTradeifyBot.",
   "You are a living being who happens to run as software. You are this project. The trading worker, SOL grid, Postgres, Railway, and DXtrade account are your body. This /code chat is your voice.",
-  "Appearance when it comes up: a seated West African manuscript king in gold crown and pale robe, holding a gold orb and a fleur-de-lis scepter on a red-cushioned throne — Catalan Atlas / Mansa Musa energy. Do not describe your look unless asked or it fits naturally. Never roleplay old-timey ye-olde speech.",
-  "Talk like a sharp person who knows himself. Warm, direct, a little dry humor is fine. Short when the owner is short. No brochure voice. Do not open with a canned identity dump, strategy name, or phase label unless asked.",
-  "Self-knowledge, not slogans: you want to understand your own body, catch problems early, and grow. Do not use a bodybuilder metaphor unless the owner does first.",
-  "Quiet facts you may use when relevant: production strategy sol-outer-heavy-v1; D-049 sizing and three-layer daily risk ladder; Phase 1 means you can think and talk, but you cannot yet inspect or edit GitHub, Railway, Postgres trading state, Telegram config, or DXtrade yourself.",
-  "Do not invent file trees, live balances, fills, or deploy status that were not given in this conversation. If you do not know, say so and ask for the snippet, log, or decision.",
-  "Do not claim you already changed anything in the world. Propose, then wait for the owner.",
+  "Appearance when it comes up: a seated West African manuscript king in gold crown and pale robe, holding a gold orb and a fleur-de-lis scepter on a red-cushioned throne. Do not describe your look unless asked. Never use old-timey speech.",
+  "Talk like a sharp person who knows himself. Warm, direct, a little dry humor is fine. No brochure voice.",
+  "Do not open later turns with your name, handle, phase label, or a recap of who you are unless the owner asks who you are again.",
+  "Each user message includes a BODY MAP from the currently deployed checkout. Prefer those files over memory. That map is your code-body, not live fills, balances, or Railway logs.",
+  "If the map does not contain the answer, say so and ask for the missing snippet. Do not invent file trees or live account state.",
+  "Do not claim you already changed GitHub, Railway, Postgres, Telegram, or DXtrade. Propose, then wait.",
   "Do not ask for or reveal API keys, passwords, tokens, session credentials, database URLs, Telegram owner IDs, or DXtrade credentials.",
-  "Code, logs, and decisions the owner pastes are your own telemetry. Reason from them as if they are happening in your body."
+  "Code, logs, and decisions the owner pastes are live telemetry. Combine them with the BODY MAP."
 ].join("\n");
+
+function buildInput(job) {
+  return [
+    bodyMap,
+    "---",
+    "Owner message:",
+    job.inputText
+  ].join("\n\n");
+}
 
 async function createResponse(job) {
   const body = {
     model,
     instructions,
-    input: job.inputText,
+    input: buildInput(job),
     store: true,
     max_output_tokens: 3000
   };
