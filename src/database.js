@@ -349,6 +349,18 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     return Object.freeze({ safetyHalt: result.rows[0].safety_halt === true, reason: result.rows[0].halt_reason });
   }
 
+  async function clearSafetyHalt() {
+    const result = await pool.query(
+      `UPDATE bot_state
+          SET safety_halt = FALSE, halt_reason = NULL, updated_at = NOW()
+        WHERE id = 1
+        RETURNING safety_halt`,
+      []
+    );
+    if (result.rowCount !== 1) throw new Error("bot_state row is missing");
+    return result.rows[0].safety_halt === false;
+  }
+
   async function setOperatorKilled(killed) {
     await pool.query(
       `UPDATE bot_state
@@ -633,6 +645,7 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     syncAccountSnapshot,
     setFeedStale,
     setSafetyHalt,
+    clearSafetyHalt,
     setOperatorKilled,
     setResumeChallenge,
     clearResumeChallenge,
