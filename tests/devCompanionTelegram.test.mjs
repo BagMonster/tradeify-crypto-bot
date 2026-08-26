@@ -53,7 +53,7 @@ class FakeBot {
 
 function serviceStub() {
   return {
-    statusText: async () => "status",
+    statusText: async () => "TRADEIFY SOL OUTER-HEAVY STATUS\nVirtual net SOL: -0.06\nLast confirmed strategy fill: SELL @ $100.535",
     healthText: async () => "health",
     levelsText: async () => "levels",
     ringsText: async () => "rings",
@@ -71,12 +71,17 @@ function companionStub() {
   let nextId = 1;
   const queued = [];
   const delivered = [];
+  let snapshot = null;
   return {
     queued,
     delivered,
     async setSessionActive(ownerId, value) { active = value === true; },
     async isSessionActive() { return active; },
     async resetSession() { active = true; },
+    async saveOperatorSnapshot(ownerId, command, text) {
+      snapshot = { command, text, at: "2026-08-26T10:00:00.000Z" };
+    },
+    async latestOperatorSnapshot() { return snapshot; },
     async enqueue(ownerId, text) { queued.push({ ownerId, text }); return nextId++; },
     async pendingDeliveries() { return []; },
     async markDelivered(id, ownerId) { delivered.push({ id, ownerId }); },
@@ -106,6 +111,26 @@ test("/code activates owner-only development routing and ordinary text queues a 
   assert.ok(bot.sent.some((message) => message.text.includes("development mode is ACTIVE")));
   assert.equal(bot.sent.some((message) => message.text.includes("queued")), false);
   assert.ok(bot.actions.some((item) => item.chatId === 12345 && item.action === "typing"));
+  bot.stopDevCompanionDelivery();
+});
+
+test("/status while /code is active is latched into the next companion job", async () => {
+  const devCompanion = companionStub();
+  const bot = await startTelegramBot({
+    environment: { telegramToken: "test-token", telegramAllowedUserId: 12345 },
+    service: serviceStub(),
+    devCompanion,
+    BotClass: FakeBot
+  });
+
+  await bot.emitMessage(ownerMessage("/code"));
+  await bot.emitMessage(ownerMessage("/status"));
+  await bot.emitMessage(ownerMessage("Did we buy or sell short?"));
+
+  assert.equal(devCompanion.queued.length, 1);
+  assert.match(devCompanion.queued[0].text, /LATEST OPERATOR SNAPSHOT \(\/status/);
+  assert.match(devCompanion.queued[0].text, /Virtual net SOL: -0\.06/);
+  assert.match(devCompanion.queued[0].text, /Did we buy or sell short\?/);
   bot.stopDevCompanionDelivery();
 });
 
