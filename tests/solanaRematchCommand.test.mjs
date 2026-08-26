@@ -40,6 +40,7 @@ function makeService({
   safetyHalt = true,
   haltReason = RECONCILIATION_HALT_REASON,
   positionsError = null,
+  onPositionsRead = null,
   accountMonitor = {
     getSnapshot() {
       return {
@@ -91,6 +92,13 @@ function makeService({
       halt = { safetyHalt: false, reason: null };
       return true;
     },
+    async clearSafetyHaltIfReason(reason) {
+      if (halt.safetyHalt === true && halt.reason === reason) {
+        halt = { safetyHalt: false, reason: null };
+        return true;
+      }
+      return false;
+    },
     async setOperatorKilled(killed) {
       operatorKilledState = killed === true;
     },
@@ -119,6 +127,7 @@ function makeService({
     dxtradeClient: {
       async login() {},
       async getOpenPositions() {
+        if (typeof onPositionsRead === "function") onPositionsRead();
         if (positionsError) throw new Error(positionsError);
         return brokerPositions;
       }
@@ -258,6 +267,26 @@ test("statusText reports broker net, source, and freshness from the account moni
   assert.match(text, /DXtrade broker net SOL: -0.44/);
   assert.match(text, /DXtrade net source: open-positions/);
   assert.match(text, /DXtrade account data fresh: YES/);
+});
+
+test("confirmRematch does not clear a different halt that arrives after the broker read starts", async () => {
+  const race = { armed: false };
+  const { service, getHalt, isPaused, rematchHooks } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] },
+    onPositionsRead: () => {
+      if (race.armed) {
+        getHalt().reason = "SOL production runtime error; owner review required";
+      }
+    }
+  });
+  const requested = await service.requestRematch();
+  race.armed = true;
+  const message = await service.confirmRematch(requested.code);
+  assert.match(message, /NO LONGER LATCHED/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(getHalt().reason, "SOL production runtime error; owner review required");
+  assert.equal(isPaused(), true);
+  assert.equal(rematchHooks(), 0);
 });
 
 test("confirmRematch keeps the SHORT2 lot, clears the halt, and lifts the pause", async () => {
