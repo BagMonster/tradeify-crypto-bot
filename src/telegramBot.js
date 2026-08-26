@@ -83,7 +83,17 @@ export async function startTelegramBot({
   }
 
   if (devCompanion !== null) {
-    const required = ["setSessionActive", "isSessionActive", "resetSession", "enqueue", "pendingDeliveries", "markDelivered", "status"];
+    const required = [
+      "setSessionActive",
+      "isSessionActive",
+      "resetSession",
+      "enqueue",
+      "pendingDeliveries",
+      "markDelivered",
+      "status",
+      "saveOperatorSnapshot",
+      "latestOperatorSnapshot"
+    ];
     for (const method of required) {
       if (typeof devCompanion?.[method] !== "function") throw new TypeError(`devCompanion.${method} must be a function`);
     }
@@ -124,6 +134,36 @@ export async function startTelegramBot({
     }
   }
 
+  async function latchOperatorOutput(command, text) {
+    if (!devCompanion) return;
+    try {
+      if (!(await devCompanion.isSessionActive(environment.telegramAllowedUserId))) return;
+      await devCompanion.saveOperatorSnapshot(environment.telegramAllowedUserId, command, text);
+    } catch (error) {
+      console.error("Operator snapshot latch failed:", error.message);
+    }
+  }
+
+  async function sendLatched(chatId, command, text) {
+    await bot.sendMessage(chatId, text);
+    await latchOperatorOutput(command, text);
+  }
+
+  async function queueDevelopmentMessage(chatId, text) {
+    const snapshot = await devCompanion.latestOperatorSnapshot(environment.telegramAllowedUserId);
+    const payload = snapshot?.text
+      ? [
+        `LATEST OPERATOR SNAPSHOT (${snapshot.command} at ${snapshot.at ?? "unknown time"}):`,
+        snapshot.text,
+        "---",
+        "Owner message:",
+        text
+      ].join("\n")
+      : text;
+    await devCompanion.enqueue(environment.telegramAllowedUserId, payload);
+    await sendTyping(chatId);
+  }
+
   async function enterDevelopment(chatId) {
     if (!devCompanion) return bot.sendMessage(chatId, "Development companion is not configured on this deployment.");
     await devCompanion.setSessionActive(environment.telegramAllowedUserId, true);
@@ -143,19 +183,19 @@ export async function startTelegramBot({
   }));
 
   bot.onText(/^\/status(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, await service.statusText());
+    await sendLatched(message.chat.id, "/status", await service.statusText());
   }));
 
   bot.onText(/^\/health(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, await service.healthText());
+    await sendLatched(message.chat.id, "/health", await service.healthText());
   }));
 
   bot.onText(/^\/levels(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, await service.levelsText());
+    await sendLatched(message.chat.id, "/levels", await service.levelsText());
   }));
 
   bot.onText(/^\/rings(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, await service.ringsText());
+    await sendLatched(message.chat.id, "/rings", await service.ringsText());
   }));
 
   bot.onText(/^\/dxpreflight(?:@\w+)?$/i, withAuthorization(async (message) => {
@@ -206,15 +246,13 @@ export async function startTelegramBot({
     await bot.sendMessage(message.chat.id, "OpenAI development mode is OFF. Trading commands continue to work normally.");
   }));
 
-  // Ordinary owner text becomes development conversation only while /code mode is active.
   bot.on("message", async (message) => {
     if (!devCompanion || !isAuthorized(message.from)) return;
     const text = typeof message.text === "string" ? message.text.trim() : "";
     if (!text || text.startsWith("/")) return;
     try {
       if (!(await devCompanion.isSessionActive(environment.telegramAllowedUserId))) return;
-      await devCompanion.enqueue(environment.telegramAllowedUserId, text);
-      await sendTyping(message.chat.id);
+      await queueDevelopmentMessage(message.chat.id, text);
     } catch (error) {
       console.error("Development message routing failed:", error.message);
       await bot.sendMessage(message.chat.id, "The development request could not be queued. Check Railway logs.");
@@ -229,16 +267,16 @@ export async function startTelegramBot({
     try {
       switch (query.data) {
         case "status":
-          await bot.sendMessage(chatId, await service.statusText());
+          await sendLatched(chatId, "/status", await service.statusText());
           break;
         case "health":
-          await bot.sendMessage(chatId, await service.healthText());
+          await sendLatched(chatId, "/health", await service.healthText());
           break;
         case "levels":
-          await bot.sendMessage(chatId, await service.levelsText());
+          await sendLatched(chatId, "/levels", await service.levelsText());
           break;
         case "rings":
-          await bot.sendMessage(chatId, await service.ringsText());
+          await sendLatched(chatId, "/rings", await service.ringsText());
           break;
         case "kill":
           await bot.sendMessage(chatId, await service.kill());
