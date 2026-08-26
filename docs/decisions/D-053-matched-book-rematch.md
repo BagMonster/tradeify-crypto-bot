@@ -17,9 +17,10 @@ On 2026-08-26 the grid confirmed SHORT2: **0.44 SOL SELL @ $95.91**. DXtrade sho
    - fresh DXtrade positions read;
    - require virtual net and broker net to agree within 0.005 SOL;
    - keep every virtual lot;
-   - clear only the reconciliation safety halt;
+   - clear **only** a reconciliation-mismatch safety halt (the live text that the books do not reconcile). Runtime, D-049, and protective-order halts are refused;
    - lift the operator pause;
    - place no order and flatten nothing.
+4. Runtime `accountDataFresh` uses the monitor **healthy** flag, not age-only `fresh`. A failed `/positions` read is stale for trading even if the metrics poll is recent.
 
 ## Operator path for this incident
 

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createSolanaTradeifyService } from "../src/solanaTradeifyService.js";
+import { createSolanaOwnerService } from "../src/solanaOwnerService.js";
+import { RECONCILIATION_HALT_REASON } from "../src/state/solanaRematch.js";
 import { createInitialSolanaState, expectedNetUnits, normalizeSolanaState } from "../src/strategies/solanaGrid.js";
 
 function short2State() {
@@ -33,11 +34,16 @@ function short2State() {
   });
 }
 
-function makeService({ brokerPositions, hasOpenPosition = false } = {}) {
+function makeService({
+  brokerPositions,
+  hasOpenPosition = false,
+  haltReason = RECONCILIATION_HALT_REASON,
+  positionsError = null
+} = {}) {
   let gridState = short2State();
   const events = [];
   let challenge = { hash: null, salt: null, expiresAt: null };
-  let halt = { safetyHalt: true, reason: "virtual net -0.44 vs broker 0" };
+  let halt = { safetyHalt: true, reason: haltReason };
   let operatorKilledState = true;
   let rematchHooks = 0;
   const database = {
@@ -75,7 +81,7 @@ function makeService({ brokerPositions, hasOpenPosition = false } = {}) {
       async save() { throw new Error("rematch must not rewrite virtual lots"); }
     }
   };
-  const service = createSolanaTradeifyService({
+  const service = createSolanaOwnerService({
     database,
     account: { startingBalance: 50000, maxLossOffset: 3000, dailyLossLimit: 1500 },
     strategy: {
@@ -89,7 +95,10 @@ function makeService({ brokerPositions, hasOpenPosition = false } = {}) {
     execution: { isEnabled: () => true },
     dxtradeClient: {
       async login() {},
-      async getOpenPositions() { return brokerPositions; }
+      async getOpenPositions() {
+        if (positionsError) throw new Error(positionsError);
+        return brokerPositions;
+      }
     },
     onBooksRematched: async () => { rematchHooks += 1; }
   });
@@ -103,6 +112,31 @@ function makeService({ brokerPositions, hasOpenPosition = false } = {}) {
     rematchHooks: () => rematchHooks
   };
 }
+
+test("requestRematch refuses when /positions fails even if metrics look flat", async () => {
+  const { service, events, getState } = makeService({
+    brokerPositions: { positions: [] },
+    positionsError: "positions endpoint down"
+  });
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /could not read a fresh DXtrade SOL position/);
+  assert.equal(expectedNetUnits(getState()), -0.44);
+  assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
+});
+
+test("requestRematch refuses a D-049 or runtime halt even when nets match", async () => {
+  const { service, events, getHalt, isPaused } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] },
+    haltReason: "SOL production runtime error; owner review required"
+  });
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /NOT A RECONCILIATION MISMATCH/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(isPaused(), true);
+  assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
+});
 
 test("requestRematch refuses when a fresh DXtrade read is still flat", async () => {
   const { service, events, getState } = makeService({ brokerPositions: { positions: [] } });
@@ -147,6 +181,7 @@ test("confirmRematch keeps the SHORT2 lot, clears the halt, and lifts the pause"
   const message = await service.confirmRematch(requested.code);
   assert.match(message, /AUDITED BOOK REMATCH APPLIED/);
   assert.match(message, /Virtual lots: preserved/);
+  assert.match(message, /Reconciliation safety halt: cleared/);
   assert.match(message, /Operator pause: lifted/);
   assert.equal(expectedNetUnits(getState()), -0.44);
   assert.equal(getState().rings.find((ring) => ring.tag === "SELL2").lots.length, 1);

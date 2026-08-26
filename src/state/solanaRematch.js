@@ -2,6 +2,26 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 import { describeVirtualBook } from "./solanaReconcile.js";
 import { netsMatch, signedNetFromOpenPositions } from "../account/dxtradeSignedNet.js";
 
+export const RECONCILIATION_HALT_REASON =
+  "SOL virtual-lot state does not reconcile to the DXtrade net SOL position; owner review required";
+
+export function isReconciliationHalt(reason) {
+  const text = String(reason ?? "").trim().toLowerCase();
+  if (!text) return false;
+  return text.includes("reconcil") || text === RECONCILIATION_HALT_REASON.toLowerCase();
+}
+
+function otherHaltMessage(reason) {
+  return [
+    "REMATCH REFUSED — ACTIVE HALT IS NOT A RECONCILIATION MISMATCH",
+    "",
+    `Current halt: ${reason}`,
+    "",
+    "Rematch only clears the false-flat reconciliation halt.",
+    "A runtime, D-049, or protective-order halt must be resolved on its own path."
+  ].join("\n");
+}
+
 function hashRematchCode(code, salt) {
   return createHash("sha256").update(`${salt}:rematch:${code}`).digest("hex");
 }
@@ -84,8 +104,14 @@ export function createRematchHandlers({
   }
 
   async function requestRematch() {
-    const gridState = await persistence.state.load();
+    const [botState, gridState] = await Promise.all([
+      database.getState(),
+      persistence.state.load()
+    ]);
     if (!gridState) return { code: null, message: "SOL grid state is not initialized. Rematch is unavailable." };
+    if (botState?.safety_halt === true && !isReconciliationHalt(botState.halt_reason)) {
+      return { code: null, message: otherHaltMessage(botState.halt_reason) };
+    }
     const book = describeVirtualBook(gridState);
     const broker = await readFreshBrokerNet();
     if (!broker.ok) {
@@ -175,8 +201,14 @@ export function createRematchHandlers({
         `Fresh DXtrade net: ${broker.ok ? broker.netUnits.toFixed(2) : "unavailable"} SOL`
       ].join("\n");
     }
+    if (botState.safety_halt === true && !isReconciliationHalt(botState.halt_reason)) {
+      await database.clearResumeChallenge();
+      return otherHaltMessage(botState.halt_reason);
+    }
 
-    if (typeof database.clearSafetyHalt === "function") await database.clearSafetyHalt();
+    if (botState.safety_halt === true && typeof database.clearSafetyHalt === "function") {
+      await database.clearSafetyHalt();
+    }
     if (typeof database.setOperatorKilled === "function") await database.setOperatorKilled(false);
     await database.clearResumeChallenge();
     if (typeof onBooksRematched === "function") await onBooksRematched({ virtualNet: book.netUnits, brokerNet: broker.netUnits });
@@ -197,7 +229,7 @@ export function createRematchHandlers({
       `Open virtual lots: ${book.openLots}`,
       `Occupied rings: ${book.occupiedRings.join(", ") || "none"}`,
       "Virtual lots: preserved",
-      "Safety halt: cleared",
+      "Reconciliation safety halt: cleared",
       "Operator pause: lifted",
       "",
       "Send /status. The live lot stays in the notebook so the grid can manage the DXtrade position."
