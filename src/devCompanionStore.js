@@ -1,5 +1,6 @@
 import pg from "pg";
 import { formatSnapshotPack, parseSnapshotPack, upsertSnapshotPack } from "./devCompanionSnapshots.js";
+import { sanitizeLiveSnapshot } from "./devCompanionLiveSnapshot.js";
 
 const { Pool } = pg;
 
@@ -63,6 +64,13 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     `);
     await pool.query("CREATE INDEX IF NOT EXISTS ai_dev_jobs_pending_idx ON ai_dev_jobs (status, id)");
     await pool.query("CREATE INDEX IF NOT EXISTS ai_dev_jobs_delivery_idx ON ai_dev_jobs (owner_id, status, delivered_at, id)");
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sol_companion_live_snapshot (
+        id SMALLINT PRIMARY KEY CHECK (id = 1),
+        payload JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
     await pool.query(`
       UPDATE ai_dev_jobs
@@ -116,6 +124,25 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
         last_operator_pack = EXCLUDED.last_operator_pack,
         updated_at = NOW()
     `, [ownerId, command, snapshot, JSON.stringify(pack)]);
+  }
+
+  async function saveLiveSnapshot(input) {
+    const snapshot = sanitizeLiveSnapshot(input);
+    await pool.query(`
+      INSERT INTO sol_companion_live_snapshot (id, payload, updated_at)
+      VALUES (1, $1::jsonb, NOW())
+      ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
+    `, [JSON.stringify(snapshot)]);
+    return snapshot;
+  }
+
+  async function latestLiveSnapshot() {
+    const result = await pool.query("SELECT payload, updated_at FROM sol_companion_live_snapshot WHERE id = 1");
+    if (result.rowCount !== 1) return null;
+    return sanitizeLiveSnapshot({
+      ...result.rows[0].payload,
+      capturedAt: result.rows[0].payload?.capturedAt ?? result.rows[0].updated_at
+    });
   }
 
   async function latestOperatorSnapshot(ownerIdValue) {
@@ -270,6 +297,8 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     isSessionActive,
     resetSession,
     saveOperatorSnapshot,
+    saveLiveSnapshot,
+    latestLiveSnapshot,
     latestOperatorSnapshot,
     enqueue,
     claimNext,
