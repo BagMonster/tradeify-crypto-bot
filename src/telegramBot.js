@@ -40,6 +40,8 @@ const HELP_TEXT = [
   "/confirmresume CODE - confirm the restart",
   "/reconcile - request a 6-digit code to flatten stale virtual lots when DXtrade is flat",
   "/confirmreconcile CODE - apply the audited virtual flatten and clear the reconciliation halt",
+  "/rematch - request a 6-digit code to keep current lots when DXtrade and the notebook already agree",
+  "/confirmrematch CODE - clear the reconciliation halt, keep the live lot, and lift the operator pause",
   "/flat - show manual SOL/USD flattening instructions",
   "/code - enter the owner-only OpenAI development conversation",
   "/devstatus - show development companion queue/session status",
@@ -226,6 +228,15 @@ export async function startTelegramBot({
     await sendLatched(message.chat.id, "/confirmreconcile", await service.confirmReconcile(match?.[1] ?? ""));
   }));
 
+  bot.onText(/^\/rematch(?:@\w+)?$/i, withAuthorization(async (message) => {
+    const result = await service.requestRematch();
+    await sendLatched(message.chat.id, "/rematch", result.message);
+  }));
+
+  bot.onText(/^\/confirmrematch(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/confirmrematch", await service.confirmRematch(match?.[1] ?? ""));
+  }));
+
   bot.onText(/^\/flat(?:@\w+)?$/i, withAuthorization(async (message) => {
     await sendLatched(message.chat.id, "/flat", service.flatInstructions());
   }));
@@ -355,6 +366,7 @@ export async function startTelegramBot({
     { command: "kill", description: "Pause the bot" },
     { command: "resume", description: "Request a resume code" },
     { command: "reconcile", description: "Request a virtual flatten code" },
+    { command: "rematch", description: "Rematch broker and virtual books" },
     { command: "flat", description: "Show flattening instructions" },
     { command: "code", description: "Enter OpenAI development mode" },
     { command: "devstatus", description: "Show development companion status" },
