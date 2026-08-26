@@ -37,13 +37,30 @@ function short2State() {
 function makeService({
   brokerPositions,
   hasOpenPosition = false,
+  safetyHalt = true,
   haltReason = RECONCILIATION_HALT_REASON,
-  positionsError = null
+  positionsError = null,
+  accountMonitor = {
+    getSnapshot() {
+      return {
+        snapshot: {
+          signedNetUnits: -0.44,
+          positionSource: "open-positions",
+          positionsReadFailed: false,
+          fetchedAtMs: Date.now()
+        },
+        healthy: true,
+        fresh: true,
+        ageMs: 120,
+        error: null
+      };
+    }
+  }
 } = {}) {
   let gridState = short2State();
   const events = [];
   let challenge = { hash: null, salt: null, expiresAt: null };
-  let halt = { safetyHalt: true, reason: haltReason };
+  let halt = { safetyHalt, reason: haltReason };
   let operatorKilledState = true;
   let rematchHooks = 0;
   const database = {
@@ -55,7 +72,13 @@ function makeService({
         halt_reason: halt.reason,
         resume_code_hash: challenge.hash,
         resume_code_salt: challenge.salt,
-        resume_code_expires_at: challenge.expiresAt
+        resume_code_expires_at: challenge.expiresAt,
+        balance: 50000,
+        equity: 50000,
+        high_water: 50000,
+        prev_day_close: 50000,
+        payout_taken: false,
+        feed_stale: false
       };
     },
     async setResumeChallenge(hash, salt, expiresAt) {
@@ -100,6 +123,7 @@ function makeService({
         return brokerPositions;
       }
     },
+    accountMonitor,
     onBooksRematched: async () => { rematchHooks += 1; }
   });
   return {
@@ -122,6 +146,33 @@ test("requestRematch refuses when /positions fails even if metrics look flat", a
   assert.equal(result.code, null);
   assert.match(result.message, /could not read a fresh DXtrade SOL position/);
   assert.equal(expectedNetUnits(getState()), -0.44);
+  assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
+});
+
+test("requestRematch refuses when there is no safety halt", async () => {
+  const { service, events, getHalt, isPaused } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] },
+    safetyHalt: false,
+    haltReason: null
+  });
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /NO RECONCILIATION HALT/);
+  assert.equal(getHalt().safetyHalt, false);
+  assert.equal(isPaused(), true);
+  assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
+});
+
+test("requestRematch refuses an unrelated halt that only contains the word reconciliation", async () => {
+  const { service, events, getHalt, isPaused } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] },
+    haltReason: "Protective flatten needs reconciliation-style owner review"
+  });
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /NOT A RECONCILIATION MISMATCH/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(isPaused(), true);
   assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
 });
 
@@ -171,6 +222,42 @@ test("confirmRematch rejects a reconcile-style hash", async () => {
   assert.match(wrong, /incorrect/);
   assert.equal(getHalt().safetyHalt, true);
   assert.equal(isPaused(), true);
+});
+
+test("confirmRematch refuses after a pending code if the safety halt is already clear", async () => {
+  const { service, getHalt, isPaused, rematchHooks } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] }
+  });
+  const requested = await service.requestRematch();
+  getHalt().safetyHalt = false;
+  getHalt().reason = null;
+  const message = await service.confirmRematch(requested.code);
+  assert.match(message, /NO RECONCILIATION HALT/);
+  assert.equal(isPaused(), true);
+  assert.equal(rematchHooks(), 0);
+});
+
+test("confirmRematch refuses after a pending code if the halt is no longer the exact reconciliation halt", async () => {
+  const { service, getHalt, isPaused, rematchHooks } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] }
+  });
+  const requested = await service.requestRematch();
+  getHalt().reason = "Protective flatten needs reconciliation-style owner review";
+  const message = await service.confirmRematch(requested.code);
+  assert.match(message, /NOT A RECONCILIATION MISMATCH/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(isPaused(), true);
+  assert.equal(rematchHooks(), 0);
+});
+
+test("statusText reports broker net, source, and freshness from the account monitor", async () => {
+  const { service } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] }
+  });
+  const text = await service.statusText();
+  assert.match(text, /DXtrade broker net SOL: -0.44/);
+  assert.match(text, /DXtrade net source: open-positions/);
+  assert.match(text, /DXtrade account data fresh: YES/);
 });
 
 test("confirmRematch keeps the SHORT2 lot, clears the halt, and lifts the pause", async () => {
