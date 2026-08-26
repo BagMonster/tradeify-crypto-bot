@@ -183,7 +183,7 @@ const solanaRuntime = createSolanaRuntime({
       safetyHalt: botState.safety_halt,
       accountLocked: snapshot?.accountLocked ?? true,
       feedHealthy: liveFeedState.connected === true && liveFeedState.stale === false,
-      accountDataFresh: accountStatus.fresh === true,
+      accountDataFresh: accountStatus.healthy === true,
       nettingConfirmed: true,
       brokerNetUnits: snapshot?.positionsReadFailed === true
         ? null
