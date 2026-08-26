@@ -116,6 +116,7 @@ npm start
 /kill            /resume
 /confirmresume CODE
 /reconcile       /confirmreconcile CODE
+/rematch         /confirmrematch CODE
 /flat            /whoami
 /help
 ```
