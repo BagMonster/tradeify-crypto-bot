@@ -42,7 +42,8 @@ test("diagnosis leads with halt and mismatch before anything else", () => {
   assert.equal(lines.some((line) => /Operator pause is ACTIVE/.test(line)), true);
   const text = formatLiveSnapshot(snapshot, now);
   assert.match(text, /DIAGNOSIS/);
-  assert.match(text, /Do not \/resume until reconciled/);
+  assert.match(text, /Use \/reconcile, then \/confirmreconcile/);
+  assert.match(text, /Do not \/resume until the books match/);
 });
 
 test("missing or old snapshots are marked unusable", () => {
