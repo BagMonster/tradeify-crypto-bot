@@ -217,9 +217,19 @@ export function createRematchHandlers({
       await database.clearResumeChallenge();
       return noReconciliationHaltMessage(botState);
     }
-
-    if (typeof database.clearSafetyHalt === "function") {
-      await database.clearSafetyHalt();
+    if (typeof database.clearSafetyHaltIfReason !== "function") {
+      await database.clearResumeChallenge();
+      return "Rematch aborted: atomic reconciliation-halt clear is unavailable.";
+    }
+    const cleared = await database.clearSafetyHaltIfReason(RECONCILIATION_HALT_REASON);
+    if (!cleared) {
+      await database.clearResumeChallenge();
+      return [
+        "REMATCH ABORTED — RECONCILIATION HALT WAS NO LONGER LATCHED",
+        "",
+        "The stored safety halt changed after the rematch code was issued.",
+        "Rematch did not clear a different halt and did not lift the operator pause."
+      ].join("\n");
     }
     if (typeof database.setOperatorKilled === "function") await database.setOperatorKilled(false);
     await database.clearResumeChallenge();

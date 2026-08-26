@@ -42,3 +42,24 @@ test("open-positions parser rejects a foreign instrument", () => {
   assert.equal(result.ok, false);
   assert.match(result.error, /non-SOL\/USD/);
 });
+
+test("invalid open-positions book locks the snapshot instead of keeping metrics-flat", () => {
+  const snapshot = {
+    instrument: "SOL/USD",
+    openPositionsCount: 0,
+    instrumentPosition: null,
+    currentNotional: 0,
+    signedNetUnits: 0,
+    positionSource: "metrics",
+    invariantError: null,
+    accountLocked: false
+  };
+  const next = applyOpenPositionsOverlay(snapshot, {
+    positions: [{ symbol: "XRP/USD", quantity: 10, side: "BUY", markPrice: 0.5, avgOpenPrice: 0.5 }]
+  }, "SOL/USD");
+  assert.equal(next.positionSource, "open-positions-invalid");
+  assert.equal(next.signedNetUnits, null);
+  assert.equal(next.accountLocked, true);
+  assert.match(next.invariantError, /non-SOL\/USD/);
+  assert.equal(next.overlayError, next.invariantError);
+});
