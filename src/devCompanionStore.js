@@ -33,6 +33,9 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await pool.query("ALTER TABLE ai_dev_sessions ADD COLUMN IF NOT EXISTS last_operator_command TEXT");
+    await pool.query("ALTER TABLE ai_dev_sessions ADD COLUMN IF NOT EXISTS last_operator_snapshot TEXT");
+    await pool.query("ALTER TABLE ai_dev_sessions ADD COLUMN IF NOT EXISTS last_operator_at TIMESTAMPTZ");
     await pool.query(`
       CREATE TABLE IF NOT EXISTS ai_dev_jobs (
         id BIGSERIAL PRIMARY KEY,
@@ -51,8 +54,6 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     await pool.query("CREATE INDEX IF NOT EXISTS ai_dev_jobs_pending_idx ON ai_dev_jobs (status, id)");
     await pool.query("CREATE INDEX IF NOT EXISTS ai_dev_jobs_delivery_idx ON ai_dev_jobs (owner_id, status, delivered_at, id)");
 
-    // Phase 1 runs exactly one companion worker. If Railway restarts it after a job was
-    // claimed but before completion, make that job eligible again instead of stranding it.
     await pool.query(`
       UPDATE ai_dev_jobs
       SET status = 'PENDING', started_at = NULL
@@ -84,9 +85,42 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     `, [ownerId]);
   }
 
+  async function saveOperatorSnapshot(ownerIdValue, commandValue, textValue) {
+    const ownerId = requireOwnerId(ownerIdValue);
+    const command = requireText("command", commandValue, 32);
+    const snapshot = requireText("snapshot", textValue, 12000);
+    await pool.query(`
+      INSERT INTO ai_dev_sessions (
+        owner_id, active, last_operator_command, last_operator_snapshot, last_operator_at, updated_at
+      )
+      VALUES ($1, TRUE, $2, $3, NOW(), NOW())
+      ON CONFLICT (owner_id) DO UPDATE SET
+        last_operator_command = EXCLUDED.last_operator_command,
+        last_operator_snapshot = EXCLUDED.last_operator_snapshot,
+        last_operator_at = EXCLUDED.last_operator_at,
+        updated_at = NOW()
+    `, [ownerId, command, snapshot]);
+  }
+
+  async function latestOperatorSnapshot(ownerIdValue) {
+    const ownerId = requireOwnerId(ownerIdValue);
+    const result = await pool.query(`
+      SELECT last_operator_command, last_operator_snapshot, last_operator_at
+      FROM ai_dev_sessions
+      WHERE owner_id = $1
+    `, [ownerId]);
+    if (result.rowCount !== 1 || !result.rows[0].last_operator_snapshot) return null;
+    const row = result.rows[0];
+    return Object.freeze({
+      command: row.last_operator_command,
+      text: row.last_operator_snapshot,
+      at: row.last_operator_at ? new Date(row.last_operator_at).toISOString() : null
+    });
+  }
+
   async function enqueue(ownerIdValue, inputValue) {
     const ownerId = requireOwnerId(ownerIdValue);
-    const inputText = requireText("inputText", inputValue, 12000);
+    const inputText = requireText("inputText", inputValue, 16000);
     const result = await pool.query(
       "INSERT INTO ai_dev_jobs (owner_id, input_text) VALUES ($1, $2) RETURNING id",
       [ownerId, inputText]
@@ -215,6 +249,8 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     setSessionActive,
     isSessionActive,
     resetSession,
+    saveOperatorSnapshot,
+    latestOperatorSnapshot,
     enqueue,
     claimNext,
     complete,
