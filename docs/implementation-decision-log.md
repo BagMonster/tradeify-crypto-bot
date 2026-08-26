@@ -92,3 +92,11 @@ Full decision: `docs/decisions/D-049-sol-risk-ladder-and-resize.md`.
 Owner-only `/reconcile` + `/confirmreconcile CODE` flattens stale virtual lots and clears the reconciliation safety halt when DXtrade is already flat. It does not place orders and does not remove the operator pause.
 
 Full decision: `docs/decisions/D-050-audited-virtual-reconcile.md`.
+
+## D-051 — Live body snapshot for BMTB1
+
+**Status:** APPROVED by owner 2026-08-26; implemented on `feature/d051-live-body-snapshot`.
+
+The trading worker writes one sanitized row to `sol_companion_live_snapshot` every 15 seconds and again on `/status`. The companion worker reads that row on every `/code` job and leads with halt/pause/mismatch diagnosis. No DXtrade credentials on the companion. No order placement, halt-clear, merge, or Railway deploy from `/code`.
+
+Full decision: `docs/decisions/D-051-live-body-snapshot.md`.
