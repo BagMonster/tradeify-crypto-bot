@@ -6,9 +6,11 @@ export const RECONCILIATION_HALT_REASON =
   "SOL virtual-lot state does not reconcile to the DXtrade net SOL position; owner review required";
 
 export function isReconciliationHalt(reason) {
-  const text = String(reason ?? "").trim().toLowerCase();
-  if (!text) return false;
-  return text.includes("reconcil") || text === RECONCILIATION_HALT_REASON.toLowerCase();
+  return reason === RECONCILIATION_HALT_REASON;
+}
+
+export function hasReconciliationHalt(state) {
+  return state?.safety_halt === true && isReconciliationHalt(state.halt_reason);
 }
 
 function otherHaltMessage(reason) {
@@ -17,8 +19,18 @@ function otherHaltMessage(reason) {
     "",
     `Current halt: ${reason}`,
     "",
-    "Rematch only clears the false-flat reconciliation halt.",
+    "Rematch only clears the exact false-flat reconciliation halt.",
     "A runtime, D-049, or protective-order halt must be resolved on its own path."
+  ].join("\n");
+}
+
+function noReconciliationHaltMessage(state) {
+  if (state?.safety_halt === true) return otherHaltMessage(state.halt_reason);
+  return [
+    "REMATCH REFUSED — NO RECONCILIATION HALT",
+    "",
+    "Rematch is not an alternate /resume path.",
+    "It is allowed only while the exact reconciliation-mismatch safety halt is latched."
   ].join("\n");
 }
 
@@ -109,8 +121,8 @@ export function createRematchHandlers({
       persistence.state.load()
     ]);
     if (!gridState) return { code: null, message: "SOL grid state is not initialized. Rematch is unavailable." };
-    if (botState?.safety_halt === true && !isReconciliationHalt(botState.halt_reason)) {
-      return { code: null, message: otherHaltMessage(botState.halt_reason) };
+    if (!hasReconciliationHalt(botState)) {
+      return { code: null, message: noReconciliationHaltMessage(botState) };
     }
     const book = describeVirtualBook(gridState);
     const broker = await readFreshBrokerNet();
@@ -201,12 +213,12 @@ export function createRematchHandlers({
         `Fresh DXtrade net: ${broker.ok ? broker.netUnits.toFixed(2) : "unavailable"} SOL`
       ].join("\n");
     }
-    if (botState.safety_halt === true && !isReconciliationHalt(botState.halt_reason)) {
+    if (!hasReconciliationHalt(botState)) {
       await database.clearResumeChallenge();
-      return otherHaltMessage(botState.halt_reason);
+      return noReconciliationHaltMessage(botState);
     }
 
-    if (botState.safety_halt === true && typeof database.clearSafetyHalt === "function") {
+    if (typeof database.clearSafetyHalt === "function") {
       await database.clearSafetyHalt();
     }
     if (typeof database.setOperatorKilled === "function") await database.setOperatorKilled(false);
