@@ -361,6 +361,20 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     return result.rows[0].safety_halt === false;
   }
 
+  async function clearSafetyHaltIfReason(reason) {
+    const normalizedReason = requiredText("safety halt reason", reason, 300);
+    const result = await pool.query(
+      `UPDATE bot_state
+          SET safety_halt = FALSE, halt_reason = NULL, updated_at = NOW()
+        WHERE id = 1
+          AND safety_halt = TRUE
+          AND halt_reason = $1
+        RETURNING safety_halt`,
+      [normalizedReason]
+    );
+    return result.rowCount === 1;
+  }
+
   async function setOperatorKilled(killed) {
     await pool.query(
       `UPDATE bot_state
@@ -646,6 +660,7 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     setFeedStale,
     setSafetyHalt,
     clearSafetyHalt,
+    clearSafetyHaltIfReason,
     setOperatorKilled,
     setResumeChallenge,
     clearResumeChallenge,
