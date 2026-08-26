@@ -94,9 +94,11 @@ export function applyOpenPositionsOverlay(snapshot, payload, instrument = SOL_IN
   if (!overlay.ok) {
     return Object.freeze({
       ...snapshot,
-      signedNetUnits: Number.isFinite(metricsNet) ? metricsNet : 0,
-      positionSource: "metrics",
-      overlayError: overlay.error
+      signedNetUnits: null,
+      positionSource: "open-positions-invalid",
+      overlayError: overlay.error,
+      invariantError: overlay.error,
+      accountLocked: true
     });
   }
 

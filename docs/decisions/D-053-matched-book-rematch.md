@@ -23,6 +23,8 @@ On 2026-08-26 the grid confirmed SHORT2: **0.44 SOL SELL @ $95.91**. DXtrade sho
    - place no order and flatten nothing.
 4. Runtime `accountDataFresh` uses the monitor **healthy** flag, not age-only `fresh`. A failed `/positions` read is stale for trading even if the metrics poll is recent.
 5. `/status` from the owner service appends DXtrade broker net, net source, and account-data freshness from the monitor snapshot.
+6. An invalid `/positions` book (foreign instrument or multiple positions) fail-closes the snapshot: signed net unavailable, `accountLocked`, `invariantError` set, monitor unhealthy. Metrics-flat is not kept.
+7. `/confirmrematch` clears the halt only through `clearSafetyHaltIfReason(RECONCILIATION_HALT_REASON)`. If that update matches zero rows, rematch aborts and leaves any newer halt untouched.
 
 ## Operator path for this incident
 
@@ -44,6 +46,7 @@ On 2026-08-26 the grid confirmed SHORT2: **0.44 SOL SELL @ $95.91**. DXtrade sho
 - `src/execution/dxtradeExecutionClient.js` — `getOpenPositions()` `GET /accounts/{code}/positions`
 - `src/account/dxtradeSignedNet.js` — signed SELL/SHORT quantity and positions overlay
 - `src/account/dxtradeAccountMonitor.js` — required overlay; `positionsReadFailed` is unhealthy
+- `src/database.js` — `clearSafetyHaltIfReason` atomic halt clear
 - `src/state/solanaRematch.js` — `/rematch` + `/confirmrematch` handlers
 - `src/solanaTradeifyService.js` — `/status` account/grid text and D-050 `/reconcile` only; does not expose rematch
 - `src/solanaOwnerService.js` — production wrapper used by `index.mjs`; exposes `requestRematch` / `confirmRematch` and appends `/status` broker snapshot lines
