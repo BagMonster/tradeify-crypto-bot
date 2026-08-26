@@ -59,12 +59,20 @@ export function createRematchHandlers({
         error: null
       });
     }
+    if (snapshot?.positionsReadFailed === true || fromPositions?.ok === false) {
+      return Object.freeze({
+        ok: false,
+        netUnits: null,
+        source: "unavailable",
+        error: fromPositions?.error ?? snapshot?.overlayError ?? "DXtrade /positions read failed; metrics flat is not trusted"
+      });
+    }
     if (Number.isFinite(fromMetrics)) {
       return Object.freeze({
         ok: true,
         netUnits: fromMetrics,
         source: snapshot?.positionSource ?? "metrics",
-        error: fromPositions?.error ?? null
+        error: null
       });
     }
     return Object.freeze({
