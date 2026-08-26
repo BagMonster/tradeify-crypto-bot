@@ -92,3 +92,11 @@ Full decision: `docs/decisions/D-049-sol-risk-ladder-and-resize.md`.
 Owner-only `/reconcile` + `/confirmreconcile CODE` flattens stale virtual lots and clears the reconciliation safety halt when DXtrade is already flat. It does not place orders and does not remove the operator pause.
 
 Full decision: `docs/decisions/D-050-audited-virtual-reconcile.md`.
+
+## D-052 — Phase 2c read-only repository inspection
+
+**Status:** APPROVED by owner 2026-08-26; implemented on `feature/d052-repo-inspection`.
+
+BMTB1 `/code` may list, read, and search `BagMonster/tradeify-crypto-bot` through companion-worker GitHub tools. No writes, merge, deploy, or trading tools.
+
+Full decision: `docs/decisions/D-052-repo-inspection-tools.md`.

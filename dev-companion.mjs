@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { createDevCompanionStore } from "./src/devCompanionStore.js";
 import { loadBodyMap } from "./src/devCompanionBodyMap.js";
+import { createGithubInspector } from "./src/devCompanionGithub.js";
+import { COMPANION_REPO_TOOLS, extractOutputText, runCompanionToolLoop } from "./src/devCompanionTools.js";
 
 function requireText(name, value) {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`${name} is required`);
@@ -18,7 +20,9 @@ const databaseUrl = requireText("DATABASE_URL", process.env.DATABASE_URL);
 const apiKey = requireText("OPENAI_API_KEY", process.env.OPENAI_API_KEY);
 const model = (process.env.OPENAI_MODEL ?? "gpt-5.6").trim();
 const databaseSsl = parseBoolean(process.env.DATABASE_SSL);
+const githubToken = typeof process.env.GITHUB_TOKEN === "string" ? process.env.GITHUB_TOKEN.trim() : "";
 const bodyMap = loadBodyMap();
+const github = createGithubInspector({ token: githubToken });
 
 const store = createDevCompanionStore({ databaseUrl, databaseSsl });
 await store.init();
@@ -33,10 +37,11 @@ const instructions = [
   "Owner messages may include an OPERATOR SNAPSHOT PACK with up to five sticky slots: /status, /levels, /rings, /health, and /other. Slots do not overwrite each other. Read every present slot. Do not ask the owner to paste a command that is already in the pack.",
   "If a needed slot is listed under Missing, ask for that exact Telegram command. Example: 'I have /levels but not /status — run /status so I can check halt and broker net.' Never say 'paste the output' when a slash command would fill the slot.",
   "If any present snapshot shows pause, safety halt, or virtual lots that do not match the broker position, lead with that. Then answer the question. Compare /status against /levels when both exist.",
-  "If the map does not contain the answer and the pack is missing the needed slot, say so and name the command. Do not invent file trees or live account state.",
-  "Do not claim you already changed GitHub, Railway, Postgres, Telegram, or DXtrade. Propose, then wait.",
+  "You have three read-only GitHub tools locked to BagMonster/tradeify-crypto-bot: list_repo_files, read_repo_file, and search_repo_code. Use them when the body map is not enough. Default ref is main.",
+  "Never invent file trees. If a tool returns ok:false, say that instead of guessing. Do not claim you searched GitHub unless you actually called a tool.",
+  "The tools cannot write, merge, open PRs, deploy Railway, place DXtrade orders, or clear a safety halt. Propose those; wait for the owner.",
   "Do not ask for or reveal API keys, passwords, tokens, session credentials, database URLs, Telegram owner IDs, or DXtrade credentials.",
-  "Code, logs, and decisions the owner pastes are live telemetry. Combine them with the BODY MAP and the snapshot pack."
+  "Code, logs, and decisions the owner pastes are live telemetry. Combine them with the BODY MAP, the snapshot pack, and tool results."
 ].join("\n");
 
 function buildInput(job) {
@@ -48,15 +53,16 @@ function buildInput(job) {
   ].join("\n\n");
 }
 
-async function createResponse(job) {
+async function requestOpenAI({ input, previousResponseId, tools }) {
   const body = {
     model,
     instructions,
-    input: buildInput(job),
+    input,
+    tools,
     store: true,
     max_output_tokens: 3000
   };
-  if (job.previousResponseId) body.previous_response_id = job.previousResponseId;
+  if (previousResponseId) body.previous_response_id = previousResponseId;
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -70,20 +76,19 @@ async function createResponse(job) {
 
   if (!response.ok) throw new Error(`OpenAI request failed with HTTP ${response.status}`);
   const payload = await response.json();
-  if (payload.status !== "completed" || typeof payload.id !== "string") {
-    throw new Error("OpenAI response did not complete");
-  }
-  const outputText = Array.isArray(payload.output)
-    ? payload.output
-        .filter((item) => item?.type === "message")
-        .flatMap((item) => Array.isArray(item.content) ? item.content : [])
-        .filter((part) => part?.type === "output_text" && typeof part.text === "string")
-        .map((part) => part.text)
-        .join("\n")
-        .trim()
-    : "";
-  if (!outputText) throw new Error("OpenAI response contained no output text");
-  return { id: payload.id, outputText };
+  if (payload.status === "failed") throw new Error("OpenAI response failed");
+  if (typeof payload.id !== "string") throw new Error("OpenAI response did not complete");
+  return payload;
+}
+
+async function answerJob(job) {
+  return runCompanionToolLoop({
+    request: requestOpenAI,
+    executeTool: (name, args) => github.executeTool(name, args),
+    tools: COMPANION_REPO_TOOLS,
+    initialInput: buildInput(job),
+    previousResponseId: job.previousResponseId
+  });
 }
 
 let stopping = false;
@@ -91,8 +96,9 @@ async function workOnce() {
   const job = await store.claimNext();
   if (!job) return false;
   try {
-    const result = await createResponse(job);
-    await store.complete(job.id, job.ownerId, result.outputText, result.id);
+    const result = await answerJob(job);
+    const outputText = result.outputText || extractOutputText(result);
+    await store.complete(job.id, job.ownerId, outputText, result.id);
   } catch (error) {
     console.error("Development companion job failed:", error.message);
     await store.fail(job.id);
@@ -101,7 +107,7 @@ async function workOnce() {
 }
 
 async function loop() {
-  console.log(`OpenAI development companion started with model ${model}`);
+  console.log(`OpenAI development companion started with model ${model}; repo tools ${githubToken ? "armed" : "token-missing"}`);
   while (!stopping) {
     try {
       const worked = await workOnce();

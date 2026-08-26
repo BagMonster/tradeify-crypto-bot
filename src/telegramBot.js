@@ -49,7 +49,7 @@ const HELP_TEXT = [
   "/help - show this list",
   "",
   "There are no /long or /short commands. /levels and /rings are read-only. The frozen SOL grid trades automatically only when both live execution controls are ON and every safety gate passes.",
-  "Development mode is conversational only in Phase 1. It cannot place trades or change GitHub."
+  "Development mode can inspect BagMonster/tradeify-crypto-bot through /code. It cannot place trades, write GitHub, merge, or deploy."
 ].join("\n");
 
 function devStatusText(status) {
@@ -61,7 +61,7 @@ function devStatusText(status) {
     `Processing: ${status.processing}`,
     `Ready to deliver: ${status.ready}`,
     `Failed awaiting notice: ${status.failed}`,
-    "Phase 1: conversational/read-only"
+    "Phase 2c: read-only GitHub inspection on this repo"
   ].join("\n");
 }
 
