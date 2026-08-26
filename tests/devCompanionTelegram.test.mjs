@@ -56,6 +56,8 @@ function serviceStub() {
     kill: async () => "killed",
     requestResume: async () => ({ message: "resume" }),
     confirmResume: async () => "confirmed",
+    requestReconcile: async () => ({ message: "reconcile pending" }),
+    confirmReconcile: async () => "reconcile applied",
     flatInstructions: () => "flat"
   };
 }
@@ -158,8 +160,36 @@ test("development commands are registered without replacing trading commands", a
     BotClass: FakeBot
   });
   const commands = new Set(bot.commands.map((item) => item.command));
-  for (const command of ["status", "health", "kill", "code", "devstatus", "devreset", "devexit"]) {
+  for (const command of ["status", "health", "kill", "resume", "reconcile", "code", "devstatus", "devreset", "devexit"]) {
     assert.equal(commands.has(command), true, `missing /${command}`);
   }
+  bot.stopDevCompanionDelivery();
+});
+
+test("/reconcile and /confirmreconcile latch operator output and never auto-resume", async () => {
+  const calls = [];
+  const service = {
+    ...serviceStub(),
+    requestReconcile: async () => {
+      calls.push("request");
+      return { message: "To apply, send /confirmreconcile 123456 within 10 minutes." };
+    },
+    confirmReconcile: async (code) => {
+      calls.push(`confirm:${code}`);
+      return "AUDITED VIRTUAL RECONCILE APPLIED\nOperator pause: unchanged";
+    }
+  };
+  const devCompanion = companionStub();
+  const bot = await startTelegramBot({
+    environment: { telegramToken: "test-token", telegramAllowedUserId: 12345 },
+    service,
+    devCompanion,
+    BotClass: FakeBot
+  });
+  await bot.emitMessage(ownerMessage("/code"));
+  await bot.emitMessage(ownerMessage("/reconcile"));
+  await bot.emitMessage(ownerMessage("/confirmreconcile 123456"));
+  assert.deepEqual(calls, ["request", "confirm:123456"]);
+  assert.match(bot.sent.at(-1).text, /Operator pause: unchanged/);
   bot.stopDevCompanionDelivery();
 });

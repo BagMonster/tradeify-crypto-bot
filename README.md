@@ -115,6 +115,7 @@ npm start
 /dxpreflight     /solcanary
 /kill            /resume
 /confirmresume CODE
+/reconcile       /confirmreconcile CODE
 /flat            /whoami
 /help
 ```
@@ -160,6 +161,7 @@ Tradeify inactivity closes accounts. After **25 days** with no confirmed bot tra
 - [D-047 — live trade notifications](docs/decisions/D-047-telegram-live-notifications.md)
 - [D-048 — OpenAI dev companion](docs/decisions/D-048-simplified-openai-development-companion.md)
 - [D-049 — resize + daily risk ladder](docs/decisions/D-049-sol-risk-ladder-and-resize.md)
+- [D-050 — audited virtual reconcile](docs/decisions/D-050-audited-virtual-reconcile.md)
 - [DXtrade API endpoint reference](docs/dxtrade-api-endpoint-reference.md)
 - [Post-Automation Addendum A](docs/post-automation-development-agent-addendum.md)
 
