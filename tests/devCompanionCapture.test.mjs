@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createSolanaTradeifyService } from "../src/solanaTradeifyService.js";
 import { createInitialSolanaState } from "../src/strategies/solanaGrid.js";
+import { captureSolanaLiveSnapshot } from "../src/solanaLiveSnapshotCapture.js";
 
 test("captureLiveSnapshot publishes sanitized telemetry and never includes secrets", async () => {
   const saved = [];
-  const service = createSolanaTradeifyService({
+  const snapshot = await captureSolanaLiveSnapshot({
     database: {
       async getState() {
         return {
@@ -17,13 +17,6 @@ test("captureLiveSnapshot publishes sanitized telemetry and never includes secre
         };
       }
     },
-    account: { startingBalance: 50000, maxLossOffset: 2000, dailyLossLimit: 1500 },
-    strategy: {
-      execution: { autoExecute: false },
-      strategyStatus: "production-live-approved",
-      instruments: { "BTC/USD": { enabled: false }, "SOL/USD": { enabled: true } }
-    },
-    environment: { appMode: "live", autoExecute: false },
     persistence: {
       state: { async load() { return createInitialSolanaState(); } },
       async getLatestRiskLadderState() { return { dayKey: "2026-08-26", brakeEngaged: false, partialCutDone: false, flattenDone: false, haltedForDay: false }; }
@@ -32,10 +25,9 @@ test("captureLiveSnapshot publishes sanitized telemetry and never includes secre
     execution: { isEnabled: () => false },
     getLiveMarketSnapshot: () => ({ price: 94.2, tradeTime: "2026-08-26T16:00:00.000Z", stale: false }),
     getAccountStatus: () => ({ snapshot: { instrumentPosition: null, accountLocked: false }, fresh: true }),
-    saveLiveSnapshot: async (snapshot) => { saved.push(snapshot); }
+    saveLiveSnapshot: async (row) => { saved.push(row); }
   });
 
-  const snapshot = await service.captureLiveSnapshot();
   assert.equal(saved.length, 1);
   assert.equal(snapshot.virtualNetUnits, 0);
   assert.equal(snapshot.brokerNetUnits, 0);
