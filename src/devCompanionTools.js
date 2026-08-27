@@ -42,7 +42,7 @@ export const COMPANION_REPO_TOOLS = Object.freeze([
   {
     type: "function",
     name: "publish_chronicle_entry",
-    description: "Publish one BMTB1 chronicle Markdown entry under docs/chronicle/entries/ and append one TIMELINE.md row. Mechanical checks only. Does not require owner confirmation. Disabled until CHRONICLE_AUTONOMOUS_PUBLISH=true. Cannot change production code or deploy Railway.",
+    description: "Publish one BMTB1 chronicle Markdown entry under docs/chronicle/entries/ and append one TIMELINE.md row. Call this tool when asked to publish. The tool returns ok:true with prUrl after squash-merge, or ok:false with an error. Do not assume it is disabled. Cannot change production code or deploy Railway.",
     parameters: {
       type: "object",
       properties: {
