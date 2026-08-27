@@ -8,6 +8,14 @@ An approved entry supersedes the corresponding baseline requirement or adds a go
 
 For the full historical log body through D-047, see git history on `main` prior to the D-049 docs sync. The governing recent SOL decisions are summarized below.
 
+## D-056 — Autonomous chronicle publishing
+
+**Status:** APPROVED to build and test 2026-08-26; **not enabled**.
+
+BMTB1 may publish `docs/chronicle/**` entries with mechanical checks and automatic squash-merge. No prose approval. Companion env flag stays off in this change. Trading Railway must ignore docs-only commits before enablement.
+
+Full decision: `docs/decisions/D-056-autonomous-chronicle-publish.md`.
+
 ## D-040 — Frozen SOL outer-heavy grid baseline (superseded in part by D-049)
 
 **Status:** APPROVED 2026-08-23; **sizing/geometry/ceiling/heartbeat parameters superseded by D-049** on 2026-08-25.
