@@ -26,3 +26,9 @@ import {
   observeRearm,
   resetAfterProtectiveFlatten
 } from "../strategies/solanaGrid.js";
+
+function positive(name, value) {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n <= 0) throw new TypeError(`${name} must be positive`);
+  return n;
+}
