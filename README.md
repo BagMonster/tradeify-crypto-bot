@@ -6,15 +6,19 @@ Owner-operated automation for a **$50,000 Tradeify Crypto Instant Funding** acco
 
 **Live strategy:** `sol-outer-heavy-v1` under **D-049**  
 **Activation:** owner-approved under **D-045**  
-**Code merge:** PR #37 (2026-08-25)
+**Code merge:** PR #37 (2026-08-25)  
+**Current `main`:** `9438cf73` (D-054)  
+**Continuity:** [6th authoritative project state](docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md)
 
 ---
 
 ## What this thing does
 
-It watches live Binance `SOLUSDT` touches against a moving 200-day average, lays out concentric BUY/SHORT rings away from that average, and takes small, sized positions when price walks into the outer structure. Profits are harvested in tranches back toward the MA. The broker side is DXtrade `SOL/USD` on Tradeify — one net position, virtual lots on our side, reconcile or fail closed.
+It watches live Binance `SOLUSDT` touches against a moving 200-day average, lays out concentric BUY/SHORT rings away from that average, and takes small, sized positions when price walks into the outer structure. Profits are harvested in tranches back toward the MA. The broker side is DXtrade `SOL/USD` on Tradeify — one net position, virtual lots on our side, rematch or reconcile or fail closed.
 
 If the book drifts, the feed dies, or equity starts eating the day, the bot does not “average harder.” It brakes, cuts, or flattens.
+
+Unread DXtrade data is **not** a flat book (D-054). A matched open short is **not** flattened with `/reconcile` (D-050 vs D-053).
 
 ---
 
@@ -22,13 +26,16 @@ If the book drifts, the feed dies, or equity starts eating the day, the bot does
 
 | Piece | Role |
 |---|---|
-| Railway Node worker | One process. One job. |
-| PostgreSQL | Account state, virtual lots, execution ledger, risk-ladder day state, Telegram identities |
+| Railway trading worker (`index.mjs`) | Body. DXtrade orders, slash commands, grid, halt, rematch, reconcile. |
+| Railway **Tradeify Dev Companion** (`dev-companion.mjs`) | Voice. `/code` via Postgres jobs. No DXtrade credentials. |
+| PostgreSQL | Account state, virtual lots, execution ledger, risk-ladder day state, Telegram identities, companion jobs |
 | Telegram | Owner-only cockpit + push alerts |
 | Binance `SOLUSDT` | Strategy price / touches |
 | DXtrade `SOL/USD` | Real money, real fills, real floors |
 
-Independent long/short lots are tracked **virtually**, then netted to the single broker SOL position. Persistent mismatch → safety halt. No mystery inventory.
+Independent long/short lots are tracked **virtually**, then netted to the single broker SOL position. Persistent **finite** mismatch → safety halt. Missing broker data → unread, not halt. No mystery inventory.
+
+Never deploy the companion service in place of the trading worker.
 
 ---
 
@@ -123,6 +130,8 @@ npm start
 
 - **`/levels`** — full 10×10 ladder, USD sizes, estimated qty, armed/occupied
 - **`/rings`** — “where is price right now vs the rings?”
+- **`/reconcile`** — only when DXtrade is actually flat and leftover virtual lots remain
+- **`/rematch`** — only while the exact reconciliation-mismatch halt is latched and nets already agree
 
 Owner-only. Unauthorized users get the digital cold shoulder.
 
@@ -151,6 +160,7 @@ Tradeify inactivity closes accounts. After **25 days** with no confirmed bot tra
 
 ## Governance (the boring binders that keep the fun legal)
 
+- [Current project state](docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md)
 - [Implementation decision log](docs/implementation-decision-log.md)
 - [D-039 — SOL transition](docs/decisions/D-039-solana-transition.md)
 - [D-040 — original outer-heavy freeze](docs/decisions/D-040-sol-outer-heavy-v1.md)
@@ -163,6 +173,10 @@ Tradeify inactivity closes accounts. After **25 days** with no confirmed bot tra
 - [D-048 — OpenAI dev companion](docs/decisions/D-048-simplified-openai-development-companion.md)
 - [D-049 — resize + daily risk ladder](docs/decisions/D-049-sol-risk-ladder-and-resize.md)
 - [D-050 — audited virtual reconcile](docs/decisions/D-050-audited-virtual-reconcile.md)
+- [D-051 — live body snapshot (approved, not on main)](docs/decisions/D-051-live-body-snapshot.md)
+- [D-052 — companion repo inspection](docs/decisions/D-052-repo-inspection-tools.md)
+- [D-053 — matched book rematch](docs/decisions/D-053-matched-book-rematch.md)
+- [D-054 — unread broker fail-closed](docs/decisions/D-054-unread-broker-fail-closed.md)
 - [DXtrade API endpoint reference](docs/dxtrade-api-endpoint-reference.md)
 - [Post-Automation Addendum A](docs/post-automation-development-agent-addendum.md)
 
@@ -173,6 +187,8 @@ Tradeify inactivity closes accounts. After **25 days** with no confirmed bot tra
 1. Facts over feelings. Confirmed fills only.
 2. The ladder is not optional at D-049 size.
 3. Manual trades in the same account will confuse reconciliation — don’t freestyle unless you mean to stop the bot.
-4. If equity and virtual inventory disagree, the bot stops being clever and starts being safe.
+4. If equity and virtual inventory disagree on **finite** nets, the bot stops being clever and starts being safe.
+5. Unread broker data is not a flat book. An open short is not flattened with `/reconcile`.
+6. Companion never places orders, never clears a halt, and is never the trading-worker deploy target.
 
 Built to farm SOL mean-reversion the boring, funded-account-compatible way — with just enough swagger to remember why we’re here.
