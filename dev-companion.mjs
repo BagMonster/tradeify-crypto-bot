@@ -3,6 +3,7 @@ import { createDevCompanionStore } from "./src/devCompanionStore.js";
 import { loadBodyMap } from "./src/devCompanionBodyMap.js";
 import { createGithubInspector } from "./src/devCompanionGithub.js";
 import { createChroniclePublisher } from "./src/devCompanionChroniclePublish.js";
+import { createGeminiRequester } from "./src/devCompanionGemini.js";
 import { COMPANION_REPO_TOOLS, extractOutputText, runCompanionToolLoop } from "./src/devCompanionTools.js";
 
 function requireText(name, value) {
@@ -25,8 +26,12 @@ function describeOpenAIError(payload, fallback) {
 }
 
 const databaseUrl = requireText("DATABASE_URL", process.env.DATABASE_URL);
-const apiKey = requireText("OPENAI_API_KEY", process.env.OPENAI_API_KEY);
-const model = (process.env.OPENAI_MODEL ?? "gpt-5.6").trim();
+const geminiKey = typeof process.env.GEMINI_API_KEY === "string" ? process.env.GEMINI_API_KEY.trim() : "";
+const openaiKey = typeof process.env.OPENAI_API_KEY === "string" ? process.env.OPENAI_API_KEY.trim() : "";
+const useGemini = geminiKey !== "";
+const model = useGemini
+  ? (process.env.GEMINI_MODEL ?? "gemini-3.7-flash").trim()
+  : (process.env.OPENAI_MODEL ?? "gpt-5.6").trim();
 const databaseSsl = parseBoolean(process.env.DATABASE_SSL);
 const githubToken = typeof process.env.GITHUB_TOKEN === "string" ? process.env.GITHUB_TOKEN.trim() : "";
 const bodyMap = loadBodyMap();
@@ -82,7 +87,7 @@ async function requestOpenAI({ input, previousResponseId, tools }) {
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${apiKey}`,
+      "Authorization": `Bearer ${openaiKey}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body),
@@ -107,9 +112,19 @@ async function requestOpenAI({ input, previousResponseId, tools }) {
   return payload;
 }
 
+if (!useGemini && openaiKey === "") throw new Error("GEMINI_API_KEY or OPENAI_API_KEY is required");
+const requestModel = useGemini
+  ? createGeminiRequester({
+    apiKey: geminiKey,
+    model,
+    url: (process.env.GEMINI_INTERACTIONS_URL ?? "https://generativelanguage.googleapis.com/v1beta/interactions").trim(),
+    instructions
+  })
+  : requestOpenAI;
+
 async function answerJob(job) {
   return runCompanionToolLoop({
-    request: requestOpenAI,
+    request: requestModel,
     executeTool: (name, args) => {
       if (name === "publish_chronicle_entry") return chroniclePublisher.publishEntry(args);
       return github.executeTool(name, args);
@@ -136,7 +151,7 @@ async function workOnce() {
 }
 
 async function loop() {
-  console.log(`OpenAI development companion started with model ${model}; repo tools ${githubToken ? "armed" : "token-missing"}; chronicle publish ${chroniclePublishEnabled ? "enabled" : "disabled"}`);
+  console.log(`${useGemini ? "Gemini" : "OpenAI"} development companion started with model ${model}; repo tools ${githubToken ? "armed" : "token-missing"}; chronicle publish ${chroniclePublishEnabled ? "enabled" : "disabled"}`);
   while (!stopping) {
     try {
       const worked = await workOnce();
