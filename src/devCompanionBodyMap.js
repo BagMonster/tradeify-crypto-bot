@@ -4,6 +4,8 @@ import { join } from "node:path";
 const BLOCKED_NAME = /(?:^|\/)(?:\.env(?:\..*)?|credentials|secrets?)(?:\/|$)/i;
 
 const SOURCES = Object.freeze([
+  { path: "docs/chronicle/WHO_I_AM.md", maxChars: 2200 },
+  { path: "docs/chronicle/AUTHORIAL_CHARTER.md", maxChars: 2200 },
   { path: "config/strategy.json", maxChars: 2500 },
   { path: "README.md", maxChars: 3500 },
   { path: "docs/decisions/D-049-sol-risk-ladder-and-resize.md", maxChars: 4000 },
