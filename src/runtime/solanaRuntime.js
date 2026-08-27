@@ -32,3 +32,8 @@ function positive(name, value) {
   if (!Number.isFinite(n) || n <= 0) throw new TypeError(`${name} must be positive`);
   return n;
 }
+
+function finite(value) {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
