@@ -4,7 +4,7 @@ This log records approved and proposed changes or additions to the baseline buil
 
 An approved entry supersedes the corresponding baseline requirement or adds a governing build gate. An entry marked **approved** is not **implemented** until its affected files, settings, or process step have been completed and its required test has passed.
 
-> **Current production strategy note (2026-08-25):** Live SOL grid geometry and sizing are governed by **D-049**, not the original D-040 numeric table. D-040 remains the source of live-touch, virtual-lot, and activation structure except where D-049 explicitly supersedes sizing, ring count, exposure ceiling, and heartbeat compliance.
+> **Current production note (2026-08-26):** Live SOL grid geometry and sizing are governed by **D-049**. Live book handling is governed by **D-050** (flat-broker virtual flatten), **D-053** (matched-book rematch + signed net), and **D-054** (unread broker data is not a flat book). Continuity: `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`. Main tip described there: `9438cf73`.
 
 For the full historical log body through D-047, see git history on `main` prior to the D-049 docs sync. The governing recent SOL decisions are summarized below.
 
@@ -44,7 +44,7 @@ Full decision: `docs/decisions/D-047-telegram-live-notifications.md`.
 
 ## D-048 — Simplified OpenAI development companion
 
-**Status:** APPROVED 2026-08-24; Phase 1 companion path.
+**Status:** APPROVED 2026-08-24; implemented. BMTB1 identity, body-map, five sticky operator latches on `main`.
 
 Full decision: `docs/decisions/D-048-simplified-openai-development-companion.md`.
 
@@ -87,16 +87,38 @@ Full decision: `docs/decisions/D-049-sol-risk-ladder-and-resize.md`.
 
 ## D-050 — Audited two-step virtual reconcile
 
-**Status:** APPROVED by owner 2026-08-26; implemented on `feature/d050-reconcile-command`.
+**Status:** APPROVED by owner 2026-08-26; **implemented and merged to `main` via PR #46** (`b3c0a6d1`).
 
-Owner-only `/reconcile` + `/confirmreconcile CODE` flattens stale virtual lots and clears the reconciliation safety halt when DXtrade is already flat. It does not place orders and does not remove the operator pause.
+Owner-only `/reconcile` + `/confirmreconcile CODE` flattens stale virtual lots and clears the reconciliation safety halt when DXtrade is already flat. It does not place orders and does not remove the operator pause. **Forbidden while an open DXtrade short such as SHORT2 is still on the broker.**
 
 Full decision: `docs/decisions/D-050-audited-virtual-reconcile.md`.
 
+## D-051 — Live body snapshot for BMTB1
+
+**Status:** APPROVED by owner 2026-08-26 as Phase 2a + 2b. **Not on `main`.** Stale PR #47 is based on D-050 and must not be squash-merged. Recreate on `9438cf73` (or a descendant) with `trustedSignedNet()`, rematch/unread diagnosis, trading-worker publisher, and D-052 GitHub tools preserved.
+
+Full decision: `docs/decisions/D-051-live-body-snapshot.md`.
+
 ## D-052 — Phase 2c read-only repository inspection
 
-**Status:** APPROVED by owner 2026-08-26; implemented on `feature/d052-repo-inspection`.
+**Status:** APPROVED by owner 2026-08-26; **implemented and merged to `main` via PR #48** (`40ffcb45`).
 
-BMTB1 `/code` may list, read, and search `BagMonster/tradeify-crypto-bot` through companion-worker GitHub tools. No writes, merge, deploy, or trading tools.
+BMTB1 `/code` may list, read, and search `BagMonster/tradeify-crypto-bot` through companion-worker GitHub tools. No writes, merge, deploy, or trading tools. `GITHUB_TOKEN` lives on the companion worker only.
 
 Full decision: `docs/decisions/D-052-repo-inspection-tools.md`.
+
+## D-053 — Matched book rematch
+
+**Status:** APPROVED by owner 2026-08-26; **implemented and merged to `main` via PR #49** (`af455f6`).
+
+Signed SELL/SHORT net; `/positions` overlay; owner `/rematch` + `/confirmrematch CODE` only while the exact reconciliation-mismatch halt is latched and virtual net already agrees with a fresh broker net. Does not flatten lots and does not place orders.
+
+Full decision: `docs/decisions/D-053-matched-book-rematch.md`.
+
+## D-054 — Unread DXtrade book is not a flat book
+
+**Status:** APPROVED by owner 2026-08-26; **implemented and merged to `main` via PR #50** (`9438cf73`).
+
+`trustedSignedNet()` returns `null` unless the monitor snapshot has a finite signed net and `/positions` did not fail. Unread returns `ACCOUNT_DATA_UNAVAILABLE` and does **not** latch the reconciliation halt. `/status` and `/health` force a monitor poll before printing broker lines.
+
+Full decision: `docs/decisions/D-054-unread-broker-fail-closed.md`.
