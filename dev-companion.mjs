@@ -17,6 +17,13 @@ function parseBoolean(value) {
   throw new Error("DATABASE_SSL must be true or false");
 }
 
+function describeOpenAIError(payload, fallback) {
+  const err = payload && typeof payload === "object" ? payload.error : null;
+  const parts = [err?.type, err?.code, err?.message]
+    .filter((value) => typeof value === "string" && value.trim() !== "");
+  return parts.length > 0 ? parts.join(" | ") : fallback;
+}
+
 const databaseUrl = requireText("DATABASE_URL", process.env.DATABASE_URL);
 const apiKey = requireText("OPENAI_API_KEY", process.env.OPENAI_API_KEY);
 const model = (process.env.OPENAI_MODEL ?? "gpt-5.6").trim();
@@ -82,9 +89,20 @@ async function requestOpenAI({ input, previousResponseId, tools }) {
     signal: AbortSignal.timeout(120000)
   });
 
-  if (!response.ok) throw new Error(`OpenAI request failed with HTTP ${response.status}`);
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const errBody = await response.json();
+      detail = `${detail}: ${describeOpenAIError(errBody, "no error detail")}`;
+    } catch {
+      detail = `${detail}: unreadable error body`;
+    }
+    throw new Error(`OpenAI request failed with ${detail}`);
+  }
   const payload = await response.json();
-  if (payload.status === "failed") throw new Error("OpenAI response failed");
+  if (payload.status === "failed") {
+    throw new Error(`OpenAI response failed: ${describeOpenAIError(payload, "no error detail")}`);
+  }
   if (typeof payload.id !== "string") throw new Error("OpenAI response did not complete");
   return payload;
 }
