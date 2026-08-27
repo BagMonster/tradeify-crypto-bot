@@ -1,16 +1,33 @@
 const DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const DEFAULT_MODEL = "gemini-3.7-flash";
+const GEMINI_INTERACTION_ID = /^(int_|inter_)/i;
 
 function describeGeminiError(payload, fallback) {
   const err = payload && typeof payload === "object" ? payload.error : null;
-  const parts = [err?.status, err?.code, err?.message, err?.type]
+  const parts = [err?.status, err?.code, err?.message, err?.type];
+  const violations = Array.isArray(err?.details)
+    ? err.details.flatMap((detail) => Array.isArray(detail.fieldViolations) ? detail.fieldViolations : [])
+      .map((item) => [item.field, item.description].filter(Boolean).join(": "))
+    : [];
+  const all = [...parts, ...violations]
     .filter((value) => value !== undefined && value !== null && String(value).trim() !== "");
-  return parts.length > 0 ? parts.map((value) => String(value)).join(" | ") : fallback;
+  return all.length > 0 ? all.map((value) => String(value)).join(" | ") : fallback;
 }
 
-function isExpiredInteraction(status, payload) {
+function isRetryablePreviousId(status, payload) {
   const text = `${status} ${describeGeminiError(payload, "")}`;
-  return /not found|INVALID_ARGUMENT|previous_interaction|expired|unknown interaction/i.test(text);
+  return /not found|INVALID_ARGUMENT|invalid argument|previous_interaction|expired|unknown interaction/i.test(text);
+}
+
+function sanitizeSchema(value) {
+  if (Array.isArray(value)) return value.map(sanitizeSchema);
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "additionalProperties" || key === "additional_properties") continue;
+    out[key] = sanitizeSchema(child);
+  }
+  return out;
 }
 
 function mapTools(tools) {
@@ -19,7 +36,7 @@ function mapTools(tools) {
     type: "function",
     name: tool.name,
     description: tool.description,
-    parameters: tool.parameters ?? { type: "object", properties: {} }
+    parameters: sanitizeSchema(tool.parameters ?? { type: "object", properties: {} })
   }));
 }
 
@@ -128,18 +145,20 @@ export function createGeminiRequester({
   }
 
   return async function requestGemini({ input, previousResponseId, tools }) {
+    const usablePrevious = typeof previousResponseId === "string" && GEMINI_INTERACTION_ID.test(previousResponseId)
+      ? previousResponseId
+      : null;
     const body = {
       model,
       system_instruction: instructions,
       input: mapInput(input, callNames),
       tools: mapTools(tools),
-      store: true,
-      generation_config: { max_output_tokens: 3000 }
+      store: true
     };
-    if (previousResponseId) body.previous_interaction_id = previousResponseId;
+    if (usablePrevious) body.previous_interaction_id = usablePrevious;
 
     let { response, payload } = await post(body);
-    if (!response.ok && previousResponseId && isExpiredInteraction(response.status, payload)) {
+    if (!response.ok && body.previous_interaction_id && isRetryablePreviousId(response.status, payload)) {
       delete body.previous_interaction_id;
       ({ response, payload } = await post(body));
     }
