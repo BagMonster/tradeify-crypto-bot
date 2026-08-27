@@ -3,7 +3,7 @@ import { createDevCompanionStore } from "./src/devCompanionStore.js";
 import { loadBodyMap } from "./src/devCompanionBodyMap.js";
 import { createGithubInspector } from "./src/devCompanionGithub.js";
 import { createChroniclePublisher } from "./src/devCompanionChroniclePublish.js";
-import { createGeminiRequester } from "./src/devCompanionGemini.js";
+import { createGeminiRequester, GeminiCapacityError } from "./src/devCompanionGemini.js";
 import { COMPANION_REPO_TOOLS, extractOutputText, runCompanionToolLoop } from "./src/devCompanionTools.js";
 
 function requireText(name, value) {
@@ -35,9 +35,9 @@ const geminiKey = envText("GEMINI_FREE_API_KEY") || envText("GEMINI_API_KEY");
 const geminiPaidKey = envText("GEMINI_PAID_API_KEY");
 const openaiKey = envText("OPENAI_API_KEY");
 const useGemini = geminiKey !== "";
-const model = useGemini
-  ? (process.env.GEMINI_MODEL ?? "gemini-3.7-flash").trim()
-  : (process.env.OPENAI_MODEL ?? "gpt-5.6").trim();
+const geminiModel = (process.env.GEMINI_MODEL ?? "gemini-3.7-flash").trim();
+const openaiModel = (process.env.OPENAI_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
+const model = useGemini ? geminiModel : openaiModel;
 const databaseSsl = parseBoolean(process.env.DATABASE_SSL);
 const githubToken = envText("GITHUB_TOKEN");
 const bodyMap = loadBodyMap();
@@ -83,16 +83,28 @@ function buildInput(job) {
   ].join("\n\n");
 }
 
-async function requestOpenAI({ input, previousResponseId, tools }) {
+function flattenInput(input) {
+  if (typeof input === "string") return input;
+  if (!Array.isArray(input)) return String(input ?? "");
+  return input.map((item) => {
+    if (typeof item === "string") return item;
+    if (item?.type === "function_call_output") return `Tool ${item.call_id}: ${item.output}`;
+    return JSON.stringify(item);
+  }).join("\n");
+}
+
+async function requestOpenAI({ input, previousResponseId, tools, maxOutputTokens = 1500 }) {
   const body = {
-    model,
+    model: openaiModel,
     instructions,
     input,
     tools,
     store: true,
-    max_output_tokens: 3000
+    max_output_tokens: maxOutputTokens
   };
-  if (previousResponseId) body.previous_response_id = previousResponseId;
+  if (previousResponseId && !/^(int_|inter_)/i.test(previousResponseId)) {
+    body.previous_response_id = previousResponseId;
+  }
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -122,16 +134,33 @@ async function requestOpenAI({ input, previousResponseId, tools }) {
   return payload;
 }
 
-if (!useGemini && openaiKey === "") throw new Error("GEMINI_API_KEY or OPENAI_API_KEY is required");
-const requestModel = useGemini
+const geminiRequest = useGemini
   ? createGeminiRequester({
     apiKey: geminiKey,
     paidApiKey: geminiPaidKey,
-    model,
+    model: geminiModel,
     url: (process.env.GEMINI_INTERACTIONS_URL ?? "https://generativelanguage.googleapis.com/v1beta/interactions").trim(),
     instructions
   })
-  : requestOpenAI;
+  : null;
+
+if (!useGemini && openaiKey === "") throw new Error("GEMINI_API_KEY or OPENAI_API_KEY is required");
+
+async function requestModel(args) {
+  if (!useGemini) return requestOpenAI(args);
+  try {
+    return await geminiRequest(args);
+  } catch (error) {
+    if (!(error instanceof GeminiCapacityError) || !openaiKey) throw error;
+    console.warn("Gemini capacity exhausted; single OpenAI fallback");
+    return requestOpenAI({
+      input: flattenInput(args.input),
+      tools: args.tools,
+      previousResponseId: null,
+      maxOutputTokens: 1500
+    });
+  }
+}
 
 async function answerJob(job) {
   return runCompanionToolLoop({
@@ -163,7 +192,8 @@ async function workOnce() {
 
 async function loop() {
   const paidFallback = useGemini && geminiPaidKey && geminiPaidKey !== geminiKey ? "armed" : "off";
-  console.log(`${useGemini ? "Gemini" : "OpenAI"} development companion started with model ${model}; paid fallback ${paidFallback}; repo tools ${githubToken ? "armed" : "token-missing"}; chronicle publish ${chroniclePublishEnabled ? "enabled" : "disabled"}`);
+  const openaiFallback = useGemini && openaiKey ? "armed" : "off";
+  console.log(`${useGemini ? "Gemini" : "OpenAI"} development companion started with model ${model}; paid fallback ${paidFallback}; openai fallback ${openaiFallback}; repo tools ${githubToken ? "armed" : "token-missing"}; chronicle publish ${chroniclePublishEnabled ? "enabled" : "disabled"}`);
   while (!stopping) {
     try {
       const worked = await workOnce();
