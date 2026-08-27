@@ -14,6 +14,11 @@ function describeGeminiError(payload, fallback) {
   return all.length > 0 ? all.map((value) => String(value)).join(" | ") : fallback;
 }
 
+function isCapacityError(status, payload) {
+  const text = `${status} ${describeGeminiError(payload, "")}`;
+  return status === 429 || status === 500 || status === 503 || /high demand|resource.?exhausted|unavailable|overloaded/i.test(text);
+}
+
 function isRetryablePreviousId(status, payload) {
   const text = `${status} ${describeGeminiError(payload, "")}`;
   return /not found|INVALID_ARGUMENT|invalid argument|previous_interaction|expired|unknown interaction/i.test(text);
@@ -121,20 +126,25 @@ function extractOutputText(payload) {
 
 export function createGeminiRequester({
   apiKey,
+  paidApiKey = "",
   model = DEFAULT_MODEL,
   url = DEFAULT_URL,
   instructions,
   fetchImpl = fetch
 }) {
   if (typeof apiKey !== "string" || apiKey.trim() === "") throw new TypeError("GEMINI_API_KEY is required");
+  const primaryKey = apiKey.trim();
+  const fallbackKey = typeof paidApiKey === "string" && paidApiKey.trim() && paidApiKey.trim() !== primaryKey
+    ? paidApiKey.trim()
+    : "";
   const callNames = new Map();
 
-  async function post(body) {
+  async function post(body, key) {
     const response = await fetchImpl(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-goog-api-key": apiKey
+        "x-goog-api-key": key
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(120000)
@@ -157,10 +167,14 @@ export function createGeminiRequester({
     };
     if (usablePrevious) body.previous_interaction_id = usablePrevious;
 
-    let { response, payload } = await post(body);
+    let { response, payload } = await post(body, primaryKey);
     if (!response.ok && body.previous_interaction_id && isRetryablePreviousId(response.status, payload)) {
       delete body.previous_interaction_id;
-      ({ response, payload } = await post(body));
+      ({ response, payload } = await post(body, primaryKey));
+    }
+    if (!response.ok && fallbackKey && isCapacityError(response.status, payload)) {
+      console.warn(`Primary Gemini key hit HTTP ${response.status}; retrying paid key`);
+      ({ response, payload } = await post(body, fallbackKey));
     }
 
     if (!response.ok) {
