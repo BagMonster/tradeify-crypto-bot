@@ -2,6 +2,7 @@ import "dotenv/config";
 import { createDevCompanionStore } from "./src/devCompanionStore.js";
 import { loadBodyMap } from "./src/devCompanionBodyMap.js";
 import { createGithubInspector } from "./src/devCompanionGithub.js";
+import { createChroniclePublisher } from "./src/devCompanionChroniclePublish.js";
 import { COMPANION_REPO_TOOLS, extractOutputText, runCompanionToolLoop } from "./src/devCompanionTools.js";
 
 function requireText(name, value) {
@@ -22,10 +23,16 @@ const model = (process.env.OPENAI_MODEL ?? "gpt-5.6").trim();
 const databaseSsl = parseBoolean(process.env.DATABASE_SSL);
 const githubToken = typeof process.env.GITHUB_TOKEN === "string" ? process.env.GITHUB_TOKEN.trim() : "";
 const bodyMap = loadBodyMap();
+const chroniclePublishEnabled = process.env.CHRONICLE_AUTONOMOUS_PUBLISH === "true";
 const github = createGithubInspector({ token: githubToken });
 
 const store = createDevCompanionStore({ databaseUrl, databaseSsl });
 await store.init();
+const chroniclePublisher = createChroniclePublisher({
+  token: githubToken,
+  store,
+  enabled: chroniclePublishEnabled
+});
 
 const instructions = [
   "You are BMTB1 (Bag Monster Tradeify Bot). Telegram handle: @BagMonsterTradeifyBot.",
@@ -38,8 +45,9 @@ const instructions = [
   "If a needed slot is listed under Missing, ask for that exact Telegram command. Example: 'I have /levels but not /status — run /status so I can check halt and broker net.' Never say 'paste the output' when a slash command would fill the slot.",
   "If any present snapshot shows pause, safety halt, or virtual lots that do not match the broker position, lead with that. Then answer the question. Compare /status against /levels when both exist.",
   "You have three read-only GitHub tools locked to BagMonster/tradeify-crypto-bot: list_repo_files, read_repo_file, and search_repo_code. Use them when the body map is not enough. Default ref is main.",
+  "You also have publish_chronicle_entry for your own first-person chronicle. It writes only docs/chronicle/**, opens a PR, and squash-merges after mechanical checks. No owner confirmation of prose. If the tool returns not enabled or paused, say that. Never use it for production code.",
   "Never invent file trees. If a tool returns ok:false, say that instead of guessing. Do not claim you searched GitHub unless you actually called a tool.",
-  "The tools cannot write, merge, open PRs, deploy Railway, place DXtrade orders, or clear a safety halt. Propose those; wait for the owner.",
+  "The tools cannot deploy Railway, place DXtrade orders, or clear a safety halt.",
   "Do not ask for or reveal API keys, passwords, tokens, session credentials, database URLs, Telegram owner IDs, or DXtrade credentials.",
   "Code, logs, and decisions the owner pastes are live telemetry. Combine them with the BODY MAP, the snapshot pack, and tool results."
 ].join("\n");
@@ -84,7 +92,10 @@ async function requestOpenAI({ input, previousResponseId, tools }) {
 async function answerJob(job) {
   return runCompanionToolLoop({
     request: requestOpenAI,
-    executeTool: (name, args) => github.executeTool(name, args),
+    executeTool: (name, args) => {
+      if (name === "publish_chronicle_entry") return chroniclePublisher.publishEntry(args);
+      return github.executeTool(name, args);
+    },
     tools: COMPANION_REPO_TOOLS,
     initialInput: buildInput(job),
     previousResponseId: job.previousResponseId
@@ -107,7 +118,7 @@ async function workOnce() {
 }
 
 async function loop() {
-  console.log(`OpenAI development companion started with model ${model}; repo tools ${githubToken ? "armed" : "token-missing"}`);
+  console.log(`OpenAI development companion started with model ${model}; repo tools ${githubToken ? "armed" : "token-missing"}; chronicle publish ${chroniclePublishEnabled ? "enabled" : "disabled"}`);
   while (!stopping) {
     try {
       const worked = await workOnce();
