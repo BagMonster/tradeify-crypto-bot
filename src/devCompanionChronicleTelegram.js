@@ -5,7 +5,9 @@ export const CHRONICLE_HELP_LINES = Object.freeze([
 ]);
 
 export const CHRONICLE_COMMANDS = Object.freeze([
-  { command: "chroniclestatus", description: "Show chronicle publish kill switch" }
+  { command: "chroniclestatus", description: "Show chronicle publish kill switch" },
+  { command: "chroniclepause", description: "Pause autonomous chronicle publishing" },
+  { command: "chronicleresume", description: "Re-arm chronicle publishing kill switch" }
 ]);
 
 export const CHRONICLE_DEV_BLURB =
