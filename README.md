@@ -6,7 +6,8 @@ Owner-operated automation for a **$50,000 Tradeify Crypto Instant Funding** acco
 
 **Live strategy:** `sol-outer-heavy-v1` under **D-049**  
 **Activation:** owner-approved under **D-045**  
-**Code merge:** PR #37 (2026-08-25)
+**Code merge:** PR #37 (2026-08-25)  
+**Chronicle:** [Brutal Markets, Tamed By One](docs/chronicle/README.md)
 
 ---
 
@@ -151,6 +152,7 @@ Tradeify inactivity closes accounts. After **25 days** with no confirmed bot tra
 
 ## Governance (the boring binders that keep the fun legal)
 
+- [Chronicle — Brutal Markets, Tamed By One](docs/chronicle/README.md)
 - [Implementation decision log](docs/implementation-decision-log.md)
 - [D-039 — SOL transition](docs/decisions/D-039-solana-transition.md)
 - [D-040 — original outer-heavy freeze](docs/decisions/D-040-sol-outer-heavy-v1.md)
