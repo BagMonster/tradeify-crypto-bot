@@ -17,7 +17,7 @@ import { createSolanaHeartbeat } from "./src/runtime/solanaHeartbeat.js";
 import { createLiveTelegramNotifications } from "./src/notifications/liveTelegramNotifications.js";
 import { accountDayKey } from "./src/risk/dailyRiskLadder.js";
 import { GRID_DEFINITION } from "./src/strategies/solanaGrid.js";
-import { createSolanaTradeifyService } from "./src/solanaTradeifyService.js";
+import { createSolanaOwnerService } from "./src/solanaOwnerService.js";
 import { startTelegramBot } from "./src/telegramBot.js";
 
 const configuration = await loadConfiguration();
@@ -183,9 +183,13 @@ const solanaRuntime = createSolanaRuntime({
       safetyHalt: botState.safety_halt,
       accountLocked: snapshot?.accountLocked ?? true,
       feedHealthy: liveFeedState.connected === true && liveFeedState.stale === false,
-      accountDataFresh: accountStatus.fresh === true,
+      accountDataFresh: accountStatus.healthy === true,
       nettingConfirmed: true,
-      brokerNetUnits: snapshot?.instrumentPosition?.quantity ?? 0
+      brokerNetUnits: snapshot?.positionsReadFailed === true
+        ? null
+        : Number.isFinite(snapshot?.signedNetUnits)
+          ? snapshot.signedNetUnits
+          : snapshot?.instrumentPosition?.quantity ?? 0
     });
   }
 });
@@ -318,7 +322,7 @@ const binanceFeed = createBinanceLiveFeed({
   }
 });
 
-const service = createSolanaTradeifyService({
+const service = createSolanaOwnerService({
   database,
   account,
   strategy,
@@ -328,6 +332,10 @@ const service = createSolanaTradeifyService({
   maProvider,
   execution: solanaExecution,
   canary: liveCanary,
+  accountMonitor,
+  onBooksRematched: async () => {
+    reconciliationHaltLatched = false;
+  },
   getLiveMarketSnapshot: () => Object.freeze({
     price: lastLiveTrade?.price ?? null,
     tradeTime: lastLiveTrade?.tradeTime ?? null,

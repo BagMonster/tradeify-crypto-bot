@@ -1,0 +1,308 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { createSolanaOwnerService } from "../src/solanaOwnerService.js";
+import { RECONCILIATION_HALT_REASON } from "../src/state/solanaRematch.js";
+import { createInitialSolanaState, expectedNetUnits, normalizeSolanaState } from "../src/strategies/solanaGrid.js";
+
+function short2State() {
+  const initial = createInitialSolanaState();
+  return normalizeSolanaState({
+    ...initial,
+    version: 3,
+    rings: initial.rings.map((ring) => (
+      ring.tag === "SELL2"
+        ? {
+          ...ring,
+          armed: false,
+          lots: [{
+            id: "SELL2-V2",
+            side: "SELL",
+            ringTag: "SELL2",
+            entryPrice: 95.91,
+            originalUnits: 0.44,
+            remainingUnits: 0.44,
+            done: 0,
+            openedAt: "2026-08-26T15:59:10.937Z"
+          }]
+        }
+        : ring
+    )),
+    lastFillAt: "2026-08-26T15:59:10.937Z",
+    lastFillSide: "SELL",
+    lastFillPrice: 95.91
+  });
+}
+
+function makeService({
+  brokerPositions,
+  hasOpenPosition = false,
+  safetyHalt = true,
+  haltReason = RECONCILIATION_HALT_REASON,
+  positionsError = null,
+  onPositionsRead = null,
+  accountMonitor = {
+    getSnapshot() {
+      return {
+        snapshot: {
+          signedNetUnits: -0.44,
+          positionSource: "open-positions",
+          positionsReadFailed: false,
+          fetchedAtMs: Date.now()
+        },
+        healthy: true,
+        fresh: true,
+        ageMs: 120,
+        error: null
+      };
+    }
+  }
+} = {}) {
+  let gridState = short2State();
+  const events = [];
+  let challenge = { hash: null, salt: null, expiresAt: null };
+  let halt = { safetyHalt, reason: haltReason };
+  let operatorKilledState = true;
+  let rematchHooks = 0;
+  const database = {
+    async getState() {
+      return {
+        has_open_position: hasOpenPosition,
+        operator_killed: operatorKilledState,
+        safety_halt: halt.safetyHalt,
+        halt_reason: halt.reason,
+        resume_code_hash: challenge.hash,
+        resume_code_salt: challenge.salt,
+        resume_code_expires_at: challenge.expiresAt,
+        balance: 50000,
+        equity: 50000,
+        high_water: 50000,
+        prev_day_close: 50000,
+        payout_taken: false,
+        feed_stale: false
+      };
+    },
+    async setResumeChallenge(hash, salt, expiresAt) {
+      challenge = { hash, salt, expiresAt };
+    },
+    async clearResumeChallenge() {
+      challenge = { hash: null, salt: null, expiresAt: null };
+    },
+    async clearSafetyHalt() {
+      halt = { safetyHalt: false, reason: null };
+      return true;
+    },
+    async clearSafetyHaltIfReason(reason) {
+      if (halt.safetyHalt === true && halt.reason === reason) {
+        halt = { safetyHalt: false, reason: null };
+        return true;
+      }
+      return false;
+    },
+    async setOperatorKilled(killed) {
+      operatorKilledState = killed === true;
+    },
+    async addEvent(level, type, payload) {
+      events.push({ level, type, payload });
+    }
+  };
+  const persistence = {
+    state: {
+      async load() { return gridState; },
+      async save() { throw new Error("rematch must not rewrite virtual lots"); }
+    }
+  };
+  const service = createSolanaOwnerService({
+    database,
+    account: { startingBalance: 50000, maxLossOffset: 3000, dailyLossLimit: 1500 },
+    strategy: {
+      execution: { autoExecute: true },
+      strategyStatus: "production-live-approved",
+      instruments: { "BTC/USD": { enabled: false }, "SOL/USD": { enabled: true } }
+    },
+    environment: { appMode: "live", autoExecute: true },
+    persistence,
+    maProvider: { getCurrent: async () => ({ ma: 81.3384, completedThrough: "2026-08-26" }) },
+    execution: { isEnabled: () => true },
+    dxtradeClient: {
+      async login() {},
+      async getOpenPositions() {
+        if (typeof onPositionsRead === "function") onPositionsRead();
+        if (positionsError) throw new Error(positionsError);
+        return brokerPositions;
+      }
+    },
+    accountMonitor,
+    onBooksRematched: async () => { rematchHooks += 1; }
+  });
+  return {
+    service,
+    events,
+    getChallenge: () => challenge,
+    getHalt: () => halt,
+    getState: () => gridState,
+    isPaused: () => operatorKilledState,
+    rematchHooks: () => rematchHooks
+  };
+}
+
+test("requestRematch refuses when /positions fails even if metrics look flat", async () => {
+  const { service, events, getState } = makeService({
+    brokerPositions: { positions: [] },
+    positionsError: "positions endpoint down"
+  });
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /could not read a fresh DXtrade SOL position/);
+  assert.equal(expectedNetUnits(getState()), -0.44);
+  assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
+});
+
+test("requestRematch refuses when there is no safety halt", async () => {
+  const { service, events, getHalt, isPaused } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] },
+    safetyHalt: false,
+    haltReason: null
+  });
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /NO RECONCILIATION HALT/);
+  assert.equal(getHalt().safetyHalt, false);
+  assert.equal(isPaused(), true);
+  assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
+});
+
+test("requestRematch refuses an unrelated halt that only contains the word reconciliation", async () => {
+  const { service, events, getHalt, isPaused } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] },
+    haltReason: "Protective flatten needs reconciliation-style owner review"
+  });
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /NOT A RECONCILIATION MISMATCH/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(isPaused(), true);
+  assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
+});
+
+test("requestRematch refuses a D-049 or runtime halt even when nets match", async () => {
+  const { service, events, getHalt, isPaused } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] },
+    haltReason: "SOL production runtime error; owner review required"
+  });
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /NOT A RECONCILIATION MISMATCH/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(isPaused(), true);
+  assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
+});
+
+test("requestRematch refuses when a fresh DXtrade read is still flat", async () => {
+  const { service, events, getState } = makeService({ brokerPositions: { positions: [] } });
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /BOOKS STILL DISAGREE/);
+  assert.match(result.message, /Fresh DXtrade net: 0.00/);
+  assert.equal(expectedNetUnits(getState()), -0.44);
+  assert.equal(events.some((event) => event.type === "SOL_REMATCH_REQUESTED"), false);
+});
+
+test("requestRematch issues a rematch-prefixed code when the 0.44 short matches", async () => {
+  const { service, events, getState } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL", markPrice: 95.91 }] }
+  });
+  const result = await service.requestRematch();
+  assert.match(result.code, /^\d{6}$/);
+  assert.match(result.message, new RegExp(`/confirmrematch ${result.code}`));
+  assert.match(result.message, /will NOT place a DXtrade order/);
+  assert.equal(expectedNetUnits(getState()), -0.44);
+  assert.equal(events.at(-1).type, "SOL_REMATCH_REQUESTED");
+});
+
+test("confirmRematch rejects a reconcile-style hash", async () => {
+  const { service, getChallenge, getHalt, isPaused } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] }
+  });
+  const requested = await service.requestRematch();
+  const reconcileHash = createHash("sha256").update(`${getChallenge().salt}:reconcile:${requested.code}`).digest("hex");
+  assert.notEqual(getChallenge().hash, reconcileHash);
+  const wrong = await service.confirmRematch("000000");
+  assert.match(wrong, /incorrect/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(isPaused(), true);
+});
+
+test("confirmRematch refuses after a pending code if the safety halt is already clear", async () => {
+  const { service, getHalt, isPaused, rematchHooks } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] }
+  });
+  const requested = await service.requestRematch();
+  getHalt().safetyHalt = false;
+  getHalt().reason = null;
+  const message = await service.confirmRematch(requested.code);
+  assert.match(message, /NO RECONCILIATION HALT/);
+  assert.equal(isPaused(), true);
+  assert.equal(rematchHooks(), 0);
+});
+
+test("confirmRematch refuses after a pending code if the halt is no longer the exact reconciliation halt", async () => {
+  const { service, getHalt, isPaused, rematchHooks } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] }
+  });
+  const requested = await service.requestRematch();
+  getHalt().reason = "Protective flatten needs reconciliation-style owner review";
+  const message = await service.confirmRematch(requested.code);
+  assert.match(message, /NOT A RECONCILIATION MISMATCH/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(isPaused(), true);
+  assert.equal(rematchHooks(), 0);
+});
+
+test("statusText reports broker net, source, and freshness from the account monitor", async () => {
+  const { service } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] }
+  });
+  const text = await service.statusText();
+  assert.match(text, /DXtrade broker net SOL: -0.44/);
+  assert.match(text, /DXtrade net source: open-positions/);
+  assert.match(text, /DXtrade account data fresh: YES/);
+});
+
+test("confirmRematch does not clear a different halt that arrives after the broker read starts", async () => {
+  const race = { armed: false };
+  const { service, getHalt, isPaused, rematchHooks } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] },
+    onPositionsRead: () => {
+      if (race.armed) {
+        getHalt().reason = "SOL production runtime error; owner review required";
+      }
+    }
+  });
+  const requested = await service.requestRematch();
+  race.armed = true;
+  const message = await service.confirmRematch(requested.code);
+  assert.match(message, /NO LONGER LATCHED/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(getHalt().reason, "SOL production runtime error; owner review required");
+  assert.equal(isPaused(), true);
+  assert.equal(rematchHooks(), 0);
+});
+
+test("confirmRematch keeps the SHORT2 lot, clears the halt, and lifts the pause", async () => {
+  const { service, events, getHalt, getState, isPaused, rematchHooks } = makeService({
+    brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] }
+  });
+  const requested = await service.requestRematch();
+  const message = await service.confirmRematch(requested.code);
+  assert.match(message, /AUDITED BOOK REMATCH APPLIED/);
+  assert.match(message, /Virtual lots: preserved/);
+  assert.match(message, /Reconciliation safety halt: cleared/);
+  assert.match(message, /Operator pause: lifted/);
+  assert.equal(expectedNetUnits(getState()), -0.44);
+  assert.equal(getState().rings.find((ring) => ring.tag === "SELL2").lots.length, 1);
+  assert.equal(getHalt().safetyHalt, false);
+  assert.equal(isPaused(), false);
+  assert.equal(rematchHooks(), 1);
+  assert.equal(events.some((event) => event.type === "SOL_BOOKS_REMATCHED"), true);
+});

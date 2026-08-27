@@ -1,3 +1,5 @@
+import { applyOpenPositionsOverlay, signedPositionQuantity } from "./dxtradeSignedNet.js";
+
 const DEFAULT_INSTRUMENT = "BTC/USD";
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_FRESH_AFTER_MS = 3_000;
@@ -49,7 +51,7 @@ function normalizePositions(metric) {
     return Object.freeze({
       symbol: position.symbol.trim(),
       quantity: finite(`DXtrade position ${index} quantity`, position.quantity),
-      markPrice: finite(`DXtrade position ${index} markPrice`, position.markPrice),
+      markPrice: finite(`DXtrade position metric ${index} markPrice`, position.markPrice),
       openPl: finite(`DXtrade position ${index} openPl`, position.openPl ?? 0),
       dayClosedPl: finite(`DXtrade position ${index} dayClosedPl`, position.dayClosedPl ?? 0),
       avgOpenPrice: finite(`DXtrade position ${index} avgOpenPrice`, position.avgOpenPrice ?? 0)
@@ -95,6 +97,7 @@ export function normalizeDxtradeAccountMetrics(payload, {
     ? Math.abs(instrumentPosition.quantity * instrumentPosition.markPrice)
     : 0;
   if (!Number.isFinite(currentNotional)) throw new Error(`DXtrade ${activeInstrument} notional is invalid`);
+  const signedNetUnits = instrumentPosition ? signedPositionQuantity(instrumentPosition) : 0;
 
   return Object.freeze({
     account: metric.account == null ? null : String(metric.account),
@@ -110,6 +113,8 @@ export function normalizeDxtradeAccountMetrics(payload, {
     instrumentPosition,
     btcPosition: activeInstrument === "BTC/USD" ? instrumentPosition : null,
     currentNotional,
+    signedNetUnits,
+    positionSource: "metrics",
     invariantError,
     accountLocked: invariantError !== null,
     fetchedAt: new Date(fetched).toISOString(),
@@ -130,6 +135,9 @@ export function createDxtradeAccountMonitor({
 }) {
   if (typeof client?.login !== "function" || typeof client?.getAccountMetrics !== "function") {
     throw new TypeError("DXtrade account monitor requires login and getAccountMetrics methods");
+  }
+  if (typeof client?.getOpenPositions !== "function") {
+    throw new TypeError("DXtrade account monitor requires getOpenPositions");
   }
   const activeInstrument = instrumentSymbol(instrument);
   const getPeak = requireFunction("getPersistedPeakClosedBalance", getPersistedPeakClosedBalance);
@@ -155,16 +163,30 @@ export function createDxtradeAccountMonitor({
     busy = true;
     try {
       await client.login();
-      const [payload, persistedPeak] = await Promise.all([
+      const [payload, persistedPeak, positionsResult] = await Promise.all([
         client.getAccountMetrics({ includePositions: true }),
-        getPeak()
+        getPeak(),
+        client.getOpenPositions().then((payload) => Object.freeze({ ok: true, payload })).catch((error) => Object.freeze({
+          ok: false,
+          error: error instanceof Error ? error.message : "open-positions read failed"
+        }))
       ]);
-      const snapshot = normalizeDxtradeAccountMetrics(payload, {
+      let snapshot = normalizeDxtradeAccountMetrics(payload, {
         startingBalance,
         persistedPeakClosedBalance: persistedPeak,
         instrument: activeInstrument,
         fetchedAtMs: clock()
       });
+      if (positionsResult.ok) {
+        snapshot = applyOpenPositionsOverlay(snapshot, positionsResult.payload, activeInstrument);
+      } else {
+        snapshot = Object.freeze({
+          ...snapshot,
+          positionsReadFailed: true,
+          overlayError: positionsResult.error,
+          signedNetUnits: null
+        });
+      }
       latest = snapshot;
       lastError = null;
       await publish(snapshot);
@@ -204,7 +226,7 @@ export function createDxtradeAccountMonitor({
     const ageMs = latest ? Math.max(0, clock() - latest.fetchedAtMs) : Infinity;
     return Object.freeze({
       snapshot: latest,
-      healthy: latest !== null && lastError === null && ageMs <= freshAfterMs && latest.invariantError === null,
+      healthy: latest !== null && lastError === null && ageMs <= freshAfterMs && latest.invariantError === null && latest.positionsReadFailed !== true,
       fresh: latest !== null && ageMs <= freshAfterMs,
       ageMs,
       error: lastError ? "DXtrade account monitor error" : null

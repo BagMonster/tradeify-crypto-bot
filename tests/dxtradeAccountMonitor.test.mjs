@@ -71,6 +71,9 @@ test("monitor uses one metrics request with positions and reports freshness", as
         metricsCalls += 1;
         assert.deepEqual(options, { includePositions: true });
         return payload();
+      },
+      async getOpenPositions() {
+        return { positions: payload().metrics[0].positions };
       }
     },
     startingBalance: 50_000,
@@ -96,7 +99,8 @@ test("monitor errors fail freshness/health closed without exposing raw error out
   const monitor = createDxtradeAccountMonitor({
     client: {
       async login() { throw new Error("secret transport detail"); },
-      async getAccountMetrics() { throw new Error("not reached"); }
+      async getAccountMetrics() { throw new Error("not reached"); },
+      async getOpenPositions() { throw new Error("not reached"); }
     },
     startingBalance: 50_000,
     getPersistedPeakClosedBalance: async () => 50_000,
@@ -110,4 +114,57 @@ test("monitor errors fail freshness/health closed without exposing raw error out
   assert.equal(status.healthy, false);
   assert.equal(status.error, "DXtrade account monitor error");
   assert.equal(JSON.stringify(status).includes("secret transport detail"), false);
+});
+
+test("invalid open-positions book locks a metrics-flat snapshot and is unhealthy", async () => {
+  const monitor = createDxtradeAccountMonitor({
+    client: {
+      async login() {},
+      async getAccountMetrics() {
+        return payload({
+          openPositionsCount: 0,
+          positions: [],
+          openPl: 0
+        });
+      },
+      async getOpenPositions() {
+        return { positions: [{ symbol: "XRP/USD", quantity: 10, side: "BUY", markPrice: 0.5, avgOpenPrice: 0.5 }] };
+      }
+    },
+    instrument: "SOL/USD",
+    startingBalance: 50_000,
+    getPersistedPeakClosedBalance: async () => 50_000,
+    pollIntervalMs: 1_000,
+    freshAfterMs: 3_000,
+    now: () => 1_000_000
+  });
+  const snapshot = await monitor.pollOnce();
+  assert.equal(snapshot.accountLocked, true);
+  assert.equal(snapshot.signedNetUnits, null);
+  assert.equal(snapshot.positionSource, "open-positions-invalid");
+  assert.match(snapshot.invariantError, /non-SOL\/USD/);
+  assert.equal(monitor.getSnapshot().healthy, false);
+  assert.equal(monitor.getSnapshot().fresh, true);
+});
+
+test("a failed positions read does not treat metrics-flat as authoritative", async () => {
+  const monitor = createDxtradeAccountMonitor({
+    client: {
+      async login() {},
+      async getAccountMetrics() {
+        return payload({ openPositionsCount: 0, positions: [], openPl: 0 });
+      },
+      async getOpenPositions() { throw new Error("positions endpoint down"); }
+    },
+    startingBalance: 50_000,
+    getPersistedPeakClosedBalance: async () => 50_000,
+    pollIntervalMs: 1_000,
+    freshAfterMs: 3_000,
+    now: () => 1_000_000
+  });
+  const snapshot = await monitor.pollOnce();
+  assert.equal(snapshot.positionsReadFailed, true);
+  assert.equal(snapshot.signedNetUnits, null);
+  assert.equal(monitor.getSnapshot().healthy, false);
+  assert.equal(monitor.getSnapshot().fresh, true);
 });
