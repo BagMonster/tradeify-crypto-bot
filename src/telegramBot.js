@@ -1,4 +1,10 @@
 import TelegramBot from "node-telegram-bot-api";
+import {
+  attachChronicleCommands,
+  CHRONICLE_COMMANDS,
+  CHRONICLE_DEV_BLURB,
+  CHRONICLE_HELP_LINES
+} from "./devCompanionChronicleTelegram.js";
 
 const MAIN_MENU = {
   reply_markup: {
@@ -43,6 +49,7 @@ const HELP_TEXT = [
   "/rematch - request a 6-digit code to keep current lots when DXtrade and the notebook already agree",
   "/confirmrematch CODE - clear the reconciliation halt, keep the live lot, and lift the operator pause",
   "/flat - show manual SOL/USD flattening instructions",
+  ...CHRONICLE_HELP_LINES,
   "/code - enter the owner-only OpenAI development conversation",
   "/devstatus - show development companion queue/session status",
   "/devreset - reset OpenAI conversation context and remain in development mode",
@@ -51,7 +58,7 @@ const HELP_TEXT = [
   "/help - show this list",
   "",
   "There are no /long or /short commands. /levels and /rings are read-only. The frozen SOL grid trades automatically only when both live execution controls are ON and every safety gate passes.",
-  "Development mode can inspect BagMonster/tradeify-crypto-bot through /code. It cannot place trades, write GitHub, merge, or deploy."
+  CHRONICLE_DEV_BLURB
 ].join("\n");
 
 function devStatusText(status) {
@@ -237,6 +244,8 @@ export async function startTelegramBot({
     await sendLatched(message.chat.id, "/confirmrematch", await service.confirmRematch(match?.[1] ?? ""));
   }));
 
+  attachChronicleCommands({ bot, devCompanion, withAuthorization, sendLatched });
+
   bot.onText(/^\/flat(?:@\w+)?$/i, withAuthorization(async (message) => {
     await sendLatched(message.chat.id, "/flat", service.flatInstructions());
   }));
@@ -368,6 +377,7 @@ export async function startTelegramBot({
     { command: "reconcile", description: "Request a virtual flatten code" },
     { command: "rematch", description: "Rematch broker and virtual books" },
     { command: "flat", description: "Show flattening instructions" },
+    ...CHRONICLE_COMMANDS,
     { command: "code", description: "Enter OpenAI development mode" },
     { command: "devstatus", description: "Show development companion status" },
     { command: "devreset", description: "Reset development conversation" },
