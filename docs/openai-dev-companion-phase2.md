@@ -35,16 +35,11 @@ Implemented under D-052. Owner-confirmed, read-only GitHub tools limited to `Bag
 
 No write, no merge, no Railway deploy control. Requires `GITHUB_TOKEN` on the companion worker only.
 
-## Phase 2d — proposal-bound writes
+## Phase 2d — autonomous chronicle publishing (D-056)
 
-Only after the owner types an explicit confirm phrase:
+Chronicle Markdown only. BMTB1 writes first-person entries without owner confirmation of prose. Mechanical checks may reject scope, secrets, drift, or size. The owner keeps `/chroniclepause`. Merge of a passing chronicle PR is automatic. Enablement is a separate env + Railway watch-path step.
 
-1. companion opens a feature branch
-2. pushes a scoped patch
-3. opens a PR
-4. reports the PR URL in Telegram
-
-Merge and Railway deploy stay owner actions.
+D-055 confirmation codes are not the governing chronicle path.
 
 ## Out of Phase 2
 

@@ -1,5 +1,6 @@
 import pg from "pg";
 import { formatSnapshotPack, parseSnapshotPack, upsertSnapshotPack } from "./devCompanionSnapshots.js";
+import { createChroniclePersistence, initChroniclePersistence } from "./devCompanionChroniclePersistence.js";
 
 const { Pool } = pg;
 
@@ -69,6 +70,7 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
       SET status = 'PENDING', started_at = NULL
       WHERE status = 'PROCESSING' AND completed_at IS NULL
     `);
+    await initChroniclePersistence(pool);
   }
 
   async function setSessionActive(ownerIdValue, active) {
@@ -255,6 +257,8 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     });
   }
 
+  const chronicle = createChroniclePersistence(pool);
+
   async function health() {
     await pool.query("SELECT 1");
     return true;
@@ -279,6 +283,7 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     markDelivered,
     status,
     health,
+    ...chronicle,
     close
   });
 }

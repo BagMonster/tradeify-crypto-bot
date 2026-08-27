@@ -1,6 +1,7 @@
 import { loadConfiguration } from "./src/config.js";
 import { createDatabase } from "./src/database.js";
 import { createDevCompanionStore } from "./src/devCompanionStore.js";
+import { wrapCompanionWithChronicleControl } from "./src/devCompanionChronicleWiring.js";
 import { createBinanceLiveFeed } from "./src/market/binanceLiveFeed.js";
 import { createBinanceDailyMaProvider } from "./src/market/binanceDailyMa.js";
 import { DxtradeExecutionClient } from "./src/execution/dxtradeExecutionClient.js";
@@ -37,11 +38,12 @@ if (typeof strategy.strategyStatus === "string" && strategy.strategyStatus.start
 const database = createDatabase(environment);
 await database.init(account);
 
-const devCompanion = createDevCompanionStore({
+const companionStore = createDevCompanionStore({
   databaseUrl: environment.databaseUrl,
   databaseSsl: environment.databaseSsl
 });
-await devCompanion.init();
+await companionStore.init();
+const devCompanion = wrapCompanionWithChronicleControl(companionStore);
 
 const solPersistence = createSolanaPersistence(environment);
 await solPersistence.init();
