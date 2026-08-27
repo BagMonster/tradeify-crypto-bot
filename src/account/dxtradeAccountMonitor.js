@@ -48,13 +48,18 @@ function normalizePositions(metric) {
     if (typeof position.symbol !== "string" || position.symbol.trim() === "") {
       throw new Error(`DXtrade position metric ${index} must contain a symbol`);
     }
+    const quantity = Number(position.quantity ?? position.qty);
+    if (!Number.isFinite(quantity)) {
+      throw new Error(`DXtrade position metric ${index} must contain a quantity`);
+    }
+    const mark = Number(position.markPrice ?? position.price ?? position.avgOpenPrice ?? 0);
     return Object.freeze({
       symbol: position.symbol.trim(),
-      quantity: finite(`DXtrade position ${index} quantity`, position.quantity),
-      markPrice: finite(`DXtrade position metric ${index} markPrice`, position.markPrice),
-      openPl: finite(`DXtrade position ${index} openPl`, position.openPl ?? 0),
-      dayClosedPl: finite(`DXtrade position ${index} dayClosedPl`, position.dayClosedPl ?? 0),
-      avgOpenPrice: finite(`DXtrade position ${index} avgOpenPrice`, position.avgOpenPrice ?? 0)
+      quantity,
+      markPrice: Number.isFinite(mark) ? mark : 0,
+      openPl: Number.isFinite(Number(position.openPl)) ? Number(position.openPl) : 0,
+      dayClosedPl: Number.isFinite(Number(position.dayClosedPl)) ? Number(position.dayClosedPl) : 0,
+      avgOpenPrice: Number.isFinite(Number(position.avgOpenPrice)) ? Number(position.avgOpenPrice) : 0
     });
   }));
 }
@@ -161,9 +166,9 @@ export function createDxtradeAccountMonitor({
   async function pollOnce() {
     if (busy) return latest;
     busy = true;
-    try {
+    async function loadAccountViews() {
       await client.login();
-      const [payload, persistedPeak, positionsResult] = await Promise.all([
+      return Promise.all([
         client.getAccountMetrics({ includePositions: true }),
         getPeak(),
         client.getOpenPositions().then((payload) => Object.freeze({ ok: true, payload })).catch((error) => Object.freeze({
@@ -171,6 +176,24 @@ export function createDxtradeAccountMonitor({
           error: error instanceof Error ? error.message : "open-positions read failed"
         }))
       ]);
+    }
+
+    try {
+      let payload;
+      let persistedPeak;
+      let positionsResult;
+      try {
+        [payload, persistedPeak, positionsResult] = await loadAccountViews();
+      } catch (error) {
+        if (error?.status === 401 && typeof client.logout === "function") {
+          try { await client.logout(); } catch { /* session already dead */ }
+        }
+        if (error?.status === 401) {
+          [payload, persistedPeak, positionsResult] = await loadAccountViews();
+        } else {
+          throw error;
+        }
+      }
       let snapshot = normalizeDxtradeAccountMetrics(payload, {
         startingBalance,
         persistedPeakClosedBalance: persistedPeak,
@@ -178,7 +201,17 @@ export function createDxtradeAccountMonitor({
         fetchedAtMs: clock()
       });
       if (positionsResult.ok) {
-        snapshot = applyOpenPositionsOverlay(snapshot, positionsResult.payload, activeInstrument);
+        try {
+          snapshot = applyOpenPositionsOverlay(snapshot, positionsResult.payload, activeInstrument);
+        } catch (error) {
+          snapshot = Object.freeze({
+            ...snapshot,
+            positionsReadFailed: true,
+            overlayError: error instanceof Error ? error.message : "open-positions overlay failed",
+            signedNetUnits: null,
+            positionSource: "open-positions-unreadable"
+          });
+        }
       } else {
         snapshot = Object.freeze({
           ...snapshot,
