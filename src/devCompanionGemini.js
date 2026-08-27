@@ -3,6 +3,14 @@ const DEFAULT_MODEL = "gemini-3.7-flash";
 const DEFAULT_FALLBACK_MODEL = "gemini-3.6-flash";
 const GEMINI_INTERACTION_ID = /^(int_|inter_)/i;
 
+export class GeminiCapacityError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "GeminiCapacityError";
+    this.code = "GEMINI_CAPACITY";
+  }
+}
+
 function describeGeminiError(payload, fallback) {
   const err = payload && typeof payload === "object" ? payload.error : null;
   const parts = [err?.status, err?.code, err?.message, err?.type];
@@ -23,6 +31,10 @@ function isCapacityError(status, payload) {
 function isRetryablePreviousId(status, payload) {
   const text = `${status} ${describeGeminiError(payload, "")}`;
   return /not found|INVALID_ARGUMENT|invalid argument|previous_interaction|expired|unknown interaction/i.test(text);
+}
+
+function isToolFollowUp(input) {
+  return Array.isArray(input) && input.some((item) => item?.type === "function_call_output" || item?.type === "function_result" || item?.function_response);
 }
 
 function sanitizeSchema(value) {
@@ -143,6 +155,8 @@ export function createGeminiRequester({
     ? fallbackModel.trim()
     : "";
   const callNames = new Map();
+  let lastKey = primaryKey;
+  let lastModel = model;
 
   async function post(body, key) {
     const response = await fetchImpl(url, {
@@ -160,11 +174,12 @@ export function createGeminiRequester({
   }
 
   return async function requestGemini({ input, previousResponseId, tools }) {
+    const followUp = isToolFollowUp(input);
     const usablePrevious = typeof previousResponseId === "string" && GEMINI_INTERACTION_ID.test(previousResponseId)
       ? previousResponseId
       : null;
     const body = {
-      model,
+      model: followUp ? lastModel : model,
       system_instruction: instructions,
       input: mapInput(input, callNames),
       tools: mapTools(tools),
@@ -172,31 +187,41 @@ export function createGeminiRequester({
     };
     if (usablePrevious) body.previous_interaction_id = usablePrevious;
 
-    let { response, payload } = await post(body, primaryKey);
-    if (!response.ok && body.previous_interaction_id && isRetryablePreviousId(response.status, payload)) {
+    const startKey = followUp ? lastKey : primaryKey;
+    let { response, payload } = await post(body, startKey);
+    if (!followUp && !response.ok && body.previous_interaction_id && isRetryablePreviousId(response.status, payload)) {
       delete body.previous_interaction_id;
-      ({ response, payload } = await post(body, primaryKey));
+      ({ response, payload } = await post(body, startKey));
     }
-    if (!response.ok && fallbackKey && isCapacityError(response.status, payload)) {
+    if (!followUp && !response.ok && fallbackKey && isCapacityError(response.status, payload)) {
       console.warn(`Primary Gemini key hit HTTP ${response.status}; retrying paid key on ${model}`);
       await new Promise((resolve) => setTimeout(resolve, 800));
       ({ response, payload } = await post(body, fallbackKey));
+      if (response.ok) lastKey = fallbackKey;
     }
-    if (!response.ok && backupModel && (isCapacityError(response.status, payload) || statusIsMissingModel(response.status))) {
+    if (!followUp && !response.ok && backupModel && (isCapacityError(response.status, payload) || response.status === 404)) {
       const key = fallbackKey || primaryKey;
-      console.warn(`Gemini ${model} still at HTTP ${response.status}; retrying ${backupModel}`);
+      console.warn(`Gemini ${body.model} still at HTTP ${response.status}; retrying ${backupModel}`);
       body.model = backupModel;
       await new Promise((resolve) => setTimeout(resolve, 800));
       ({ response, payload } = await post(body, key));
+      if (response.ok) {
+        lastKey = key;
+        lastModel = backupModel;
+      }
     }
 
     if (!response.ok) {
-      throw new Error(`Gemini request failed with HTTP ${response.status}: ${describeGeminiError(payload, "no error detail")}`);
+      const detail = `Gemini request failed with HTTP ${response.status}: ${describeGeminiError(payload, "no error detail")}`;
+      if (isCapacityError(response.status, payload) || response.status === 404) throw new GeminiCapacityError(detail);
+      throw new Error(detail);
     }
     if (!payload || typeof payload.id !== "string" || payload.id.trim() === "") {
       throw new Error(`Gemini response did not complete: ${describeGeminiError(payload, "missing interaction id")}`);
     }
 
+    lastKey = followUp ? startKey : (lastKey || startKey);
+    lastModel = body.model;
     const mappedCalls = extractFunctionCalls(payload);
     for (const call of mappedCalls) callNames.set(call.call_id, call.name);
 
@@ -207,8 +232,4 @@ export function createGeminiRequester({
       status: payload.status ?? null
     };
   };
-}
-
-function statusIsMissingModel(status) {
-  return status === 404;
 }
