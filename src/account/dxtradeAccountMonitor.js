@@ -91,18 +91,33 @@ export function normalizeDxtradeAccountMetrics(payload, {
   let invariantError = null;
   if (foreignPositions.length > 0) {
     invariantError = `A non-${activeInstrument} position exists on the Tradeify account`;
-  } else if (openPositionsCount > 1 || nonZeroPositions.length > 1 || instrumentPositions.length > 1) {
-    invariantError = "More than one open position exists on the Tradeify account";
   } else if (openPositionsCount !== nonZeroPositions.length) {
     invariantError = "DXtrade open-position count does not match position metrics";
   }
 
-  const instrumentPosition = instrumentPositions[0] ?? null;
-  const currentNotional = instrumentPosition
-    ? Math.abs(instrumentPosition.quantity * instrumentPosition.markPrice)
-    : 0;
+  const signedNetUnits = instrumentPositions.reduce(
+    (sum, position) => sum + signedPositionQuantity(position),
+    0
+  );
+  const currentNotional = instrumentPositions.reduce((sum, position) => {
+    const notional = Math.abs(signedPositionQuantity(position) * position.markPrice);
+    return sum + (Number.isFinite(notional) ? notional : 0);
+  }, 0);
   if (!Number.isFinite(currentNotional)) throw new Error(`DXtrade ${activeInstrument} notional is invalid`);
-  const signedNetUnits = instrumentPosition ? signedPositionQuantity(instrumentPosition) : 0;
+
+  const instrumentPosition = instrumentPositions.length === 0
+    ? null
+    : instrumentPositions.length === 1
+      ? instrumentPositions[0]
+      : Object.freeze({
+        symbol: activeInstrument,
+        quantity: signedNetUnits,
+        markPrice: instrumentPositions[0].markPrice,
+        openPl: instrumentPositions.reduce((sum, position) => sum + position.openPl, 0),
+        dayClosedPl: instrumentPositions.reduce((sum, position) => sum + position.dayClosedPl, 0),
+        avgOpenPrice: instrumentPositions[0].avgOpenPrice,
+        ticketCount: instrumentPositions.length
+      });
 
   return Object.freeze({
     account: metric.account == null ? null : String(metric.account),
@@ -116,6 +131,7 @@ export function normalizeDxtradeAccountMetrics(payload, {
     peakClosedBalance,
     openPositionsCount,
     instrumentPosition,
+    instrumentTicketCount: instrumentPositions.length,
     btcPosition: activeInstrument === "BTC/USD" ? instrumentPosition : null,
     currentNotional,
     signedNetUnits,

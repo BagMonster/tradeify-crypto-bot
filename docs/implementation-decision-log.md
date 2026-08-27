@@ -8,6 +8,14 @@ An approved entry supersedes the corresponding baseline requirement or adds a go
 
 For the full historical log body through D-047, see git history on `main` prior to the D-049 docs sync. The governing recent SOL decisions are summarized below.
 
+## D-057 — Multiple SOL/USD broker tickets are a valid book
+
+**Status:** APPROVED to build 2026-08-27; not merged to `main` until owner `/kill` + trading-worker deploy.
+
+Several `SOL/USD` DXtrade tickets are allowed. Signed net is the sum. Lockout remains for foreign instruments and count mismatches. Virtual-lot ↔ ticket-id binding is not in this change.
+
+Full decision: `docs/decisions/D-057-multi-sol-broker-tickets.md`.
+
 ## D-056 — Autonomous chronicle publishing
 
 **Status:** APPROVED to build and test 2026-08-26; **not enabled**.
