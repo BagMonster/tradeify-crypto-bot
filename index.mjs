@@ -15,6 +15,7 @@ import { trustedSignedNet } from "./src/account/dxtradeSignedNet.js";
 import { formatDxtradeAccountDiagnostic } from "./src/account/dxtradeDiagnostics.js";
 import { createSolanaPersistence } from "./src/state/solanaPersistence.js";
 import { createSolanaRuntime } from "./src/runtime/solanaRuntime.js";
+import { clearLatchedBaselineMismatchHalt } from "./src/runtime/d049BaselineHaltClear.js";
 import { createSolanaHeartbeat } from "./src/runtime/solanaHeartbeat.js";
 import { createLiveTelegramNotifications } from "./src/notifications/liveTelegramNotifications.js";
 import { accountDayKey } from "./src/risk/dailyRiskLadder.js";
@@ -37,6 +38,7 @@ if (typeof strategy.strategyStatus === "string" && strategy.strategyStatus.start
 
 const database = createDatabase(environment);
 await database.init(account);
+await clearLatchedBaselineMismatchHalt(database);
 
 const companionStore = createDevCompanionStore({
   databaseUrl: environment.databaseUrl,

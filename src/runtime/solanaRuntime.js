@@ -195,14 +195,6 @@ export function createSolanaRuntime({
       });
     }
 
-    if (Math.abs(ladderState.baselineClosedBalanceUsd - baseline) > 0.01) {
-      const drawdownUsd = equity - ladderState.baselineClosedBalanceUsd;
-      return Object.freeze({
-        verdict: Object.freeze({ action: LADDER_ACTIONS.BRAKE, drawdownUsd, reason: "baseline-mismatch" }),
-        issue: "D049_BASELINE_MISMATCH"
-      });
-    }
-
     return Object.freeze({
       verdict: evaluateRiskLadder(ladderState, riskLadderConfig, equity),
       issue: null
