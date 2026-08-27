@@ -1,6 +1,6 @@
 const DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const DEFAULT_MODEL = "gemini-3.7-flash";
-const DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash";
+const DEFAULT_FALLBACK_MODEL = "gemini-3.6-flash";
 const GEMINI_INTERACTION_ID = /^(int_|inter_)/i;
 
 function describeGeminiError(payload, fallback) {
@@ -182,7 +182,7 @@ export function createGeminiRequester({
       await new Promise((resolve) => setTimeout(resolve, 800));
       ({ response, payload } = await post(body, fallbackKey));
     }
-    if (!response.ok && backupModel && isCapacityError(response.status, payload)) {
+    if (!response.ok && backupModel && (isCapacityError(response.status, payload) || statusIsMissingModel(response.status))) {
       const key = fallbackKey || primaryKey;
       console.warn(`Gemini ${model} still at HTTP ${response.status}; retrying ${backupModel}`);
       body.model = backupModel;
@@ -207,4 +207,8 @@ export function createGeminiRequester({
       status: payload.status ?? null
     };
   };
+}
+
+function statusIsMissingModel(status) {
+  return status === 404;
 }
