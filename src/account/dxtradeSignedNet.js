@@ -17,7 +17,15 @@ export function signedPositionQuantity(position) {
 export function positionRows(payload) {
   if (payload == null) return [];
   if (Array.isArray(payload)) return payload;
-  if (typeof payload === "object" && Array.isArray(payload.positions)) return payload.positions;
+  if (typeof payload !== "object") {
+    throw new Error("DXtrade open-positions response does not contain a positions array");
+  }
+  for (const key of ["positions", "positionList", "openPositions", "open_positions"]) {
+    if (Array.isArray(payload[key])) return payload[key];
+  }
+  if (payload.position && typeof payload.position === "object" && !Array.isArray(payload.position)) {
+    return [payload.position];
+  }
   throw new Error("DXtrade open-positions response does not contain a positions array");
 }
 
@@ -80,6 +88,13 @@ export function signedNetFromOpenPositions(payload, instrument = SOL_INSTRUMENT)
       })
       : null
   });
+}
+
+export function trustedSignedNet(accountStatus) {
+  const snapshot = accountStatus?.snapshot ?? null;
+  if (!snapshot || snapshot.positionsReadFailed === true) return null;
+  if (!Number.isFinite(snapshot.signedNetUnits)) return null;
+  return snapshot.signedNetUnits;
 }
 
 export function applyOpenPositionsOverlay(snapshot, payload, instrument = SOL_INSTRUMENT) {
