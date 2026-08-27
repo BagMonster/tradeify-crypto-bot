@@ -40,14 +40,16 @@ test("live metrics derive account-day opening balance without waiting for a roll
   assert.equal(snapshot.accountLocked, false);
 });
 
-test("a foreign or second position locks new grid actions", () => {
+test("a foreign position locks new grid actions", () => {
   const foreign = normalizeDxtradeAccountMetrics(payload({
     openPositionsCount: 1,
     positions: [{ symbol: "SOL/USD", quantity: 1, markPrice: 150, openPl: 0, dayClosedPl: 0, avgOpenPrice: 140 }]
   }), { startingBalance: 50_000, persistedPeakClosedBalance: 50_000, fetchedAtMs: 1 });
   assert.equal(foreign.accountLocked, true);
   assert.match(foreign.invariantError, /non-BTC/i);
+});
 
+test("two tickets of the active instrument stay unlocked and net together", () => {
   const two = normalizeDxtradeAccountMetrics(payload({
     openPositionsCount: 2,
     positions: [
@@ -55,8 +57,11 @@ test("a foreign or second position locks new grid actions", () => {
       { symbol: "BTC/USD", quantity: -0.005, markPrice: 67_000, openPl: 0, dayClosedPl: 0, avgOpenPrice: 68_000 }
     ]
   }), { startingBalance: 50_000, persistedPeakClosedBalance: 50_000, fetchedAtMs: 1 });
-  assert.equal(two.accountLocked, true);
-  assert.match(two.invariantError, /more than one/i);
+  assert.equal(two.accountLocked, false);
+  assert.equal(two.invariantError, null);
+  assert.equal(two.signedNetUnits, 0.005);
+  assert.equal(two.instrumentTicketCount, 2);
+  assert.equal(two.currentNotional, 0.01 * 67_000 + 0.005 * 67_000);
 });
 
 test("monitor uses one metrics request with positions and reports freshness", async () => {

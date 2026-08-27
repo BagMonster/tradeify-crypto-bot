@@ -36,6 +36,21 @@ test("open-positions overlay fills a metrics snapshot that claimed the account w
   assert.equal(netsMatch(-0.44, next.signedNetUnits), true);
 });
 
+test("multiple SOL tickets sum to one signed net and do not lock", () => {
+  const result = signedNetFromOpenPositions({
+    positions: [
+      { symbol: "SOL/USD", quantity: 0.44, side: "SELL", markPrice: 95.91 },
+      { symbol: "SOL/USD", quantity: 0.12, side: "SELL", markPrice: 96.10 }
+    ]
+  }, "SOL/USD");
+  assert.equal(result.ok, true);
+  assert.equal(result.error, null);
+  assert.equal(result.netUnits, -0.56);
+  assert.equal(result.openPositionsCount, 2);
+  assert.equal(result.instrumentTicketCount, 2);
+  assert.equal(result.instrumentPosition.ticketCount, 2);
+});
+
 test("open-positions parser rejects a foreign instrument", () => {
   const result = signedNetFromOpenPositions({
     positions: [{ symbol: "XRP/USD", quantity: 10, side: "BUY" }]
