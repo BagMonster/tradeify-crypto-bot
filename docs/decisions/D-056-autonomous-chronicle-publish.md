@@ -11,7 +11,7 @@ BMTB1 has editorial autonomy for his chronicle. No owner approval, confirmation 
 A companion-only tool `publish_chronicle_entry`:
 
 1. Reads the latest `main` SHA.
-2. Creates `docs/bmtb1/<date>-<slug>`.
+2. Creates `docs/bmtb1/<date>-<slug>-<content-hash-12>`.
 3. Writes one Markdown file under `docs/chronicle/entries/`.
 4. Appends one sourced row to `docs/chronicle/TIMELINE.md`.
 5. Opens a PR, runs mechanical policy checks, and squash-merges when they pass.
@@ -31,6 +31,19 @@ Mechanical checks judge scope and safety, never opinions or prose.
 ## Kill switch
 
 Owner-only Telegram commands `/chroniclepause`, `/chronicleresume`, and `/chroniclestatus` stop or re-arm publishing. They are not an editorial desk.
+
+## Publication binding (mechanical, not editorial)
+
+A publication is bound to the captured `main` SHA, the intended entry and TIMELINE content hashes, the content-hash-suffixed branch, and the expected head SHA.
+
+- `TIMELINE.md` is read from that captured SHA, never from moving `main`.
+- Branch names are `docs/bmtb1/<date>-<slug>-<content-hash-12>`. An existing branch is reused only when its SHA equals the stored expected head.
+- Before merge the publisher re-fetches PR metadata and both file bodies from the PR head, re-runs secret/binary/size checks on those exact bytes, and re-checks the kill switch plus current `main` SHA.
+- Exactly two files: one newly added dated entry and one TIMELINE.md add/modify. A third file or a modified existing entry fails closed.
+- GitHub `merged !== true` is failure. The row is never marked `done`.
+- Claiming a publication key is atomic. A second worker receives `PUBLICATION_IN_FLIGHT`. Retries may resume only the exact stored binding.
+
+No owner confirmation of prose is added by this hardening.
 
 ## Activation (separate owner step)
 

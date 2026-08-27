@@ -14,6 +14,8 @@ For the full historical log body through D-047, see git history on `main` prior 
 
 BMTB1 may publish `docs/chronicle/**` entries with mechanical checks and automatic squash-merge. No prose approval. Companion env flag stays off in this change. Trading Railway must ignore docs-only commits before enablement.
 
+Publications bind captured main SHA, content hashes, hash-suffixed branch, and expected head SHA. TIMELINE.md is read from that SHA. Merge requires exactly two files, head-byte hash match, live kill-switch + main re-check, and GitHub `merged === true`. Claims are atomic; `merged !== true` is never marked done.
+
 Full decision: `docs/decisions/D-056-autonomous-chronicle-publish.md`.
 
 ## D-040 — Frozen SOL outer-heavy grid baseline (superseded in part by D-049)
