@@ -25,15 +25,21 @@ function describeOpenAIError(payload, fallback) {
   return parts.length > 0 ? parts.join(" | ") : fallback;
 }
 
+function envText(name) {
+  const value = process.env[name];
+  return typeof value === "string" ? value.trim() : "";
+}
+
 const databaseUrl = requireText("DATABASE_URL", process.env.DATABASE_URL);
-const geminiKey = typeof process.env.GEMINI_API_KEY === "string" ? process.env.GEMINI_API_KEY.trim() : "";
-const openaiKey = typeof process.env.OPENAI_API_KEY === "string" ? process.env.OPENAI_API_KEY.trim() : "";
+const geminiKey = envText("GEMINI_FREE_API_KEY") || envText("GEMINI_API_KEY");
+const geminiPaidKey = envText("GEMINI_PAID_API_KEY");
+const openaiKey = envText("OPENAI_API_KEY");
 const useGemini = geminiKey !== "";
 const model = useGemini
   ? (process.env.GEMINI_MODEL ?? "gemini-3.7-flash").trim()
   : (process.env.OPENAI_MODEL ?? "gpt-5.6").trim();
 const databaseSsl = parseBoolean(process.env.DATABASE_SSL);
-const githubToken = typeof process.env.GITHUB_TOKEN === "string" ? process.env.GITHUB_TOKEN.trim() : "";
+const githubToken = envText("GITHUB_TOKEN");
 const bodyMap = loadBodyMap();
 const chroniclePublishEnabled = process.env.CHRONICLE_AUTONOMOUS_PUBLISH === "true";
 const github = createGithubInspector({ token: githubToken });
@@ -120,6 +126,7 @@ if (!useGemini && openaiKey === "") throw new Error("GEMINI_API_KEY or OPENAI_AP
 const requestModel = useGemini
   ? createGeminiRequester({
     apiKey: geminiKey,
+    paidApiKey: geminiPaidKey,
     model,
     url: (process.env.GEMINI_INTERACTIONS_URL ?? "https://generativelanguage.googleapis.com/v1beta/interactions").trim(),
     instructions
@@ -155,7 +162,8 @@ async function workOnce() {
 }
 
 async function loop() {
-  console.log(`${useGemini ? "Gemini" : "OpenAI"} development companion started with model ${model}; repo tools ${githubToken ? "armed" : "token-missing"}; chronicle publish ${chroniclePublishEnabled ? "enabled" : "disabled"}`);
+  const paidFallback = useGemini && geminiPaidKey && geminiPaidKey !== geminiKey ? "armed" : "off";
+  console.log(`${useGemini ? "Gemini" : "OpenAI"} development companion started with model ${model}; paid fallback ${paidFallback}; repo tools ${githubToken ? "armed" : "token-missing"}; chronicle publish ${chroniclePublishEnabled ? "enabled" : "disabled"}`);
   while (!stopping) {
     try {
       const worked = await workOnce();
