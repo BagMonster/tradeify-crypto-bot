@@ -38,6 +38,22 @@ export const COMPANION_REPO_TOOLS = Object.freeze([
       required: ["query"],
       additionalProperties: false
     }
+  },
+  {
+    type: "function",
+    name: "publish_chronicle_entry",
+    description: "Publish one BMTB1 chronicle Markdown entry under docs/chronicle/entries/ and append one TIMELINE.md row. Mechanical checks only. Does not require owner confirmation. Disabled until CHRONICLE_AUTONOMOUS_PUBLISH=true. Cannot change production code or deploy Railway.",
+    parameters: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "YYYY-MM-DD. Defaults to today UTC." },
+        slug: { type: "string", description: "Short lowercase slug for the filename and branch." },
+        content: { type: "string", description: "Full Markdown entry with evidence labels." },
+        timelineLine: { type: "string", description: "One Markdown table row for TIMELINE.md." }
+      },
+      required: ["slug", "content", "timelineLine"],
+      additionalProperties: false
+    }
   }
 ]);
 
