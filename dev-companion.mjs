@@ -89,8 +89,10 @@ function flattenInput(input) {
   return input.map((item) => {
     if (typeof item === "string") return item;
     if (item?.type === "function_call_output") return `Tool ${item.call_id}: ${item.output}`;
-    return JSON.stringify(item);
-  }).join("\n");
+    if (typeof item?.text === "string") return item.text;
+    if (typeof item?.content === "string") return item.content;
+    return "";
+  }).filter(Boolean).join("\n");
 }
 
 async function requestOpenAI({ input, previousResponseId, tools, maxOutputTokens = 1500 }) {
@@ -134,6 +136,47 @@ async function requestOpenAI({ input, previousResponseId, tools, maxOutputTokens
   return payload;
 }
 
+async function requestOpenAIFallback(input, maxOutputTokens = 1500) {
+  const text = flattenInput(input);
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${openaiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: openaiModel,
+      messages: [
+        { role: "system", content: instructions },
+        { role: "user", content: text }
+      ],
+      max_tokens: maxOutputTokens,
+      temperature: 0.7
+    }),
+    signal: AbortSignal.timeout(60000)
+  });
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const errBody = await response.json();
+      detail = `${detail}: ${describeOpenAIError(errBody, "no error detail")}`;
+    } catch {
+      detail = `${detail}: unreadable error body`;
+    }
+    throw new Error(`OpenAI fallback failed with ${detail}`);
+  }
+  const payload = await response.json();
+  const outputText = payload?.choices?.[0]?.message?.content;
+  if (typeof outputText !== "string" || !outputText.trim()) {
+    throw new Error("OpenAI fallback returned no text");
+  }
+  return {
+    id: typeof payload.id === "string" ? payload.id : `openai_fallback_${Date.now()}`,
+    output: [],
+    output_text: outputText.trim()
+  };
+}
+
 const geminiRequest = useGemini
   ? createGeminiRequester({
     apiKey: geminiKey,
@@ -152,13 +195,8 @@ async function requestModel(args) {
     return await geminiRequest(args);
   } catch (error) {
     if (!(error instanceof GeminiCapacityError) || !openaiKey) throw error;
-    console.warn("Gemini capacity exhausted; single OpenAI fallback");
-    return requestOpenAI({
-      input: flattenInput(args.input),
-      tools: args.tools,
-      previousResponseId: null,
-      maxOutputTokens: 1500
-    });
+    console.warn("Gemini capacity exhausted; single OpenAI chat fallback");
+    return requestOpenAIFallback(args.input, 1500);
   }
 }
 
@@ -185,7 +223,11 @@ async function workOnce() {
     await store.complete(job.id, job.ownerId, outputText, result.id);
   } catch (error) {
     console.error("Development companion job failed:", error.message);
-    await store.fail(job.id);
+    try {
+      await store.fail(job.id);
+    } catch (failError) {
+      console.error("Failed to mark companion job failed:", failError.message);
+    }
   }
   return true;
 }
@@ -215,5 +257,8 @@ async function shutdown(signal) {
 
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("unhandledRejection", (error) => {
+  console.error("Development companion unhandled rejection:", error?.message || error);
+});
 
 await loop();
