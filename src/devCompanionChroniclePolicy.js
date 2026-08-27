@@ -23,6 +23,12 @@ export function sha256Text(value) {
   return createHash("sha256").update(String(value), "utf8").digest("hex");
 }
 
+export function contentHashSuffix(contentSha) {
+  const hex = String(contentSha ?? "");
+  if (!/^[a-f0-9]{12,}$/i.test(hex)) throw new TypeError("content hash is required for the branch name");
+  return hex.slice(0, 12).toLowerCase();
+}
+
 export function failPolicy(error) {
   return Object.freeze({ ok: false, error: String(error) });
 }
@@ -52,8 +58,8 @@ export function entryPathFor(date, slug) {
   return `${ENTRIES_PREFIX}${date}-${slug}.md`;
 }
 
-export function branchNameFor(date, slug) {
-  return `${BRANCH_PREFIX}${date}-${slug}`;
+export function branchNameFor(date, slug, contentSha) {
+  return `${BRANCH_PREFIX}${date}-${slug}-${contentHashSuffix(contentSha)}`;
 }
 
 export function assertChronicleWritePath(path) {
@@ -89,6 +95,12 @@ export function assertEntryMarkdown(content) {
   return content.replace(/\r\n/g, "\n");
 }
 
+export function assertTimelineBytes(content, label = "timeline") {
+  assertNoSecretsOrBinary(content, label);
+  if (content.length > MAX_TIMELINE_CHARS) throw new TypeError("timeline exceeds size limit");
+  return content.replace(/\r\n/g, "\n");
+}
+
 export function assertTimelineLine(line) {
   const text = String(line ?? "").trim();
   if (!text.startsWith("|") || !text.endsWith("|") || text.split("|").length < 5) {
@@ -111,15 +123,14 @@ export function appendTimeline(existing, line) {
       ""
     ].join("\n");
   }
-  assertNoSecretsOrBinary(existing, "timeline");
-  if (existing.length > MAX_TIMELINE_CHARS) throw new TypeError("timeline exceeds size limit");
-  const body = existing.replace(/\r\n/g, "\n").replace(/\s*$/, "");
+  const body = assertTimelineBytes(existing).replace(/\s*$/, "");
   if (body.split("\n").includes(row)) return `${body}\n`;
   return `${body}\n${row}\n`;
 }
 
 export function inspectProposedFiles(files) {
   if (!Array.isArray(files) || files.length === 0) return failPolicy("publication has no files");
+  if (files.length !== 2) return failPolicy("publication must change exactly two files");
   const paths = new Set();
   for (const file of files) {
     const status = String(file?.status ?? "added").toLowerCase();
@@ -139,11 +150,56 @@ export function inspectProposedFiles(files) {
     paths.add(path);
     if (file?.previous_filename) return failPolicy("renames are not allowed");
   }
-  const hasEntry = [...paths].some((path) => path.startsWith(ENTRIES_PREFIX));
+  const entryPaths = [...paths].filter((path) => path.startsWith(ENTRIES_PREFIX));
   const hasTimeline = paths.has(TIMELINE_PATH);
-  if (!hasEntry || !hasTimeline) return failPolicy("publication must include one entry and TIMELINE.md");
-  if (paths.size > 3) return failPolicy("publication changes too many files");
+  if (entryPaths.length !== 1 || !hasTimeline) return failPolicy("publication must include one entry and TIMELINE.md");
   return Object.freeze({ ok: true, paths: [...paths] });
+}
+
+export function inspectChroniclePullFiles(files, { expectedEntryPath } = {}) {
+  const scoped = inspectProposedFiles(files);
+  if (!scoped.ok) return scoped;
+  const entryFile = files.find((file) => String(file?.filename ?? file?.path ?? "").startsWith(ENTRIES_PREFIX));
+  const timelineFile = files.find((file) => String(file?.filename ?? file?.path ?? "") === TIMELINE_PATH);
+  if (!entryFile || !timelineFile) return failPolicy("publication must include one entry and TIMELINE.md");
+  if (String(entryFile.status ?? "").toLowerCase() !== "added") {
+    return failPolicy("entry must be a newly added file");
+  }
+  const entryPath = entryFile.filename ?? entryFile.path;
+  if (expectedEntryPath && entryPath !== expectedEntryPath) {
+    return failPolicy("entry path does not match publication");
+  }
+  const timelineStatus = String(timelineFile.status ?? "").toLowerCase();
+  if (timelineStatus !== "added" && timelineStatus !== "modified") {
+    return failPolicy("TIMELINE.md must be added or modified");
+  }
+  return Object.freeze({ ok: true, paths: scoped.paths, entryPath, timelineStatus });
+}
+
+export function inspectPullMetadata(pull, expected) {
+  if (!pull || typeof pull !== "object") return failPolicy("missing pull metadata");
+  if (pull.base?.ref !== "main") return failPolicy("PR base must be main");
+  if (pull.base?.sha !== expected.baseSha) return failPolicy("PR base SHA is not the captured main SHA");
+  const headOwner = pull.head?.repo?.owner?.login ?? pull.head?.user?.login;
+  const headName = pull.head?.repo?.name;
+  const headFull = pull.head?.repo?.full_name ?? (headOwner && headName ? `${headOwner}/${headName}` : null);
+  if (headFull && headFull !== `${expected.owner}/${expected.repo}`) {
+    return failPolicy("PR head repo is not the allowed repository");
+  }
+  if (pull.head?.ref !== expected.branch) return failPolicy("PR head branch is not the expected branch");
+  if (pull.head?.sha !== expected.headSha) return failPolicy("PR head SHA is not the expected commit");
+  if (typeof pull.changed_files === "number" && pull.changed_files !== 2) {
+    return failPolicy("PR must change exactly two files");
+  }
+  return Object.freeze({ ok: true });
+}
+
+export function samePublicationBinding(left, right) {
+  return left?.baseSha === right?.baseSha
+    && left?.branch === right?.branch
+    && left?.entrySha === right?.entrySha
+    && left?.timelineSha === right?.timelineSha
+    && (right?.expectedHeadSha == null || left?.expectedHeadSha == null || left.expectedHeadSha === right.expectedHeadSha);
 }
 
 export function publicationKey({ date, slug, contentSha }) {
