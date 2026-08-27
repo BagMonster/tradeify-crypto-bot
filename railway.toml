@@ -1,0 +1,11 @@
+[build]
+watchPatterns = [
+  "src/**",
+  "index.mjs",
+  "dev-companion.mjs",
+  "package.json",
+  "package-lock.json",
+  "config/**",
+  "Procfile",
+  "railway.toml"
+]
