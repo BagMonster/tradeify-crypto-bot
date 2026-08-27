@@ -1,5 +1,6 @@
 const DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const DEFAULT_MODEL = "gemini-3.7-flash";
+const DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash";
 const GEMINI_INTERACTION_ID = /^(int_|inter_)/i;
 
 function describeGeminiError(payload, fallback) {
@@ -128,6 +129,7 @@ export function createGeminiRequester({
   apiKey,
   paidApiKey = "",
   model = DEFAULT_MODEL,
+  fallbackModel = DEFAULT_FALLBACK_MODEL,
   url = DEFAULT_URL,
   instructions,
   fetchImpl = fetch
@@ -136,6 +138,9 @@ export function createGeminiRequester({
   const primaryKey = apiKey.trim();
   const fallbackKey = typeof paidApiKey === "string" && paidApiKey.trim() && paidApiKey.trim() !== primaryKey
     ? paidApiKey.trim()
+    : "";
+  const backupModel = typeof fallbackModel === "string" && fallbackModel.trim() && fallbackModel.trim() !== model
+    ? fallbackModel.trim()
     : "";
   const callNames = new Map();
 
@@ -173,8 +178,16 @@ export function createGeminiRequester({
       ({ response, payload } = await post(body, primaryKey));
     }
     if (!response.ok && fallbackKey && isCapacityError(response.status, payload)) {
-      console.warn(`Primary Gemini key hit HTTP ${response.status}; retrying paid key`);
+      console.warn(`Primary Gemini key hit HTTP ${response.status}; retrying paid key on ${model}`);
+      await new Promise((resolve) => setTimeout(resolve, 800));
       ({ response, payload } = await post(body, fallbackKey));
+    }
+    if (!response.ok && backupModel && isCapacityError(response.status, payload)) {
+      const key = fallbackKey || primaryKey;
+      console.warn(`Gemini ${model} still at HTTP ${response.status}; retrying ${backupModel}`);
+      body.model = backupModel;
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      ({ response, payload } = await post(body, key));
     }
 
     if (!response.ok) {
