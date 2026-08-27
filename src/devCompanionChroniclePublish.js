@@ -4,11 +4,14 @@ import {
   appendTimeline,
   assertEntryMarkdown,
   assertEntryPath,
+  assertNoSecretsOrBinary,
+  assertTimelineBytes,
   assertTimelineLine,
   branchNameFor,
   entryPathFor,
-  failPolicy,
+  inspectChroniclePullFiles,
   inspectProposedFiles,
+  inspectPullMetadata,
   normalizeDate,
   normalizeSlug,
   publicationKey,
@@ -19,6 +22,18 @@ function fail(error) {
   return Object.freeze({ ok: false, error: String(error) });
 }
 
+function contentsPath(path) {
+  return `/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+function decodeFileContent(payload, path) {
+  if (payload?.type !== "file" || typeof payload.content !== "string") {
+    return fail(`${path} is not a readable file`);
+  }
+  const content = Buffer.from(payload.content.replace(/\s+/g, ""), "base64").toString("utf8");
+  return Object.freeze({ ok: true, missing: false, content, sha: payload.sha });
+}
+
 export function createChroniclePublisher({
   token = "",
   fetchImpl = fetch,
@@ -26,7 +41,8 @@ export function createChroniclePublisher({
   enabled = false,
   owner = ALLOWED_OWNER,
   repo = ALLOWED_REPO,
-  userAgent = "tradeify-dev-companion-chronicle"
+  userAgent = "tradeify-dev-companion-chronicle",
+  claimOwner = "companion"
 } = {}) {
   if (owner !== ALLOWED_OWNER || repo !== ALLOWED_REPO) {
     throw new TypeError("chronicle publisher is locked to BagMonster/tradeify-crypto-bot");
@@ -70,38 +86,67 @@ export function createChroniclePublisher({
     return Object.freeze({ ok: true, sha });
   }
 
-  async function readFileOnMain(path) {
-    const suffix = `/${path.split("/").map(encodeURIComponent).join("/")}`;
+  async function readFileAtRef(path, ref) {
     const result = await github(
-      `/repos/${owner}/${repo}/contents${suffix}?ref=main`,
+      `/repos/${owner}/${repo}/contents${contentsPath(path)}?ref=${encodeURIComponent(ref)}`,
       { allowStatuses: [404] }
     );
     if (!result.ok) return result;
     if (result.status === 404) return Object.freeze({ ok: true, missing: true, content: "" });
-    if (result.payload?.type !== "file" || typeof result.payload.content !== "string") {
-      return fail(`${path} is not a readable file`);
+    return decodeFileContent(result.payload, path);
+  }
+
+  function canMergePull(files, expectedEntryPath) {
+    return inspectChroniclePullFiles(files, { expectedEntryPath });
+  }
+
+  async function markFailed(key, error) {
+    if (typeof store?.failChroniclePublication === "function") {
+      await store.failChroniclePublication(key, error);
     }
-    const content = Buffer.from(result.payload.content.replace(/\s+/g, ""), "base64").toString("utf8");
-    return Object.freeze({ ok: true, missing: false, content, sha: result.payload.sha });
+    return fail(error);
   }
 
-  function canMergePull(files) {
-    return inspectProposedFiles(files);
-  }
-
-  async function squashMerge(prNumber, files) {
-    const policy = canMergePull(files);
-    if (!policy.ok) return policy;
+  async function squashMerge(prNumber, expectedHeadSha) {
     const merged = await github(`/repos/${owner}/${repo}/pulls/${prNumber}/merge`, {
       method: "PUT",
-      body: { merge_method: "squash" }
+      body: {
+        merge_method: "squash",
+        sha: expectedHeadSha
+      }
     });
     if (!merged.ok) return merged;
+    if (merged.payload?.merged !== true) {
+      return fail("MERGE_NOT_CONFIRMED: GitHub did not report merged=true");
+    }
     return Object.freeze({
       ok: true,
-      merged: merged.payload?.merged === true,
+      merged: true,
       sha: merged.payload?.sha ?? null
     });
+  }
+
+  async function inspectHeadBytes({ headSha, entryPath, entry, nextTimeline }) {
+    const liveEntry = await readFileAtRef(entryPath, headSha);
+    if (!liveEntry.ok) return liveEntry;
+    if (liveEntry.missing) return fail("PR head is missing the chronicle entry");
+    const liveTimeline = await readFileAtRef(TIMELINE_PATH, headSha);
+    if (!liveTimeline.ok) return liveTimeline;
+    if (liveTimeline.missing) return fail("PR head is missing TIMELINE.md");
+    try {
+      assertEntryMarkdown(liveEntry.content);
+      assertTimelineBytes(liveTimeline.content, "head timeline");
+      assertNoSecretsOrBinary(liveEntry.content, "head entry");
+    } catch (error) {
+      return fail(error.message);
+    }
+    if (sha256Text(liveEntry.content) !== sha256Text(entry)) {
+      return fail("HEAD_CONTENT_MISMATCH: entry bytes on the PR head are not the intended content");
+    }
+    if (sha256Text(liveTimeline.content) !== sha256Text(nextTimeline)) {
+      return fail("HEAD_CONTENT_MISMATCH: TIMELINE.md bytes on the PR head are not the intended content");
+    }
+    return Object.freeze({ ok: true });
   }
 
   async function publishEntry(rawArgs = {}) {
@@ -126,9 +171,10 @@ export function createChroniclePublisher({
     }
 
     const entryPath = assertEntryPath(entryPathFor(date, slug), date, slug);
-    const branch = branchNameFor(date, slug);
-    const contentSha = sha256Text(entry);
-    const key = publicationKey({ date, slug, contentSha });
+    const entrySha = sha256Text(entry);
+    const branch = branchNameFor(date, slug, entrySha);
+    const key = publicationKey({ date, slug, contentSha: entrySha });
+    const ownerId = rawArgs.claimOwner || claimOwner;
 
     if (typeof store?.getChroniclePublication === "function") {
       const existing = await store.getChroniclePublication(key);
@@ -137,17 +183,21 @@ export function createChroniclePublisher({
           ok: true,
           idempotent: true,
           publicationKey: key,
-          branch,
+          branch: existing.branch ?? branch,
           prUrl: existing.prUrl,
-          merged: true
+          prNumber: existing.prNumber,
+          merged: true,
+          baseSha: existing.baseSha,
+          expectedHeadSha: existing.expectedHeadSha
         });
       }
     }
 
     const main = await readMainSha();
     if (!main.ok) return main;
+    const baseSha = main.sha;
 
-    const timelineFile = await readFileOnMain(TIMELINE_PATH);
+    const timelineFile = await readFileAtRef(TIMELINE_PATH, baseSha);
     if (!timelineFile.ok) return timelineFile;
     let nextTimeline;
     try {
@@ -155,6 +205,7 @@ export function createChroniclePublisher({
     } catch (error) {
       return fail(error.message);
     }
+    const timelineSha = sha256Text(nextTimeline);
 
     const planned = inspectProposedFiles([
       { filename: entryPath, status: "added" },
@@ -162,70 +213,98 @@ export function createChroniclePublisher({
     ]);
     if (!planned.ok) return planned;
 
-    if (typeof store?.beginChroniclePublication === "function") {
-      await store.beginChroniclePublication({
-        publicationKey: key,
-        date,
-        slug,
-        baseSha: main.sha,
-        branch
-      });
-    }
+    const binding = {
+      publicationKey: key,
+      date,
+      slug,
+      baseSha,
+      branch,
+      entrySha,
+      timelineSha,
+      claimOwner: ownerId
+    };
 
-    const commit = await github(`/repos/${owner}/${repo}/git/commits/${main.sha}`);
-    if (!commit.ok) {
-      if (typeof store?.failChroniclePublication === "function") await store.failChroniclePublication(key, commit.error);
-      return commit;
-    }
-    const baseTreeSha = commit.payload?.tree?.sha;
-    if (!baseTreeSha) return fail("could not read base tree");
-
-    const blobs = [];
-    for (const item of [
-      { path: entryPath, content: entry },
-      { path: TIMELINE_PATH, content: nextTimeline }
-    ]) {
-      const blob = await github(`/repos/${owner}/${repo}/git/blobs`, {
-        method: "POST",
-        body: { content: item.content, encoding: "utf-8" }
-      });
-      if (!blob.ok) {
-        if (typeof store?.failChroniclePublication === "function") await store.failChroniclePublication(key, blob.error);
-        return blob;
+    let claimed = null;
+    if (typeof store?.claimChroniclePublication === "function") {
+      claimed = await store.claimChroniclePublication(binding);
+      if (!claimed.ok) return fail(claimed.error);
+      if (claimed.alreadyDone) {
+        return Object.freeze({
+          ok: true,
+          idempotent: true,
+          publicationKey: key,
+          branch,
+          prUrl: claimed.publication?.prUrl,
+          prNumber: claimed.publication?.prNumber,
+          merged: true,
+          baseSha
+        });
       }
-      blobs.push({ path: item.path, mode: "100644", type: "blob", sha: blob.payload.sha });
+    } else if (typeof store?.beginChroniclePublication === "function") {
+      await store.beginChroniclePublication(binding);
     }
+
+    const storedHead = claimed?.publication?.expectedHeadSha ?? null;
+
+    const commit = await github(`/repos/${owner}/${repo}/git/commits/${baseSha}`);
+    if (!commit.ok) return markFailed(key, commit.error);
+    const baseTreeSha = commit.payload?.tree?.sha;
+    if (!baseTreeSha) return markFailed(key, "could not read base tree");
 
     const existingRef = await github(
       `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
       { allowStatuses: [404] }
     );
-    if (!existingRef.ok) return existingRef;
+    if (!existingRef.ok) return markFailed(key, existingRef.error);
 
     let headSha;
     if (existingRef.status === 404) {
+      const blobs = [];
+      for (const item of [
+        { path: entryPath, content: entry },
+        { path: TIMELINE_PATH, content: nextTimeline }
+      ]) {
+        const blob = await github(`/repos/${owner}/${repo}/git/blobs`, {
+          method: "POST",
+          body: { content: item.content, encoding: "utf-8" }
+        });
+        if (!blob.ok) return markFailed(key, blob.error);
+        blobs.push({ path: item.path, mode: "100644", type: "blob", sha: blob.payload.sha });
+      }
       const tree = await github(`/repos/${owner}/${repo}/git/trees`, {
         method: "POST",
         body: { base_tree: baseTreeSha, tree: blobs }
       });
-      if (!tree.ok) return tree;
+      if (!tree.ok) return markFailed(key, tree.error);
       const newCommit = await github(`/repos/${owner}/${repo}/git/commits`, {
         method: "POST",
         body: {
           message: `Docs: chronicle ${date}-${slug}`,
           tree: tree.payload.sha,
-          parents: [main.sha]
+          parents: [baseSha]
         }
       });
-      if (!newCommit.ok) return newCommit;
+      if (!newCommit.ok) return markFailed(key, newCommit.error);
       const created = await github(`/repos/${owner}/${repo}/git/refs`, {
         method: "POST",
         body: { ref: `refs/heads/${branch}`, sha: newCommit.payload.sha }
       });
-      if (!created.ok) return created;
+      if (!created.ok) return markFailed(key, created.error);
       headSha = newCommit.payload.sha;
     } else {
-      headSha = existingRef.payload?.object?.sha;
+      const existingSha = existingRef.payload?.object?.sha;
+      if (typeof existingSha !== "string") {
+        return markFailed(key, "BRANCH_COLLISION: existing branch has no SHA");
+      }
+      if (storedHead && storedHead === existingSha) {
+        headSha = existingSha;
+      } else {
+        return markFailed(key, "BRANCH_COLLISION: existing branch does not match the stored publication head");
+      }
+    }
+
+    if (typeof store?.bindChroniclePublicationHead === "function") {
+      await store.bindChroniclePublicationHead(key, headSha);
     }
 
     let prUrl;
@@ -233,7 +312,7 @@ export function createChroniclePublisher({
     const existingPr = await github(
       `/repos/${owner}/${repo}/pulls?head=${owner}:${encodeURIComponent(branch)}&state=open`
     );
-    if (!existingPr.ok) return existingPr;
+    if (!existingPr.ok) return markFailed(key, existingPr.error);
     const found = Array.isArray(existingPr.payload) ? existingPr.payload[0] : null;
     if (found) {
       prUrl = found.html_url;
@@ -248,25 +327,44 @@ export function createChroniclePublisher({
           body: "Autonomous BMTB1 chronicle entry. Mechanical scope checks only. No production change."
         }
       });
-      if (!pull.ok) return pull;
+      if (!pull.ok) return markFailed(key, pull.error);
       prUrl = pull.payload.html_url;
       prNumber = pull.payload.number;
     }
 
-    const liveMain = await readMainSha();
-    if (!liveMain.ok) return liveMain;
-    if (liveMain.sha !== main.sha) {
-      const drift = failPolicy("BASE_DRIFT: main SHA changed; publication aborted");
-      if (typeof store?.failChroniclePublication === "function") await store.failChroniclePublication(key, drift.error);
-      return drift;
-    }
+    const pullMeta = await github(`/repos/${owner}/${repo}/pulls/${prNumber}`);
+    if (!pullMeta.ok) return markFailed(key, pullMeta.error);
+    const meta = inspectPullMetadata(pullMeta.payload, {
+      baseSha,
+      branch,
+      headSha,
+      owner,
+      repo
+    });
+    if (!meta.ok) return markFailed(key, meta.error);
 
     const fileList = await github(`/repos/${owner}/${repo}/pulls/${prNumber}/files`);
-    if (!fileList.ok) return fileList;
-    const merge = await squashMerge(prNumber, fileList.payload);
-    if (!merge.ok) {
-      if (typeof store?.failChroniclePublication === "function") await store.failChroniclePublication(key, merge.error);
-      return merge;
+    if (!fileList.ok) return markFailed(key, fileList.error);
+    const files = canMergePull(fileList.payload, entryPath);
+    if (!files.ok) return markFailed(key, files.error);
+
+    const headBytes = await inspectHeadBytes({ headSha, entryPath, entry, nextTimeline });
+    if (!headBytes.ok) return markFailed(key, headBytes.error);
+
+    if (typeof store?.isChroniclePaused === "function" && await store.isChroniclePaused()) {
+      return markFailed(key, "chronicle publishing is paused by the owner kill switch");
+    }
+
+    const liveMain = await readMainSha();
+    if (!liveMain.ok) return markFailed(key, liveMain.error);
+    if (liveMain.sha !== baseSha) {
+      return markFailed(key, "BASE_DRIFT: main SHA changed; publication aborted");
+    }
+
+    const merge = await squashMerge(prNumber, headSha);
+    if (!merge.ok) return markFailed(key, merge.error);
+    if (merge.merged !== true) {
+      return markFailed(key, "MERGE_NOT_CONFIRMED: GitHub did not report merged=true");
     }
 
     if (typeof store?.completeChroniclePublication === "function") {
@@ -280,8 +378,11 @@ export function createChroniclePublisher({
       branch,
       prUrl,
       prNumber,
-      merged: merge.merged === true,
-      baseSha: main.sha
+      merged: true,
+      baseSha,
+      expectedHeadSha: headSha,
+      entrySha,
+      timelineSha
     });
   }
 
