@@ -138,8 +138,10 @@ export function createSolanaRuntime({
 
   function reconciliationStatus(state, snapshot, tradeTime) {
     const expected = expectedNetUnits(state);
-    const actual = Number(snapshot.brokerNetUnits ?? 0);
-    if (!Number.isFinite(actual)) return { ok: false, expected, actual: null };
+    if (!Number.isFinite(snapshot?.brokerNetUnits)) {
+      return { ok: false, unread: true, expected, actual: null };
+    }
+    const actual = Number(snapshot.brokerNetUnits);
     if (Math.abs(expected - actual) <= 0.0050001) return { ok: true, expected, actual };
     const lastFillMs = state.lastFillAt ? Date.parse(state.lastFillAt) : NaN;
     const ageMs = Number.isFinite(lastFillMs) ? Date.parse(tradeTime) - lastFillMs : Infinity;
@@ -215,6 +217,19 @@ export function createSolanaRuntime({
 
     const firstRisk = await riskFor(state, trade, 0);
     const recon = reconciliationStatus(state, firstRisk.snapshot, trade.tradeTime);
+    if (!recon.ok && recon.unread) {
+      await addEvent("WARN", "SOL_BROKER_NET_UNAVAILABLE", {
+        expectedVirtualNetUnits: recon.expected,
+        brokerNetUnits: null
+      });
+      previousPrice = trade.price;
+      return Object.freeze({
+        status: "ACCOUNT_DATA_UNAVAILABLE",
+        state,
+        ma,
+        reconciliation: Object.freeze({ ...recon })
+      });
+    }
     if (!recon.ok) {
       await addEvent("ERROR", "SOL_NET_RECONCILIATION_MISMATCH", {
         expectedVirtualNetUnits: recon.expected,
