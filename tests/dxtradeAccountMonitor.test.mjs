@@ -168,3 +168,29 @@ test("a failed positions read does not treat metrics-flat as authoritative", asy
   assert.equal(monitor.getSnapshot().healthy, false);
   assert.equal(monitor.getSnapshot().fresh, true);
 });
+
+test("an unreadable positions envelope keeps the metrics snapshot and marks the net unread", async () => {
+  const monitor = createDxtradeAccountMonitor({
+    client: {
+      async login() {},
+      async getAccountMetrics() {
+        return payload({ openPositionsCount: 0, positions: [], openPl: 0 });
+      },
+      async getOpenPositions() {
+        return { account: "default:I50K2163174" };
+      }
+    },
+    instrument: "SOL/USD",
+    startingBalance: 50_000,
+    getPersistedPeakClosedBalance: async () => 50_000,
+    pollIntervalMs: 1_000,
+    freshAfterMs: 3_000,
+    now: () => 1_000_000
+  });
+  const snapshot = await monitor.pollOnce();
+  assert.equal(snapshot.balance, 50_050);
+  assert.equal(snapshot.positionsReadFailed, true);
+  assert.equal(snapshot.signedNetUnits, null);
+  assert.equal(snapshot.positionSource, "open-positions-unreadable");
+  assert.equal(monitor.getSnapshot().healthy, false);
+});

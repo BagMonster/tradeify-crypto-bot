@@ -10,6 +10,7 @@ import { createSolanaQuantityAdapter } from "./src/execution/solanaQuantityAdapt
 import { createSolanaExecutionGuard } from "./src/execution/solanaExecutionGuard.js";
 import { createSolanaLiveCanary } from "./src/execution/solanaCanary.js";
 import { createDxtradeAccountMonitor } from "./src/account/dxtradeAccountMonitor.js";
+import { trustedSignedNet } from "./src/account/dxtradeSignedNet.js";
 import { formatDxtradeAccountDiagnostic } from "./src/account/dxtradeDiagnostics.js";
 import { createSolanaPersistence } from "./src/state/solanaPersistence.js";
 import { createSolanaRuntime } from "./src/runtime/solanaRuntime.js";
@@ -185,11 +186,7 @@ const solanaRuntime = createSolanaRuntime({
       feedHealthy: liveFeedState.connected === true && liveFeedState.stale === false,
       accountDataFresh: accountStatus.healthy === true,
       nettingConfirmed: true,
-      brokerNetUnits: snapshot?.positionsReadFailed === true
-        ? null
-        : Number.isFinite(snapshot?.signedNetUnits)
-          ? snapshot.signedNetUnits
-          : snapshot?.instrumentPosition?.quantity ?? 0
+      brokerNetUnits: trustedSignedNet(accountStatus)
     });
   }
 });

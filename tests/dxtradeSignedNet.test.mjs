@@ -4,7 +4,8 @@ import {
   applyOpenPositionsOverlay,
   netsMatch,
   signedNetFromOpenPositions,
-  signedPositionQuantity
+  signedPositionQuantity,
+  trustedSignedNet
 } from "../src/account/dxtradeSignedNet.js";
 
 test("SELL side quantity is signed short even when the API returns a positive size", () => {
@@ -62,4 +63,23 @@ test("invalid open-positions book locks the snapshot instead of keeping metrics-
   assert.equal(next.accountLocked, true);
   assert.match(next.invariantError, /non-SOL\/USD/);
   assert.equal(next.overlayError, next.invariantError);
+});
+
+test("positionRows accepts alternate DXtrade envelopes", () => {
+  const listed = signedNetFromOpenPositions({
+    positionList: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }]
+  }, "SOL/USD");
+  assert.equal(listed.ok, true);
+  assert.equal(listed.netUnits, -0.44);
+});
+
+test("trustedSignedNet never treats a missing snapshot as flat zero", () => {
+  assert.equal(trustedSignedNet(null), null);
+  assert.equal(trustedSignedNet({ snapshot: null }), null);
+  assert.equal(trustedSignedNet({
+    snapshot: { signedNetUnits: 0, positionsReadFailed: true }
+  }), null);
+  assert.equal(trustedSignedNet({
+    snapshot: { signedNetUnits: -0.44, positionsReadFailed: false }
+  }), -0.44);
 });
