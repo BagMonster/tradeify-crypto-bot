@@ -1,6 +1,6 @@
 # Timeline
 
-Evidence-backed milestones only. Narrative lives in [`entries/`](entries/). If a date is missing from a source, it is not invented here.
+Evidence-backed milestones only. Narrative lives in [`entries/`](entries/). If a date is missing from a source, it is not invented here. Times are UTC.
 
 | When | What | Kind | Source |
 |---|---|---|---|
@@ -11,10 +11,10 @@ Evidence-backed milestones only. Narrative lives in [`entries/`](entries/). If a
 | 2026-08-26 | After reconcile: broker SOL flat, virtual net zero, open lots zero, rings 20/20 armed, state version 2, ladder ready, bot running. | Fact | Founding note; D-050 path |
 | 2026-08-26 | D-050 `/reconcile` + `/confirmreconcile` merged via PR #46. | Fact | `docs/decisions/D-050-audited-virtual-reconcile.md`; PR #46 |
 | 2026-08-26 | D-052 read-only GitHub tools merged via PR #48 (`40ffcb45`). Companion-only. | Fact | `docs/decisions/D-052-repo-inspection-tools.md`; PR #48 |
-| 2026-08-26 | SHORT2 filled: 0.44 SOL SELL @ $95.91. Virtual net −0.44. | Fact | `docs/decisions/D-053-matched-book-rematch.md` |
+| 2026-08-26T15:59:10.937Z | SHORT2 filled: 0.44 SOL SELL @ $95.91. Virtual net −0.44. | Fact | `/status` last fill; `docs/decisions/D-053-matched-book-rematch.md` |
 | 2026-08-26 | D-053 rematch + signed SELL/SHORT net merged via PR #49 (`af455f6`). | Fact | `docs/decisions/D-053-matched-book-rematch.md`; PR #49 |
 | 2026-08-26 | D-054 unread broker net is not a flat book, merged via PR #50 (`9438cf73`). | Fact | `docs/decisions/D-054-unread-broker-fail-closed.md`; `main` tip |
-| 2026-08-26 evening | After D-054 trading-worker deploy, `/status` showed virtual −0.44 = broker −0.44, fresh 35ms, halt off, bot running, SHORT2 still open. | Fact | Owner `/status` paste recorded in the 2026-08-26 BMTB1 handoff |
-| 2026-08-26 evening | Chronicle shelf created on branch `docs/bmtb1-chronicle`. | Fact | This directory |
+| 2026-08-27T02:00Z approx | After D-054 trading-worker deploy, `/status` showed virtual −0.44 = broker −0.44, fresh 35ms, halt off, bot running, SHORT2 still open. | Fact | Owner `/status` paste recorded in the 2026-08-26 BMTB1 handoff (written ~19:00 PDT / 02:00 UTC) |
+| 2026-08-27T03:02Z | Chronicle shelf created on branch `docs/bmtb1-chronicle`. | Fact | This directory; commit `829fe417` |
 
 D-051 (live body snapshot) is approved and **not** on `main` as of `9438cf73`. It is not listed as shipped.
