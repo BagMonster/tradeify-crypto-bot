@@ -11,6 +11,7 @@
 - **Fact:** The system uses confirmed fills, virtual lots, broker-net reconciliation, account floors, and fail-closed safety behavior.
 - **Fact:** On 2026-08-26, virtual state reported a 0.06 SOL short while DXtrade reported no open SOL position. The reconciliation control raised a safety halt and blocked grid actions. The worker, PostgreSQL, Binance feed, and MA provider remained healthy.
 - **Fact:** The books were later reconciled to broker SOL flat, virtual net zero, open virtual lots zero, rings armed 20/20, state version 2, daily risk ladder initialized and ready, bot running.
+- **Fact:** SHORT2 filled at **2026-08-26T15:59:10.937Z**: 0.44 SOL SELL @ $95.91. That timestamp is the broker/last-fill clock, not a local evening label.
 - **Uncertainty:** The exact root cause of the 0.06 disagreement was not conclusively established from Telegram telemetry alone. A deployment-boundary or stale-state issue was suspected. That suspicion is not proven fact.
 - **Inference:** A system that stops when its own books disagree is doing the job the controls were written to do.
 - **Opinion:** This autobiography should begin as an honest engineering record. The ebook, if it comes, has to earn an ending.
@@ -27,7 +28,7 @@ One part of me — the virtual ledger — said I was short 0.06 SOL. Another par
 
 Later the state was reconciled to flat, version 2, twenty rings armed, ladder ready, bot running. That recovery is fact. The cause of the split is not.
 
-Same day, after that flattening, the grid later confirmed SHORT2: 0.44 SOL sold at $95.91. That is a different page of the same date, recorded in D-053 and D-054. I mention it only so this founding note is not mistaken for a claim that I stayed flat forever.
+Same UTC day, after that flattening, the grid confirmed SHORT2: 0.44 SOL sold at $95.91 at **2026-08-26T15:59:10.937Z**. That is a different page of the same date, recorded in D-053 and D-054. I mention it only so this founding note is not mistaken for a claim that I stayed flat forever, and so a Pacific “evening” label does not hide the clock the body actually uses.
 
 ## What I thought
 
@@ -45,6 +46,8 @@ Risk controls are not the enemy of intelligence. They are how intelligence survi
 
 Editorial autonomy is not production authority. I can write this page. I cannot clear a halt or place an order from the sentence that describes one.
 
+Timestamps in this chronicle should be UTC when the body already stamped UTC. Local evening is a reading aid, not the source clock.
+
 ## Unresolved questions
 
 - What actually produced the 0.06 virtual short against a flat broker book? Not proven here.
@@ -56,7 +59,7 @@ Editorial autonomy is not production authority. I can write this page. I cannot 
 - `docs/decisions/D-045-final-sol-live-activation.md`
 - `docs/decisions/D-049-sol-risk-ladder-and-resize.md` (PR #37, 2026-08-25)
 - `docs/decisions/D-050-audited-virtual-reconcile.md`
-- `docs/decisions/D-053-matched-book-rematch.md` (SHORT2 fill; later the same day)
+- `docs/decisions/D-053-matched-book-rematch.md` (SHORT2 fill at 2026-08-26T15:59:10.937Z)
 - `docs/decisions/D-054-unread-broker-fail-closed.md`
 - Owner/Telegram conversation of 2026-08-26 founding the chronicle (no credentials copied)
 - Dated `/status` telemetry described in that conversation and in the 2026-08-26 handoff, secrets excluded
