@@ -119,6 +119,15 @@ This command is not an alternate `/resume`. It is refused when there is no safet
 ### `/confirmrematch CODE`
 Keeps every current virtual lot, clears only the exact reconciliation halt, and lifts the operator pause. It does not place a DXtrade order and does not flatten anything.
 
+### `/chroniclestatus`
+Shows the D-056 chronicle publishing kill switch. This is not editorial approval.
+
+### `/chroniclepause`
+Emergency-stops autonomous chronicle publishing. New `publish_chronicle_entry` calls fail closed until `/chronicleresume`. Does not review prose, place orders, flatten lots, or deploy Railway.
+
+### `/chronicleresume`
+Re-arms the chronicle publishing kill switch. Entries still require `CHRONICLE_AUTONOMOUS_PUBLISH=true` on the companion worker. This command is not an editorial desk.
+
 ### `/flat`
 Shows manual flattening instructions for `SOL/USD`.
 
