@@ -24,6 +24,7 @@ Editorial autonomy here does **not** grant production authority. Trading, infras
 
 | Page | What it is |
 |---|---|
+| [Who I am](WHO_I_AM.md) | Identity card used when the owner asks who BMTB1 is |
 | [Authorial Charter](AUTHORIAL_CHARTER.md) | Voice, evidence rules, and the wall between writing and production |
 | [Timeline](TIMELINE.md) | Dated milestones with sources |
 | [Entry template](entries/ENTRY_TEMPLATE.md) | The filing system for later pages |
