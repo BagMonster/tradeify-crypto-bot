@@ -13,24 +13,14 @@ function isExpiredInteraction(status, payload) {
   return /not found|INVALID_ARGUMENT|previous_interaction|expired|unknown interaction/i.test(text);
 }
 
-function mapParameters(parameters) {
-  if (!parameters || typeof parameters !== "object") {
-    return { type: "OBJECT", properties: {} };
-  }
-  const copy = { ...parameters };
-  if (typeof copy.type === "string") copy.type = copy.type.toUpperCase();
-  return copy;
-}
-
 function mapTools(tools) {
   if (!Array.isArray(tools)) return [];
-  return [{
-    function_declarations: tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: mapParameters(tool.parameters)
-    }))
-  }];
+  return tools.map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters ?? { type: "object", properties: {} }
+  }));
 }
 
 function mapInput(input, callNames) {
@@ -39,16 +29,12 @@ function mapInput(input, callNames) {
   return input.map((item) => {
     if (item?.type === "function_call_output") {
       const name = callNames.get(item.call_id) || item.name || "";
-      let parsed = item.output;
-      if (typeof parsed === "string") {
-        try { parsed = JSON.parse(parsed); } catch { parsed = { output: parsed }; }
-      }
+      const text = typeof item.output === "string" ? item.output : JSON.stringify(item.output ?? {});
       return {
-        function_response: {
-          id: item.call_id,
-          name,
-          response: parsed && typeof parsed === "object" ? parsed : { output: parsed }
-        }
+        type: "function_result",
+        call_id: item.call_id,
+        name,
+        result: [{ type: "text", text }]
       };
     }
     return item;
