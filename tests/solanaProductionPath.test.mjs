@@ -175,6 +175,7 @@ test("SOL execution guard cannot submit while either execution lock is false", a
     adapter: { place: async () => { placed += 1; } },
     client: {
       getOpenPositions: async () => ({ positions: [] }),
+      placePositionPartialClose: async () => {},
       placePositionClose: async () => {},
       reconcileQuantityOrder: async () => ({ status: "PENDING" })
     },
@@ -226,6 +227,7 @@ test("protective flatten closes exactly the one signed net SOL broker position",
       getOpenPositions: async () => ({
         positions: [{ symbol: "SOL/USD", quantity: -0.12, positionCode: "position-sol-1" }]
       }),
+      placePositionPartialClose: async () => {},
       placePositionClose: async (request) => {
         closeRequest = request;
         return { orderId: "broker-flat-1" };
@@ -279,7 +281,8 @@ test("D-049 protective partial cut uses the linked broker position, unique daily
     adapter: { place: async () => { throw new Error("grid adapter should not be used for protective cut"); } },
     client: {
       getOpenPositions: async () => ({ positions: [{ symbol: "SOL/USD", quantity: 1.2, positionCode: "sol-pos" }] }),
-      placePositionClose: async (request) => { closeRequest = request; return { orderId: "cut-1" }; },
+      placePositionPartialClose: async (request) => { closeRequest = request; return { orderId: "cut-1" }; },
+      placePositionClose: async () => { throw new Error("flatten path must not be used for a partial cut"); },
       reconcileQuantityOrder: async () => ({
         status: "FILLED", fillPrice: 82, filledQuantity: 0.6, filledAt: "2026-08-24T20:00:00.000Z"
       })
