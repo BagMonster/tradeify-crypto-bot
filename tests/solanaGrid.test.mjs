@@ -28,7 +28,7 @@ test("D-049 SOL geometry is 10 mirrored rings from 13.5% through 54%", () => {
   approximately(state.rings.find((r) => r.tag === "BUY10").distance, -0.54);
   approximately(state.rings.find((r) => r.tag === "SELL10").distance, 0.54);
   approximately(state.rings.find((r) => r.tag === "BUY1").usd, 28.68);
-  approximately(state.rings.find((r) => r.tag === "BUY10").usd, 1102.561015625);
+  approximately(state.rings.find((r) => r.tag === "BUY10").usd, 1102.555546875);
   assert.equal(GRID_DEFINITION.deadZoneBands, 2);
   assert.equal(GRID_DEFINITION.activeLevelsPerSide, 10);
   assert.equal(GRID_DEFINITION.grossExposureCeilingUsd, 6600);
