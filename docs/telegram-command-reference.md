@@ -6,6 +6,22 @@
 
 All commands except `/whoami` require the configured owner Telegram user ID. Unauthorized users receive `Not authorized` and cannot invoke trading-control or development functions.
 
+
+## Button panel
+
+`/b` (aliases `/buttons`, `/menu`) shows every command as a tappable inline keyboard.
+
+Buttons are a shortcut for the slash commands, not a replacement — every slash
+command in this document continues to work exactly as before, and a button routes
+through the same handler as the command it is labelled with.
+
+**Confirmation commands have no buttons, by design.** `/confirmresume`,
+`/confirmreconcile` and `/confirmrematch` each require a one-time code typed by the
+owner. That friction is the safety gate for a two-step control. A button may
+*request* a code; only a typed command can confirm one. If a stale or forged
+callback names a confirm command, the bot refuses it and replies with the typed
+form instead.
+
 ## Commands
 
 ### `/status`
@@ -73,7 +89,7 @@ Use this for broker/instrument metadata checks, not as proof that an order has f
 ### `/solcanary`
 Inspects or, while automatic grid execution is OFF, runs the separately owner-approved real DXtrade lifecycle canary.
 
-The command is intentionally owner-only and is not available as an inline button. The verified V2 canary:
+The command is intentionally owner-only. It is also available from the `/b` panel as **SOL Canary**. The verified V2 canary:
 1. required no operator pause or safety halt, live equity above the active account floor, and a flat DXtrade account;
 2. submitted exactly one `0.01 SOL` market BUY using a persistent canary order identity;
 3. waited at least 25 seconds from the confirmed broker fill;
@@ -157,19 +173,7 @@ Shows the command list and opens the inline control menu.
 
 ## Inline buttons
 
-| Button | Same behavior as |
-|---|---|
-| `Status` | `/status` |
-| `Health` | `/health` |
-| `Grid Levels` | `/levels` |
-| `Ring Position` | `/rings` |
-| `Pause Bot` | `/kill` |
-| `Resume` | `/resume` |
-| `Development` | `/code` |
-| `Flat Instructions` | `/flat` |
-| `Help` | `/help` |
-
-Inline buttons use the same owner authorization check as slash commands. `/solcanary` is deliberately slash-command-only so it cannot be started by an accidental button tap.
+Send `/b` (or `/buttons`, `/menu`) for the full panel. Every button uses the same handler as its slash command. `/confirmresume`, `/confirmreconcile`, and `/confirmrematch` have no buttons. See **Button panel** above.
 
 ## OpenAI development companion
 
