@@ -55,3 +55,45 @@ test("maps tools to function_declarations and reads nested function_call parts",
   assert.equal(seen[1].previous_interaction_id, "inter_abc123XYZ");
   assert.equal(seen[1].input[0].function_response.name, "list_repo_files");
 });
+
+test("flash-lite requests send medium thinking_level", async () => {
+  const seen = [];
+  const request = createGeminiRequester({
+    apiKey: "test-key",
+    model: "gemini-3.5-flash-lite",
+    instructions: "You are BMTB1.",
+    fetchImpl: async (_url, init) => {
+      seen.push(JSON.parse(init.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: "inter_lite1", output_text: "ok", steps: [] })
+      };
+    }
+  });
+
+  await request({ input: "who are you", tools: [] });
+  assert.equal(seen[0].model, "gemini-3.5-flash-lite");
+  assert.equal(seen[0].generation_config.thinking_level, "medium");
+});
+
+test("non-lite models omit flash-lite thinking_level", async () => {
+  const seen = [];
+  const request = createGeminiRequester({
+    apiKey: "test-key",
+    model: "gemini-3.6-flash",
+    instructions: "You are BMTB1.",
+    fetchImpl: async (_url, init) => {
+      seen.push(JSON.parse(init.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: "inter_flash1", output_text: "ok", steps: [] })
+      };
+    }
+  });
+
+  await request({ input: "ping", tools: [] });
+  assert.equal(seen[0].model, "gemini-3.6-flash");
+  assert.equal(seen[0].generation_config, undefined);
+});
