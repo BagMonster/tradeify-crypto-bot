@@ -1,5 +1,5 @@
 const DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
-const DEFAULT_MODEL = "gemini-3.7-flash";
+const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const DEFAULT_FALLBACK_MODEL = "gemini-3.6-flash";
 const GEMINI_INTERACTION_ID = /^(int_|inter_)/i;
 
@@ -40,6 +40,13 @@ function isRetryablePreviousId(status, payload) {
 
 function isToolFollowUp(input) {
   return Array.isArray(input) && input.some((item) => item?.type === "function_call_output" || item?.type === "function_result" || item?.function_response);
+}
+
+function generationConfigFor(modelName) {
+  if (/flash-lite/i.test(String(modelName ?? ""))) {
+    return { thinking_level: "medium" };
+  }
+  return null;
 }
 
 function sanitizeSchema(value) {
@@ -190,6 +197,8 @@ export function createGeminiRequester({
       tools: mapTools(tools),
       store: true
     };
+    const thinking = generationConfigFor(body.model);
+    if (thinking) body.generation_config = thinking;
     if (usablePrevious) body.previous_interaction_id = usablePrevious;
 
     if (followUp) {
@@ -223,6 +232,9 @@ export function createGeminiRequester({
       console.warn(`Gemini ${body.model} still at HTTP ${response.status}; retrying ${backupModel}`);
       delete body.previous_interaction_id;
       body.model = backupModel;
+      const backupThinking = generationConfigFor(body.model);
+      if (backupThinking) body.generation_config = backupThinking;
+      else delete body.generation_config;
       await new Promise((resolve) => setTimeout(resolve, 800));
       activeKey = fallbackKey || primaryKey;
       ({ response, payload } = await post(body, activeKey));
