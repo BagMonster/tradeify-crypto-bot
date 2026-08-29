@@ -35,7 +35,7 @@ const geminiKey = envText("GEMINI_FREE_API_KEY") || envText("GEMINI_API_KEY");
 const geminiPaidKey = envText("GEMINI_PAID_API_KEY");
 const openaiKey = envText("OPENAI_API_KEY");
 const useGemini = geminiKey !== "";
-const geminiModel = (process.env.GEMINI_MODEL ?? "gemini-3.7-flash").trim();
+const geminiModel = (process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite").trim();
 const openaiModel = (process.env.OPENAI_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
 const model = useGemini ? geminiModel : openaiModel;
 const databaseSsl = parseBoolean(process.env.DATABASE_SSL);
