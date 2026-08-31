@@ -219,17 +219,19 @@ test("protective flatten closes exactly the one signed net SOL broker position",
     }
   };
   let closeRequest = null;
+  let open = [{ symbol: "SOL/USD", quantity: -0.12, positionCode: "position-sol-1" }];
   const guard = createSolanaExecutionGuard({
     autoExecute: true,
     strategyAutoExecute: true,
     adapter: { place: async () => { throw new Error("grid adapter should not be used for protective close"); } },
     client: {
       getOpenPositions: async () => ({
-        positions: [{ symbol: "SOL/USD", quantity: -0.12, positionCode: "position-sol-1" }]
+        positions: open
       }),
       placePositionPartialClose: async () => {},
       placePositionClose: async (request) => {
         closeRequest = request;
+        open = [];
         return { orderId: "broker-flat-1" };
       },
       reconcileQuantityOrder: async () => ({
@@ -245,12 +247,12 @@ test("protective flatten closes exactly the one signed net SOL broker position",
   const result = await guard.executeProtectiveFlatten({ stateVersion: 7, reason: "daily floor" });
   assert.equal(result.status, "FILLED");
   assert.deepEqual(closeRequest, {
-    orderCode: "SOLFLAT-7",
+    orderCode: "SOLFLAT-7-c08ef31fe356",
     orderSide: "BUY",
     quantity: 0.12,
     positionCode: "position-sol-1"
   });
-  assert.equal(orders.get("SOLFLAT-7").status, "FILLED");
+  assert.equal(orders.get("SOLFLAT-7-c08ef31fe356").status, "FILLED");
 });
 
 test("D-049 protective partial cut uses the linked broker position, unique daily identity, and slippage bypass", async () => {
@@ -299,12 +301,12 @@ test("D-049 protective partial cut uses the linked broker position, unique daily
   });
   assert.equal(result.status, "FILLED");
   assert.deepEqual(closeRequest, {
-    orderCode: "SOLCUT-20260824-9",
+    orderCode: "SOLCUT-20260824-9-76cb1b28ecf2",
     orderSide: "SELL",
     quantity: 0.6,
     positionCode: "sol-pos"
   });
-  assert.equal(orders.get("SOLCUT-20260824-9").actionType, "PROTECTIVE_CUT");
+  assert.equal(orders.get("SOLCUT-20260824-9-76cb1b28ecf2").actionType, "PROTECTIVE_CUT");
 });
 
 test("live runtime executes eligible exits before an entry crossed on the same live update", async () => {
