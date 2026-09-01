@@ -118,3 +118,13 @@ Full decision: `docs/decisions/D-050-audited-virtual-reconcile.md`.
 BMTB1 `/code` may list, read, and search `BagMonster/tradeify-crypto-bot` through companion-worker GitHub tools. No writes, merge, deploy, or trading tools.
 
 Full decision: `docs/decisions/D-052-repo-inspection-tools.md`.
+
+## D-059 — One-sided grid, position-linked exits, unread book fails closed
+
+**Status:** DRAFT — awaiting owner approval.
+
+EXIT intents close live same-side SOL/USD broker tickets by `positionCode`; protective cut and flatten operate across every SOL ticket, and flatten is successful only after a confirming flat-book read. ENTRY intents remain OPEN orders but are blocked while any opposing-side SOL ticket exists. A failed or invalid positions read returns `ACCOUNT_DATA_UNAVAILABLE` and places no order; failed post-flatten verification returns `NOT_VERIFIED`.
+
+This decision documents the material one-sided strategy rule shipped in PR #61 and requires owner approval before deployment. The heartbeat close bug, live partial-close canary, virtual-lot-to-position binding, and multi-asset expansion remain out of scope.
+
+Full decision: `docs/decisions/D-059-one-sided-grid-and-position-linked-exits.md`.

@@ -301,3 +301,234 @@ test("protective flatten returns NOT_FLAT when a position survives filled legs",
   assert.equal(result.status, "NOT_FLAT");
   assert.equal(result.orderCode, "SOLFLAT-7-c08ef31fe356");
 });
+
+test("ENTRY returns ACCOUNT_DATA_UNAVAILABLE with no order when the position read throws", async () => {
+  let adapterCalls = 0;
+  let brokerOrders = 0;
+  const guard = guardFor({
+    adapterPlace: () => { adapterCalls += 1; },
+    client: {
+      getOpenPositions: async () => { throw new Error("positions unavailable"); },
+      placePositionPartialClose: async () => { brokerOrders += 1; },
+      placePositionClose: async () => { brokerOrders += 1; },
+      reconcileQuantityOrder: async () => { brokerOrders += 1; return { status: "PENDING" }; }
+    }
+  });
+
+  const result = await guard.executeIntent({
+    type: "ENTRY",
+    strategyId: "sol-outer-heavy-v1",
+    stateVersion: 9,
+    tag: "BUY1",
+    ringTag: "BUY1",
+    lotId: "BUY1-V9",
+    side: "BUY",
+    quantity: 0.17
+  });
+
+  assert.equal(result.status, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.match(result.reason, /positions unavailable/);
+  assert.equal(adapterCalls, 0);
+  assert.equal(brokerOrders, 0);
+});
+
+test("ENTRY returns ACCOUNT_DATA_UNAVAILABLE with no order for an invalid positions payload", async () => {
+  let adapterCalls = 0;
+  let brokerOrders = 0;
+  const guard = guardFor({
+    adapterPlace: () => { adapterCalls += 1; },
+    client: {
+      getOpenPositions: async () => ({ unavailable: [] }),
+      placePositionPartialClose: async () => { brokerOrders += 1; },
+      placePositionClose: async () => { brokerOrders += 1; },
+      reconcileQuantityOrder: async () => { brokerOrders += 1; return { status: "PENDING" }; }
+    }
+  });
+
+  const result = await guard.executeIntent({
+    type: "ENTRY",
+    strategyId: "sol-outer-heavy-v1",
+    stateVersion: 10,
+    tag: "BUY2",
+    ringTag: "BUY2",
+    lotId: "BUY2-V10",
+    side: "BUY",
+    quantity: 0.12
+  });
+
+  assert.equal(result.status, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.match(result.reason, /positions array/);
+  assert.equal(adapterCalls, 0);
+  assert.equal(brokerOrders, 0);
+});
+
+test("EXIT returns ACCOUNT_DATA_UNAVAILABLE with no order when the position read throws", async () => {
+  let adapterCalls = 0;
+  let brokerOrders = 0;
+  const guard = guardFor({
+    adapterPlace: () => { adapterCalls += 1; },
+    client: {
+      getOpenPositions: async () => { throw new Error("positions unavailable"); },
+      placePositionPartialClose: async () => { brokerOrders += 1; },
+      placePositionClose: async () => { brokerOrders += 1; },
+      reconcileQuantityOrder: async () => { brokerOrders += 1; return { status: "PENDING" }; }
+    }
+  });
+
+  const result = await guard.executeIntent({
+    type: "EXIT",
+    strategyId: "sol-outer-heavy-v1",
+    stateVersion: 11,
+    tag: "SELL2",
+    ringTag: "SELL2",
+    lotId: "SELL2-V11",
+    tranche: 1,
+    side: "BUY",
+    virtualSide: "SELL",
+    quantity: 0.10
+  });
+
+  assert.equal(result.status, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.match(result.reason, /positions unavailable/);
+  assert.equal(adapterCalls, 0);
+  assert.equal(brokerOrders, 0);
+});
+
+test("EXIT returns ACCOUNT_DATA_UNAVAILABLE with no order for an invalid positions payload", async () => {
+  let adapterCalls = 0;
+  let brokerOrders = 0;
+  const guard = guardFor({
+    adapterPlace: () => { adapterCalls += 1; },
+    client: {
+      getOpenPositions: async () => ({ unavailable: [] }),
+      placePositionPartialClose: async () => { brokerOrders += 1; },
+      placePositionClose: async () => { brokerOrders += 1; },
+      reconcileQuantityOrder: async () => { brokerOrders += 1; return { status: "PENDING" }; }
+    }
+  });
+
+  const result = await guard.executeIntent({
+    type: "EXIT",
+    strategyId: "sol-outer-heavy-v1",
+    stateVersion: 12,
+    tag: "SELL3",
+    ringTag: "SELL3",
+    lotId: "SELL3-V12",
+    tranche: 2,
+    side: "BUY",
+    virtualSide: "SELL",
+    quantity: 0.10
+  });
+
+  assert.equal(result.status, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.match(result.reason, /positions array/);
+  assert.equal(adapterCalls, 0);
+  assert.equal(brokerOrders, 0);
+});
+
+test("protective flatten returns ACCOUNT_DATA_UNAVAILABLE rather than ALREADY_FLAT when the read throws", async () => {
+  let brokerOrders = 0;
+  const guard = guardFor({
+    client: {
+      getOpenPositions: async () => { throw new Error("positions unavailable"); },
+      placePositionPartialClose: async () => { brokerOrders += 1; },
+      placePositionClose: async () => { brokerOrders += 1; },
+      reconcileQuantityOrder: async () => { brokerOrders += 1; return { status: "PENDING" }; }
+    }
+  });
+
+  const result = await guard.executeProtectiveFlatten({ stateVersion: 13, reason: "daily floor" });
+
+  assert.equal(result.status, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.notEqual(result.status, "ALREADY_FLAT");
+  assert.match(result.reason, /positions unavailable/);
+  assert.equal(brokerOrders, 0);
+});
+
+test("protective cut returns ACCOUNT_DATA_UNAVAILABLE when the position read throws", async () => {
+  let brokerOrders = 0;
+  const guard = guardFor({
+    client: {
+      getOpenPositions: async () => { throw new Error("positions unavailable"); },
+      placePositionPartialClose: async () => { brokerOrders += 1; },
+      placePositionClose: async () => { brokerOrders += 1; },
+      reconcileQuantityOrder: async () => { brokerOrders += 1; return { status: "PENDING" }; }
+    }
+  });
+
+  const result = await guard.executeProtectiveCut({
+    stateVersion: 14,
+    dayKey: "2026-08-31",
+    quantity: 0.10,
+    side: "BUY",
+    reason: "daily partial cut",
+    bypassSlippageCap: true
+  });
+
+  assert.equal(result.status, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.match(result.reason, /positions unavailable/);
+  assert.equal(brokerOrders, 0);
+});
+
+test("protective flatten returns NOT_VERIFIED when filled legs cannot be confirmed flat", async () => {
+  let positionReads = 0;
+  const guard = guardFor({
+    client: {
+      getOpenPositions: async () => {
+        positionReads += 1;
+        if (positionReads === 1) {
+          return {
+            positions: [{
+              symbol: "SOL/USD",
+              quantity: -0.12,
+              side: "SELL",
+              positionCode: "position-sol-verify"
+            }]
+          };
+        }
+        throw new Error("verification read unavailable");
+      },
+      placePositionPartialClose: async () => { throw new Error("flatten must use full close"); },
+      placePositionClose: async () => ({ orderId: "flat-verify-1" }),
+      reconcileQuantityOrder: async ({ requestedQuantity }) => ({
+        status: "FILLED",
+        fillPrice: 88,
+        filledQuantity: requestedQuantity,
+        filledAt: "2026-08-31T12:00:00.000Z"
+      })
+    }
+  });
+
+  const result = await guard.executeProtectiveFlatten({ stateVersion: 15, reason: "daily floor" });
+
+  assert.equal(result.status, "NOT_VERIFIED");
+  assert.equal(positionReads, 2);
+  assert.equal(result.filledQuantity, 0.12);
+});
+
+test("D-057 compatibility: ENTRY on the same side as an existing ticket still proceeds", async () => {
+  const placed = [];
+  const guard = guardFor({
+    adapterPlace: (request) => placed.push(request),
+    client: clientStub({
+      positions: [{ symbol: "SOL/USD", quantity: -0.22, side: "SELL", positionCode: "short-existing" }]
+    })
+  });
+
+  const result = await guard.executeIntent({
+    type: "ENTRY",
+    strategyId: "sol-outer-heavy-v1",
+    stateVersion: 16,
+    tag: "SELL4",
+    ringTag: "SELL4",
+    lotId: "SELL4-V16",
+    side: "SELL",
+    quantity: 0.10
+  });
+
+  assert.equal(result.status, "FILLED");
+  assert.equal(placed.length, 1);
+  assert.equal(placed[0].actionType, "ENTRY");
+  assert.equal(placed[0].side, "SELL");
+  assert.equal(placed[0].quantity, 0.10);
+});
