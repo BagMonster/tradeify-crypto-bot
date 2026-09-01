@@ -184,7 +184,18 @@ export function createSolanaExecutionGuard({
     // instrument simultaneously is prohibited by the funded-account rules, so an
     // entry is refused whenever any opposing position is already open.
     const wantedDirection = intent.side === "BUY" ? "LONG" : "SHORT";
-    const opposing = (await resolveAllSolPositions()).filter((leg) => leg.direction !== wantedDirection);
+    const read = await readAllSolPositions();
+    if (!read.ok) {
+      await addEvent("ERROR", "SOL_ENTRY_BLOCKED_ACCOUNT_DATA_UNAVAILABLE", {
+        orderCode: code, ringTag: intent.ringTag, reason: read.reason
+      });
+      return Object.freeze({
+        status: "ACCOUNT_DATA_UNAVAILABLE",
+        orderCode: code,
+        reason: `Cannot read the DXtrade book before entry: ${read.reason}`
+      });
+    }
+    const opposing = read.legs.filter((leg) => leg.direction !== wantedDirection);
     if (opposing.length > 0) {
       await addEvent("ERROR", "SOL_ENTRY_BLOCKED_OPPOSING_POSITION", {
         orderCode: code,
@@ -221,7 +232,18 @@ export function createSolanaExecutionGuard({
 
   async function executeExitIntent(intent, code) {
     const wantedDirection = intent.virtualSide === "BUY" ? "LONG" : "SHORT";
-    const all = await resolveAllSolPositions();
+    const read = await readAllSolPositions();
+    if (!read.ok) {
+      await addEvent("ERROR", "SOL_EXIT_BLOCKED_ACCOUNT_DATA_UNAVAILABLE", {
+        orderCode: code, ringTag: intent.ringTag, lotId: intent.lotId, reason: read.reason
+      });
+      return Object.freeze({
+        status: "ACCOUNT_DATA_UNAVAILABLE",
+        orderCode: code,
+        reason: `Cannot read the DXtrade book before exit: ${read.reason}`
+      });
+    }
+    const all = read.legs;
     const legs = all.filter((leg) => leg.direction === wantedDirection);
 
     if (legs.length === 0) {
@@ -328,8 +350,26 @@ export function createSolanaExecutionGuard({
     }
   }
 
-  async function resolveAllSolPositions() {
-    const payload = await client.getOpenPositions();
+  // D-054: an unread DXtrade book is neither flat nor a mismatch. Every caller
+  // must be able to distinguish "no positions" from "could not read positions",
+  // so the read returns a result object rather than throwing. A thrown error here
+  // would propagate out of executeIntent and be indistinguishable from a genuine
+  // strategy fault.
+  async function readAllSolPositions() {
+    let payload;
+    try {
+      payload = await client.getOpenPositions();
+    } catch (error) {
+      return Object.freeze({ ok: false, reason: error?.message ?? "DXtrade positions read failed" });
+    }
+    try {
+      return Object.freeze({ ok: true, legs: mapSolPositions(payload) });
+    } catch (error) {
+      return Object.freeze({ ok: false, reason: error?.message ?? "DXtrade positions payload is invalid" });
+    }
+  }
+
+  function mapSolPositions(payload) {
     return positionRows(payload)
       .filter((row) => positionSymbol(row) === "SOL/USD" && Math.abs(positionQuantity(row)) > 1e-12)
       .map((row) => {
@@ -460,7 +500,12 @@ export function createSolanaExecutionGuard({
     }
     if (!isEnabled()) return Object.freeze({ status: "BLOCKED", reason: "Automatic execution locks are off" });
 
-    const openLegs = await resolveAllSolPositions();
+    const cutRead = await readAllSolPositions();
+    if (!cutRead.ok) {
+      await addEvent("ERROR", "SOL_D049_PARTIAL_CUT_ACCOUNT_DATA_UNAVAILABLE", { reason: cutRead.reason });
+      return Object.freeze({ status: "ACCOUNT_DATA_UNAVAILABLE", reason: cutRead.reason });
+    }
+    const openLegs = cutRead.legs;
     if (openLegs.length === 0) return Object.freeze({ status: "ALREADY_FLAT" });
     if (openLegs.some((leg) => leg.closeSide !== requestedSide)) {
       await addEvent("ERROR", "SOL_D049_PARTIAL_CUT_SIDE_MISMATCH", {
@@ -512,7 +557,12 @@ export function createSolanaExecutionGuard({
     }
     if (!isEnabled()) return Object.freeze({ status: "BLOCKED", reason: "Automatic execution locks are off" });
 
-    const legs = await resolveAllSolPositions();
+    const flatRead = await readAllSolPositions();
+    if (!flatRead.ok) {
+      await addEvent("ERROR", "SOL_PROTECTIVE_FLATTEN_ACCOUNT_DATA_UNAVAILABLE", { reason: flatRead.reason });
+      return Object.freeze({ status: "ACCOUNT_DATA_UNAVAILABLE", reason: flatRead.reason });
+    }
+    const legs = flatRead.legs;
     if (legs.length === 0) return Object.freeze({ status: "ALREADY_FLAT" });
 
     if (legs.length > 1) {
@@ -548,8 +598,12 @@ export function createSolanaExecutionGuard({
     // A flatten is only a flatten if the account is actually flat afterwards. Every
     // leg reporting FILLED is not sufficient evidence on its own.
     if (aggregate.status === "FILLED") {
-      const remaining = await resolveAllSolPositions();
-      if (remaining.length > 0) {
+      const verify = await readAllSolPositions();
+      if (!verify.ok) {
+        await addEvent("ERROR", "SOL_PROTECTIVE_FLATTEN_NOT_VERIFIED", { reason: verify.reason });
+        aggregate = Object.freeze({ ...aggregate, status: "NOT_VERIFIED" });
+      } else if (verify.legs.length > 0) {
+        const remaining = verify.legs;
         await addEvent("ERROR", "SOL_PROTECTIVE_FLATTEN_NOT_FLAT", {
           reason,
           remainingLegs: remaining.length,
