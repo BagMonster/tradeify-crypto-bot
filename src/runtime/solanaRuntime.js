@@ -28,6 +28,7 @@ import {
 } from "../strategies/solanaGrid.js";
 import { createRingGrid } from "../strategies/ringGrid.js";
 import { createRingGridInstance } from "./ringGridInstance.js";
+import { withinFillGrace } from "./reconciliationWarning.js";
 
 function positive(name, value) {
   const n = typeof value === "number" ? value : Number(value);
@@ -129,8 +130,10 @@ function createD060Runtime({
     if (!state) throw new Error(`${instrument} runtime has not been initialized`);
     const expected = grid.expectedNetUnits(state);
     if (Math.abs(expected - brokerNetUnits) > 0.0050001) {
-      latestRisk = null;
-      return Object.freeze({ ok: false, status: "RECONCILIATION_BLOCKED", reconciliation: Object.freeze({ expected, actual: brokerNetUnits }) });
+      if (!withinFillGrace({ lastFillAt: state.lastFillAt, now: trade?.tradeTime ?? Date.now() })) {
+        latestRisk = null;
+        return Object.freeze({ ok: false, status: "RECONCILIATION_BLOCKED", reconciliation: Object.freeze({ expected, actual: brokerNetUnits }) });
+      }
     }
     const unrealisedUsd = Number(snapshot.instrumentUnrealisedUsd);
     const dayPnlUsd = Number(snapshot.instrumentDayPnlUsd);
@@ -154,7 +157,13 @@ function createD060Runtime({
       throw new Error(`${instrument}: minimum lot does not fit the innermost ring at the current price`);
     }
     const safety = await captureRisk(trade);
-    if (!safety.ok) return Object.freeze({ status: safety.status, reconciliation: safety.reconciliation ?? null });
+    if (!safety.ok) {
+      return Object.freeze({
+        status: safety.status,
+        reconciliation: safety.reconciliation ?? null,
+        stateVersion: instance.getState()?.version ?? 0
+      });
+    }
     return instance.process(trade);
   }
 
@@ -291,9 +300,8 @@ export function createSolanaRuntime({
     }
     const actual = Number(snapshot.brokerNetUnits);
     if (Math.abs(expected - actual) <= 0.0050001) return { ok: true, expected, actual };
-    const lastFillMs = state.lastFillAt ? Date.parse(state.lastFillAt) : NaN;
-    const ageMs = Number.isFinite(lastFillMs) ? Date.parse(tradeTime) - lastFillMs : Infinity;
-    return { ok: ageMs >= 0 && ageMs < 5_000, expected, actual, grace: ageMs >= 0 && ageMs < 5_000 };
+    const grace = withinFillGrace({ lastFillAt: state.lastFillAt, now: tradeTime });
+    return { ok: grace, expected, actual, grace };
   }
 
   async function saveLadder(next, force = false) {
@@ -376,7 +384,7 @@ export function createSolanaRuntime({
         brokerNetUnits: recon.actual
       });
       previousPrice = trade.price;
-      return Object.freeze({ status: "RECONCILIATION_BLOCKED", state, ma, reconciliation: Object.freeze({ ...recon }) });
+      return Object.freeze({ status: "RECONCILIATION_BLOCKED", state, ma, reconciliation: Object.freeze({ ...recon }), stateVersion: state.version });
     }
 
     // Existing funded-account floor protections remain highest-priority emergency actions.
