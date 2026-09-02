@@ -67,7 +67,7 @@ function money(value) {
 
 function signedMoney(value) {
   const n = finite("signed money", value);
-  return `${n < 0 ? "−" : "+"}$${Math.abs(n).toFixed(2)}`;
+  return `${n < 0 ? "\u2212" : "+"}$${Math.abs(n).toFixed(2)}`;
 }
 
 function quantity(value) {
@@ -81,6 +81,10 @@ function timestamp(value) {
 
 function ringTag(value) {
   return safeText("ringTag", value, { max: 16, pattern: /^(BUY|SELL)(?:[1-9]|10)$/ });
+}
+
+function netLabel(value) {
+  return `${quantity(Math.abs(value))}${value < 0 ? " SHORT" : value > 0 ? " LONG" : ""}`;
 }
 
 function formatEvent(event) {
@@ -101,7 +105,7 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "🟢 SOL ENTRY CONFIRMED",
+        "\uD83D\uDFE2 SOL ENTRY CONFIRMED",
         `Ring: ${tag}`,
         `Side: ${side}`,
         `Fill: ${money(fillPrice)}`,
@@ -129,7 +133,7 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "💰 SOL TRANCHE EXIT CONFIRMED",
+        "\uD83D\uDCB0 SOL TRANCHE EXIT CONFIRMED",
         `Ring: ${tag}`,
         `Lot: ${lotId}`,
         `Position side: ${virtualSide}`,
@@ -157,7 +161,7 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "✅ SOL LOT FULLY CLOSED",
+        "\u2705 SOL LOT FULLY CLOSED",
         `Ring: ${tag}`,
         `Lot: ${lotId}`,
         `Position side: ${virtualSide}`,
@@ -180,7 +184,7 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "✅ SOL INACTIVITY HEARTBEAT COMPLETE",
+        "\u2705 SOL INACTIVITY HEARTBEAT COMPLETE",
         `Quantity: ${quantity(heartbeatQuantity)}`,
         `Open fill: ${money(openFillPrice)}`,
         `Close fill: ${money(closeFillPrice)}`,
@@ -196,13 +200,32 @@ function formatEvent(event) {
     if (!Number.isSafeInteger(stateVersion) || stateVersion < 0) throw new TypeError("stateVersion is invalid");
     const expected = finite("expectedVirtualNetUnits", event.expectedVirtualNetUnits);
     const broker = finite("brokerNetUnits", event.brokerNetUnits);
+    if (event.stage === "WARNING") {
+      const n = Number(event.warningNumber);
+      const warningNumber = Number.isInteger(n) && n >= 1 && n <= 3 ? n : 1;
+      const instrument = typeof event.instrument === "string" && event.instrument.trim()
+        ? event.instrument.trim()
+        : "GRID";
+      return {
+        kind,
+        eventKey,
+        message: [
+          `\u26A0\uFE0F ${instrument} NET MISMATCH \u2014 WARNING ${warningNumber}/3`,
+          `Virtual net: ${netLabel(expected)}`,
+          `DXtrade net: ${netLabel(broker)}`,
+          `State version: ${stateVersion}`,
+          "This book is not taking new grid actions. Other books keep running.",
+          "Safety halt in 15 minutes if the nets still disagree."
+        ].join("\n")
+      };
+    }
     return {
       kind,
       eventKey,
       message: [
-        "🚨 SOL SAFETY HALT — RECONCILIATION MISMATCH",
-        `Virtual net: ${quantity(Math.abs(expected))}${expected < 0 ? " SHORT" : expected > 0 ? " LONG" : ""}`,
-        `DXtrade net: ${quantity(Math.abs(broker))}${broker < 0 ? " SHORT" : broker > 0 ? " LONG" : ""}`,
+        "\uD83D\uDEA8 SOL SAFETY HALT \u2014 RECONCILIATION MISMATCH",
+        `Virtual net: ${netLabel(expected)}`,
+        `DXtrade net: ${netLabel(broker)}`,
         `State version: ${stateVersion}`,
         "New strategy actions are blocked. Owner review is required."
       ].join("\n")
@@ -221,7 +244,7 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "🚨 TRADEIFY ACCOUNT LOCKOUT",
+        "\uD83D\uDEA8 TRADEIFY ACCOUNT LOCKOUT",
         reason,
         "New SOL grid actions are blocked until the account state is reconciled."
       ].join("\n")
@@ -242,7 +265,7 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        `🚨 SOL SAFETY HALT — ${reasonCode}`,
+        `\uD83D\uDEA8 SOL SAFETY HALT \u2014 ${reasonCode}`,
         detail,
         "New strategy entries are halted. Owner review is required."
       ].join("\n")
@@ -258,7 +281,7 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "🚨 PROTECTIVE FLATTEN CONFIRMED",
+        "\uD83D\uDEA8 PROTECTIVE FLATTEN CONFIRMED",
         `Reason: ${event.reason}`,
         `Quantity closed: ${quantity(flattenQuantity)}`,
         `Broker fill: ${money(fillPrice)}`,
@@ -281,7 +304,7 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "⚠️ D-049 50% DE-RISK CUT CONFIRMED",
+        "\u26A0\uFE0F D-049 50% DE-RISK CUT CONFIRMED",
         `Daily drawdown at trigger: ${signedMoney(drawdownUsd)}`,
         `Fraction cut: ${(fraction * 100).toFixed(0)}% of each executable virtual lot`,
         `Broker quantity closed: ${quantity(filledQuantity)}`,
@@ -298,7 +321,7 @@ function formatEvent(event) {
     if (event.confirmedFlat !== true) throw new TypeError("D049 full flatten must confirm flat");
     const filledAt = canonicalUtc("filledAt", event.filledAt);
     const lines = [
-      "🚨 D-049 DAILY FULL FLATTEN COMPLETE",
+      "\uD83D\uDEA8 D-049 DAILY FULL FLATTEN COMPLETE",
       `Daily drawdown at trigger: ${signedMoney(drawdownUsd)}`
     ];
     if (event.fillPrice != null) lines.push(`Broker fill: ${money(positive("fillPrice", event.fillPrice))}`);
@@ -327,7 +350,6 @@ export function createLiveTelegramNotifications({ persistence, addEvent = async 
     try {
       await addEvent(level, kind, payload);
     } catch {
-      // Notification auditing is observational and must never affect trading state.
     }
   }
 
