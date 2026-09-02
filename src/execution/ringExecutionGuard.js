@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 
+// D-060: parameterised from solanaExecutionGuard.js. Every behaviour is unchanged —
+// the D-059 exit close path, the one-sided entry guard, per-leg order codes, the
+// multi-ticket D-049 ladder, flatten verification and D-054 fail-closed reads. The
+// only difference is that the instrument and order-code prefix are injected.
+
 const FINAL_NONFILL = ["REJECTED", "CANCELED", "EXPIRED", "PARTIAL", "FAILED"];
+const DEFAULT_LOT_STEP = 0.01;
 
 function text(name, value, max = 128) {
   if (typeof value !== "string" || value.trim() === "") throw new TypeError(`${name} must be non-empty`);
@@ -19,11 +25,12 @@ function fixed8(value) {
   return Number(value.toFixed(8));
 }
 
-function floorLot(value, lotStep) {
-  return fixed8(Math.floor((value + 1e-9) / lotStep) * lotStep);
+let LOT_STEP_LOCAL = DEFAULT_LOT_STEP;
+function floorLot(value) {
+  return fixed8(Math.floor((value + 1e-9) / LOT_STEP_LOCAL) * LOT_STEP_LOCAL);
 }
 
-function orderCode(intent, prefix) {
+function makeOrderCode(prefix, intent) {
   const suffix = intent.type === "ENTRY" ? "E" : `X${intent.tranche}`;
   return `${prefix}GRID-${intent.stateVersion}-${intent.tag}-${suffix}`;
 }
@@ -49,7 +56,7 @@ function positionSymbol(position) {
 
 function positionQuantity(position) {
   const n = Number(position?.quantity ?? position?.qty);
-  if (!Number.isFinite(n)) throw new Error("DXtrade SOL position quantity is invalid");
+  if (!Number.isFinite(n)) throw new Error("DXtrade position quantity is invalid");
   return n;
 }
 
@@ -82,18 +89,18 @@ function sameProtectiveOrder(row, { stateVersion, actionType, side, quantity, st
 }
 
 // Distributes a requested aggregate cut quantity across the open broker legs in
-// proportion to each leg's size, floored to the 0.01 SOL increment. Any shortfall
+// proportion to each leg's size, floored to the lot step. Any shortfall
 // created by flooring is redistributed one lot step at a time, largest-headroom
 // first, with the position code breaking ties so the result is deterministic and
 // reproducible after a restart.
-function distributeCut(legs, requested, lotStep) {
+function distributeCut(legs, requested) {
   const total = fixed8(legs.reduce((sum, leg) => sum + leg.quantity, 0));
-  if (requested > total + 0.0050001) throw new Error("Protective cut quantity exceeds the total open SOL position");
+  if (requested > total + 0.0050001) throw new Error("Protective cut quantity exceeds the total open position");
   const target = Math.min(requested, total);
 
   const allocations = legs.map((leg) => ({
     leg,
-    quantity: Math.min(floorLot(target * (leg.quantity / total), lotStep), leg.quantity)
+    quantity: Math.min(floorLot(target * (leg.quantity / total)), leg.quantity)
   }));
 
   let shortfall = fixed8(target - allocations.reduce((sum, entry) => sum + entry.quantity, 0));
@@ -104,18 +111,18 @@ function distributeCut(legs, requested, lotStep) {
   });
 
   let index = 0;
-  while (shortfall >= lotStep - 1e-9 && index < byHeadroom.length) {
+  while (shortfall >= LOT_STEP_LOCAL - 1e-9 && index < byHeadroom.length) {
     const entry = byHeadroom[index];
-    if (fixed8(entry.leg.quantity - entry.quantity) >= lotStep - 1e-9) {
-      entry.quantity = fixed8(entry.quantity + lotStep);
-      shortfall = fixed8(shortfall - lotStep);
+    if (fixed8(entry.leg.quantity - entry.quantity) >= LOT_STEP_LOCAL - 1e-9) {
+      entry.quantity = fixed8(entry.quantity + LOT_STEP_LOCAL);
+      shortfall = fixed8(shortfall - LOT_STEP_LOCAL);
       continue;
     }
     index += 1;
   }
 
   return allocations
-    .filter((entry) => entry.quantity >= lotStep - 1e-9)
+    .filter((entry) => entry.quantity >= LOT_STEP_LOCAL - 1e-9)
     .map((entry) => Object.freeze({ ...entry.leg, cutQuantity: fixed8(entry.quantity) }));
 }
 
@@ -141,7 +148,11 @@ function aggregateLegResults(results, orderCodes) {
   });
 }
 
-export function createSolanaExecutionGuard({
+export function createRingExecutionGuard({
+  instrument,
+  orderPrefix,
+  strategyId,
+  lotStep = 0.01,
   autoExecute,
   strategyAutoExecute,
   adapter,
@@ -151,28 +162,26 @@ export function createSolanaExecutionGuard({
   addEvent = async () => {},
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   confirmationTimeoutMs = 12_000,
-  pollIntervalMs = 750,
-  instrument = "SOL/USD",
-  orderPrefix = "SOL",
-  lotStep = 0.01,
-  strategyId = "sol-outer-heavy-v1"
+  pollIntervalMs = 750
 }) {
+  const INSTRUMENT = text("instrument", instrument, 32);
+  const PREFIX = text("orderPrefix", orderPrefix, 12).toUpperCase();
+  if (!/^[A-Z0-9]+$/.test(PREFIX)) throw new TypeError("orderPrefix must be A-Z0-9");
+  const STRATEGY_ID = text("strategyId", strategyId, 128);
+  const LOT_STEP_LOCAL_LOCAL = Number(lotStep);
+  if (!Number.isFinite(LOT_STEP_LOCAL_LOCAL) || LOT_STEP_LOCAL_LOCAL <= 0) throw new TypeError("lotStep must be positive");
   if (typeof autoExecute !== "boolean" || typeof strategyAutoExecute !== "boolean") throw new TypeError("execution locks must be boolean");
-  if (typeof adapter?.place !== "function") throw new TypeError("SOL quantity adapter is invalid");
+  if (typeof adapter?.place !== "function") throw new TypeError("quantity adapter is invalid");
   if (typeof client?.getOpenPositions !== "function" || typeof client?.placePositionClose !== "function" ||
       typeof client?.placePositionPartialClose !== "function" || typeof client?.reconcileQuantityOrder !== "function") {
-    throw new TypeError("SOL quantity client lacks protective-close methods");
+    throw new TypeError("quantity client lacks protective-close methods");
   }
-  if (typeof persistence?.claimOrder !== "function") throw new TypeError("SOL persistence is invalid");
+  if (typeof persistence?.claimOrder !== "function") throw new TypeError("persistence is invalid");
   if (typeof protectiveOrdersBypassSlippageCap !== "boolean") throw new TypeError("protectiveOrdersBypassSlippageCap must be boolean");
   if (typeof addEvent !== "function") throw new TypeError("addEvent must be a function");
   if (typeof sleep !== "function") throw new TypeError("sleep must be a function");
   if (!Number.isFinite(confirmationTimeoutMs) || confirmationTimeoutMs < 0) throw new TypeError("confirmationTimeoutMs is invalid");
   if (!Number.isFinite(pollIntervalMs) || pollIntervalMs < 0) throw new TypeError("pollIntervalMs is invalid");
-  if (typeof instrument !== "string" || !/^[A-Z0-9]+\/[A-Z]+$/.test(instrument)) throw new TypeError("instrument is invalid");
-  if (typeof orderPrefix !== "string" || !/^[A-Z0-9]{2,12}$/.test(orderPrefix)) throw new TypeError("orderPrefix is invalid");
-  if (!Number.isFinite(lotStep) || lotStep <= 0) throw new TypeError("lotStep is invalid");
-  if (typeof strategyId !== "string" || strategyId.trim() === "") throw new TypeError("strategyId is invalid");
 
   const inFlight = new Set();
 
@@ -193,7 +202,7 @@ export function createSolanaExecutionGuard({
     const wantedDirection = intent.side === "BUY" ? "LONG" : "SHORT";
     const read = await readAllSolPositions();
     if (!read.ok) {
-      await addEvent("ERROR", "SOL_ENTRY_BLOCKED_ACCOUNT_DATA_UNAVAILABLE", {
+      await addEvent("ERROR", "RING_ENTRY_BLOCKED_ACCOUNT_DATA_UNAVAILABLE", {
         orderCode: code, ringTag: intent.ringTag, reason: read.reason
       });
       return Object.freeze({
@@ -204,7 +213,7 @@ export function createSolanaExecutionGuard({
     }
     const opposing = read.legs.filter((leg) => leg.direction !== wantedDirection);
     if (opposing.length > 0) {
-      await addEvent("ERROR", "SOL_ENTRY_BLOCKED_OPPOSING_POSITION", {
+      await addEvent("ERROR", "RING_ENTRY_BLOCKED_OPPOSING_POSITION", {
         orderCode: code,
         ringTag: intent.ringTag,
         entrySide: intent.side,
@@ -214,14 +223,14 @@ export function createSolanaExecutionGuard({
       return Object.freeze({
         status: "BLOCKED",
         orderCode: code,
-        reason: "An opposing SOL position is open; entering would hold both sides at once"
+        reason: `An opposing ${INSTRUMENT} position is open; entering would hold both sides at once`
       });
     }
 
     const result = await adapter.place({
       orderCode: code,
       strategyId: intent.strategyId,
-      instrument,
+      instrument: INSTRUMENT,
       stateVersion: intent.stateVersion,
       actionType: "ENTRY",
       ringTag: intent.ringTag,
@@ -231,7 +240,7 @@ export function createSolanaExecutionGuard({
       quantity: intent.quantity
     });
     if (result.confirmed !== true || result.status !== "FILLED") {
-      await addEvent("WARN", "SOL_ORDER_NOT_CONFIRMED", { orderCode: code, status: result.status ?? "UNKNOWN" });
+      await addEvent("WARN", "RING_ORDER_NOT_CONFIRMED", { orderCode: code, status: result.status ?? "UNKNOWN" });
       return Object.freeze({ status: result.status ?? "NOT_CONFIRMED", orderCode: code });
     }
     return Object.freeze({ status: "FILLED", orderCode: code, ...result });
@@ -241,7 +250,7 @@ export function createSolanaExecutionGuard({
     const wantedDirection = intent.virtualSide === "BUY" ? "LONG" : "SHORT";
     const read = await readAllSolPositions();
     if (!read.ok) {
-      await addEvent("ERROR", "SOL_EXIT_BLOCKED_ACCOUNT_DATA_UNAVAILABLE", {
+      await addEvent("ERROR", "RING_EXIT_BLOCKED_ACCOUNT_DATA_UNAVAILABLE", {
         orderCode: code, ringTag: intent.ringTag, lotId: intent.lotId, reason: read.reason
       });
       return Object.freeze({
@@ -254,7 +263,7 @@ export function createSolanaExecutionGuard({
     const legs = all.filter((leg) => leg.direction === wantedDirection);
 
     if (legs.length === 0) {
-      await addEvent("ERROR", "SOL_EXIT_BLOCKED_NO_MATCHING_POSITION", {
+      await addEvent("ERROR", "RING_EXIT_BLOCKED_NO_MATCHING_POSITION", {
         orderCode: code,
         ringTag: intent.ringTag,
         lotId: intent.lotId,
@@ -265,13 +274,13 @@ export function createSolanaExecutionGuard({
       return Object.freeze({
         status: "BLOCKED",
         orderCode: code,
-        reason: `No open ${wantedDirection} SOL position to close against`
+        reason: `No open ${wantedDirection} ${INSTRUMENT} position to close against`
       });
     }
 
     const available = fixed8(legs.reduce((sum, leg) => sum + leg.quantity, 0));
     if (intent.quantity > available + 1e-9) {
-      await addEvent("ERROR", "SOL_EXIT_BLOCKED_QUANTITY_EXCEEDS_POSITION", {
+      await addEvent("ERROR", "RING_EXIT_BLOCKED_QUANTITY_EXCEEDS_POSITION", {
         orderCode: code,
         lotId: intent.lotId,
         requested: intent.quantity,
@@ -287,7 +296,7 @@ export function createSolanaExecutionGuard({
     const allocations = [];
     let remaining = fixed8(intent.quantity);
     for (const leg of legs) {
-      if (remaining < lotStep - 1e-9) break;
+      if (remaining < LOT_STEP_LOCAL - 1e-9) break;
       const take = fixed8(Math.min(leg.quantity, remaining));
       allocations.push({ leg, quantity: take });
       remaining = fixed8(remaining - take);
@@ -305,7 +314,7 @@ export function createSolanaExecutionGuard({
         leg: allocation.leg,
         quantity: allocation.quantity,
         actionType: "EXIT",
-        reason: `SOL tranche exit ${intent.ringTag} T${intent.tranche}`,
+        reason: `${INSTRUMENT} tranche exit ${intent.ringTag} T${intent.tranche}`,
         slippagePolicy: "GRID_EXIT",
         stateVersion: intent.stateVersion,
         strategyId: intent.strategyId,
@@ -322,13 +331,14 @@ export function createSolanaExecutionGuard({
   }
 
   async function executeIntent(intent) {
-    if (!intent || (intent.type !== "ENTRY" && intent.type !== "EXIT")) throw new TypeError("SOL intent must be ENTRY or EXIT");
-    const code = orderCode(intent, orderPrefix);
+    if (!intent || (intent.type !== "ENTRY" && intent.type !== "EXIT")) throw new TypeError(`${INSTRUMENT} intent must be ENTRY or EXIT`);
+    const code = makeOrderCode(PREFIX, intent);
     if (!isEnabled()) return Object.freeze({ status: "BLOCKED", orderCode: code, reason: "Automatic execution locks are off" });
     if (inFlight.has(code)) return Object.freeze({ status: "DUPLICATE_BLOCKED", orderCode: code });
     inFlight.add(code);
     try {
-      await addEvent("INFO", "SOL_ORDER_SUBMITTING", {
+      await addEvent("INFO", "RING_ORDER_SUBMITTING", {
+        instrument: INSTRUMENT,
         orderCode: code,
         actionType: intent.type,
         tag: intent.tag,
@@ -344,7 +354,7 @@ export function createSolanaExecutionGuard({
 
       if (result.status !== "FILLED") return result;
 
-      await addEvent("INFO", "SOL_ORDER_FILL_CONFIRMED", {
+      await addEvent("INFO", "RING_ORDER_FILL_CONFIRMED", {
         orderCode: result.orderCode,
         actionType: intent.type,
         fillPrice: result.fillPrice,
@@ -378,7 +388,7 @@ export function createSolanaExecutionGuard({
 
   function mapSolPositions(payload) {
     return positionRows(payload)
-      .filter((row) => positionSymbol(row) === instrument && Math.abs(positionQuantity(row)) > 1e-12)
+      .filter((row) => positionSymbol(row) === INSTRUMENT && Math.abs(positionQuantity(row)) > 1e-12)
       .map((row) => {
         const signedQty = positionQuantity(row);
         const direction = positionSide(row, signedQty);
@@ -404,7 +414,7 @@ export function createSolanaExecutionGuard({
           filledQuantity: result.filledQuantity,
           filledAt: result.filledAt
         });
-        await addEvent("WARN", actionType === "PROTECTIVE_CUT" ? "SOL_D049_PARTIAL_CUT_LEG_CONFIRMED" : "SOL_PROTECTIVE_FLATTEN_LEG_CONFIRMED", {
+        await addEvent("WARN", actionType === "PROTECTIVE_CUT" ? "RING_D049_PARTIAL_CUT_LEG_CONFIRMED" : "RING_PROTECTIVE_FLATTEN_LEG_CONFIRMED", {
           reason,
           orderCode: code,
           legPositionCode,
@@ -428,13 +438,13 @@ export function createSolanaExecutionGuard({
 
   async function closeOneLeg({
     code, leg, quantity, actionType, reason, slippagePolicy, stateVersion, full,
-    strategyId: requestStrategyId = strategyId, ringTag = null, lotId = null, tranche = null
+    strategyId = STRATEGY_ID, ringTag = null, lotId = null, tranche = null
   }) {
     let row = await persistence.getOrder(code);
     if (!row) row = await persistence.claimOrder({
       orderCode: code,
-      strategyId: requestStrategyId,
-      instrument,
+      strategyId,
+      instrument: INSTRUMENT,
       stateVersion,
       actionType,
       ringTag,
@@ -443,7 +453,7 @@ export function createSolanaExecutionGuard({
       side: leg.closeSide,
       requestedQuantity: quantity
     });
-    if (!sameProtectiveOrder(row, { stateVersion, actionType, side: leg.closeSide, quantity, strategyId: requestStrategyId, instrument })) {
+    if (!sameProtectiveOrder(row, { stateVersion, actionType, side: leg.closeSide, quantity, strategyId, instrument: INSTRUMENT })) {
       throw new Error(`Persistent ${actionType} order does not match the current request`);
     }
     if (row.status === "FILLED") return Object.freeze({
@@ -459,7 +469,7 @@ export function createSolanaExecutionGuard({
     }
 
     if (row.status === "CLAIMED") {
-      await addEvent("WARN", actionType === "PROTECTIVE_CUT" ? "SOL_D049_PARTIAL_CUT_SUBMITTING" : "SOL_PROTECTIVE_FLATTEN_SUBMITTING", {
+      await addEvent("WARN", actionType === "PROTECTIVE_CUT" ? "RING_D049_PARTIAL_CUT_SUBMITTING" : "RING_PROTECTIVE_FLATTEN_SUBMITTING", {
         orderCode: code,
         reason,
         legPositionCode: leg.positionCode,
@@ -509,23 +519,23 @@ export function createSolanaExecutionGuard({
 
     const cutRead = await readAllSolPositions();
     if (!cutRead.ok) {
-      await addEvent("ERROR", "SOL_D049_PARTIAL_CUT_ACCOUNT_DATA_UNAVAILABLE", { reason: cutRead.reason });
+      await addEvent("ERROR", "RING_D049_PARTIAL_CUT_ACCOUNT_DATA_UNAVAILABLE", { reason: cutRead.reason });
       return Object.freeze({ status: "ACCOUNT_DATA_UNAVAILABLE", reason: cutRead.reason });
     }
     const openLegs = cutRead.legs;
     if (openLegs.length === 0) return Object.freeze({ status: "ALREADY_FLAT" });
     if (openLegs.some((leg) => leg.closeSide !== requestedSide)) {
-      await addEvent("ERROR", "SOL_D049_PARTIAL_CUT_SIDE_MISMATCH", {
+      await addEvent("ERROR", "RING_D049_PARTIAL_CUT_SIDE_MISMATCH", {
         requestedSide,
         openSides: openLegs.map((leg) => leg.direction)
       });
-      throw new Error("Protective cut side does not match every open SOL broker position");
+      throw new Error("Protective cut side does not match every open broker position for this instrument");
     }
 
-    const allocated = distributeCut(openLegs, qty, lotStep);
-    if (allocated.length === 0) return Object.freeze({ status: "BELOW_LOT_STEP", reason: `Requested cut floors below the ${lotStep} increment` });
+    const allocated = distributeCut(openLegs, qty);
+    if (allocated.length === 0) return Object.freeze({ status: "BELOW_LOT_STEP", reason: "Requested cut floors below the lot step" });
 
-    const base = `${orderPrefix}CUT-${compactDayKey(dayKey)}-${stateVersion}`;
+    const base = `${PREFIX}CUT-${compactDayKey(dayKey)}-${stateVersion}`;
     const results = [];
     const codes = [];
     for (const leg of allocated) {
@@ -544,7 +554,7 @@ export function createSolanaExecutionGuard({
     }
 
     const aggregate = aggregateLegResults(results, codes);
-    await addEvent(aggregate.status === "FILLED" ? "WARN" : "ERROR", "SOL_D049_PARTIAL_CUT_CONFIRMED", {
+    await addEvent(aggregate.status === "FILLED" ? "WARN" : "ERROR", "RING_D049_PARTIAL_CUT_CONFIRMED", {
       reason,
       status: aggregate.status,
       legCount: results.length,
@@ -566,21 +576,21 @@ export function createSolanaExecutionGuard({
 
     const flatRead = await readAllSolPositions();
     if (!flatRead.ok) {
-      await addEvent("ERROR", "SOL_PROTECTIVE_FLATTEN_ACCOUNT_DATA_UNAVAILABLE", { reason: flatRead.reason });
+      await addEvent("ERROR", "RING_PROTECTIVE_FLATTEN_ACCOUNT_DATA_UNAVAILABLE", { reason: flatRead.reason });
       return Object.freeze({ status: "ACCOUNT_DATA_UNAVAILABLE", reason: flatRead.reason });
     }
     const legs = flatRead.legs;
     if (legs.length === 0) return Object.freeze({ status: "ALREADY_FLAT" });
 
     if (legs.length > 1) {
-      await addEvent("ERROR", "SOL_PROTECTIVE_FLATTEN_MULTI_POSITION", {
+      await addEvent("ERROR", "RING_PROTECTIVE_FLATTEN_MULTI_POSITION", {
         legCount: legs.length,
         directions: legs.map((leg) => leg.direction),
         hedged: legs.some((leg) => leg.direction === "LONG") && legs.some((leg) => leg.direction === "SHORT")
       });
     }
 
-    const base = d049 ? `${orderPrefix}FLAT-${compactDayKey(dayKey)}-${stateVersion}` : `${orderPrefix}FLAT-${stateVersion}`;
+    const base = d049 ? `${PREFIX}FLAT-${compactDayKey(dayKey)}-${stateVersion}` : `${PREFIX}FLAT-${stateVersion}`;
     const slippagePolicy = d049 ? "BYPASS" : "DIRECT_PROTECTIVE_CLOSE";
     const results = [];
     const codes = [];
@@ -607,11 +617,11 @@ export function createSolanaExecutionGuard({
     if (aggregate.status === "FILLED") {
       const verify = await readAllSolPositions();
       if (!verify.ok) {
-        await addEvent("ERROR", "SOL_PROTECTIVE_FLATTEN_NOT_VERIFIED", { reason: verify.reason });
+        await addEvent("ERROR", "RING_PROTECTIVE_FLATTEN_NOT_VERIFIED", { reason: verify.reason });
         aggregate = Object.freeze({ ...aggregate, status: "NOT_VERIFIED" });
       } else if (verify.legs.length > 0) {
         const remaining = verify.legs;
-        await addEvent("ERROR", "SOL_PROTECTIVE_FLATTEN_NOT_FLAT", {
+        await addEvent("ERROR", "RING_PROTECTIVE_FLATTEN_NOT_FLAT", {
           reason,
           remainingLegs: remaining.length,
           remainingQuantity: fixed8(remaining.reduce((sum, leg) => sum + leg.quantity, 0))
@@ -620,7 +630,7 @@ export function createSolanaExecutionGuard({
       }
     }
 
-    await addEvent(aggregate.status === "FILLED" ? "WARN" : "ERROR", "SOL_PROTECTIVE_FLATTEN_CONFIRMED", {
+    await addEvent(aggregate.status === "FILLED" ? "WARN" : "ERROR", "RING_PROTECTIVE_FLATTEN_CONFIRMED", {
       reason,
       status: aggregate.status,
       legCount: results.length,

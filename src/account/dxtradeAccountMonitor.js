@@ -1,4 +1,4 @@
-import { applyOpenPositionsOverlay, signedPositionQuantity } from "./dxtradeSignedNet.js";
+import { applyOpenPositionsOverlay, signedNetByInstrument, signedPositionQuantity } from "./dxtradeSignedNet.js";
 
 const DEFAULT_INSTRUMENT = "BTC/USD";
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
@@ -9,6 +9,14 @@ function instrumentSymbol(value) {
     throw new TypeError("DXtrade instrument must look like BASE/QUOTE");
   }
   return value.trim();
+}
+
+function instrumentSymbols({ instrument = DEFAULT_INSTRUMENT, instruments = null } = {}) {
+  if (instruments === null || instruments === undefined) return Object.freeze([instrumentSymbol(instrument)]);
+  if (!Array.isArray(instruments) || instruments.length === 0) throw new TypeError("DXtrade instruments must be a non-empty array");
+  const symbols = instruments.map(instrumentSymbol);
+  if (new Set(symbols).size !== symbols.length) throw new TypeError("DXtrade instruments must be unique");
+  return Object.freeze(symbols);
 }
 
 function finite(name, value) {
@@ -68,9 +76,11 @@ export function normalizeDxtradeAccountMetrics(payload, {
   startingBalance,
   persistedPeakClosedBalance,
   instrument = DEFAULT_INSTRUMENT,
+  instruments = null,
   fetchedAtMs = Date.now()
 }) {
-  const activeInstrument = instrumentSymbol(instrument);
+  const allowedInstruments = instrumentSymbols({ instrument, instruments });
+  const activeInstrument = allowedInstruments[0];
   const metric = extractMetric(payload);
   const balance = finite("DXtrade balance", metric.balance);
   const equity = finite("DXtrade equity", metric.equity);
@@ -86,11 +96,13 @@ export function normalizeDxtradeAccountMetrics(payload, {
   const positions = normalizePositions(metric);
   const nonZeroPositions = positions.filter((position) => Math.abs(position.quantity) > 1e-12);
   const instrumentPositions = nonZeroPositions.filter((position) => position.symbol === activeInstrument);
-  const foreignPositions = nonZeroPositions.filter((position) => position.symbol !== activeInstrument);
+  const foreignPositions = nonZeroPositions.filter((position) => !allowedInstruments.includes(position.symbol));
 
   let invariantError = null;
   if (foreignPositions.length > 0) {
-    invariantError = `A non-${activeInstrument} position exists on the Tradeify account`;
+    invariantError = allowedInstruments.length === 1
+      ? `A non-${activeInstrument} position exists on the Tradeify account`
+      : `A foreign position exists outside the enabled instruments: ${foreignPositions.map((position) => position.symbol).join(", ")}`;
   } else if (openPositionsCount !== nonZeroPositions.length) {
     invariantError = "DXtrade open-position count does not match position metrics";
   }
@@ -123,6 +135,7 @@ export function normalizeDxtradeAccountMetrics(payload, {
     account: metric.account == null ? null : String(metric.account),
     version: metric.version == null ? null : Number(metric.version),
     instrument: activeInstrument,
+    instruments: allowedInstruments,
     balance,
     equity,
     dayClosedPl,
@@ -147,6 +160,7 @@ export function createDxtradeAccountMonitor({
   client,
   startingBalance,
   instrument = DEFAULT_INSTRUMENT,
+  instruments = null,
   getPersistedPeakClosedBalance,
   onSnapshot = async () => {},
   onError = () => {},
@@ -160,7 +174,8 @@ export function createDxtradeAccountMonitor({
   if (typeof client?.getOpenPositions !== "function") {
     throw new TypeError("DXtrade account monitor requires getOpenPositions");
   }
-  const activeInstrument = instrumentSymbol(instrument);
+  const enabledInstruments = instrumentSymbols({ instrument, instruments });
+  const activeInstrument = enabledInstruments[0];
   const getPeak = requireFunction("getPersistedPeakClosedBalance", getPersistedPeakClosedBalance);
   const publish = requireFunction("onSnapshot", onSnapshot);
   const reportError = requireFunction("onError", onError);
@@ -214,17 +229,51 @@ export function createDxtradeAccountMonitor({
         startingBalance,
         persistedPeakClosedBalance: persistedPeak,
         instrument: activeInstrument,
+        instruments: enabledInstruments,
         fetchedAtMs: clock()
       });
       if (positionsResult.ok) {
         try {
-          snapshot = applyOpenPositionsOverlay(snapshot, positionsResult.payload, activeInstrument);
+          if (enabledInstruments.length === 1) {
+            const overlaid = applyOpenPositionsOverlay(snapshot, positionsResult.payload, activeInstrument);
+            snapshot = Object.freeze({
+              ...overlaid,
+              signedNetByInstrument: Object.freeze({
+                [activeInstrument]: Object.freeze({
+                  instrument: activeInstrument,
+                  netUnits: overlaid.signedNetUnits,
+                  ticketCount: overlaid.instrumentTicketCount ?? 0,
+                  openPl: overlaid.instrumentPosition?.openPl ?? 0,
+                  dayClosedPl: overlaid.instrumentPosition?.dayClosedPl ?? 0,
+                  notional: overlaid.currentNotional ?? 0,
+                  hedged: false
+                })
+              }),
+              signedNetReadOk: true
+            });
+          } else {
+            const grouped = signedNetByInstrument(positionsResult.payload, enabledInstruments);
+            snapshot = Object.freeze({
+              ...snapshot,
+              signedNetByInstrument: grouped.byInstrument,
+              signedNetReadOk: grouped.ok === true,
+              openPositionsCount: grouped.openPositionsCount,
+              currentNotional: grouped.totalNotional ?? 0,
+              signedNetUnits: grouped.ok === true ? grouped.byInstrument?.[activeInstrument]?.netUnits ?? 0 : null,
+              positionSource: "open-positions",
+              overlayError: grouped.error,
+              invariantError: grouped.error ?? snapshot.invariantError,
+              accountLocked: grouped.ok !== true || snapshot.accountLocked === true
+            });
+          }
         } catch (error) {
           snapshot = Object.freeze({
             ...snapshot,
             positionsReadFailed: true,
             overlayError: error instanceof Error ? error.message : "open-positions overlay failed",
             signedNetUnits: null,
+            signedNetByInstrument: null,
+            signedNetReadOk: false,
             positionSource: "open-positions-unreadable"
           });
         }
@@ -233,7 +282,9 @@ export function createDxtradeAccountMonitor({
           ...snapshot,
           positionsReadFailed: true,
           overlayError: positionsResult.error,
-          signedNetUnits: null
+          signedNetUnits: null,
+          signedNetByInstrument: null,
+          signedNetReadOk: false
         });
       }
       latest = snapshot;

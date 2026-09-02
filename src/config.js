@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { readFile } from "node:fs/promises";
 import { resolveInstrumentProfile } from "./instrumentProfile.js";
+import { loadInstrumentConfig } from "./config/instruments.js";
 
 function requireText(name, value) {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`${name} is required`);
@@ -175,11 +176,11 @@ export function loadEnvironment() {
 }
 
 export async function loadConfiguration() {
-  const [account, strategy] = await Promise.all([loadAccountConfig(), loadStrategyConfig()]);
+  const [account, strategy, instruments] = await Promise.all([loadAccountConfig(), loadStrategyConfig(), loadInstrumentConfig()]);
   const environment = loadEnvironment();
   if (environment.autoExecute && strategy.execution.autoExecute !== true) {
     throw new Error("AUTO_EXECUTE=true requires config/strategy.json execution.autoExecute=true");
   }
   const instrument = resolveInstrumentProfile(strategy);
-  return { account, strategy, environment, instrument };
+  return { account, strategy, environment, instrument, instruments };
 }

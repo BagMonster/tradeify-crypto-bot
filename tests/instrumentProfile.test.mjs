@@ -16,7 +16,8 @@ test("resolves SOL/USD to Binance SOLUSDT and DXtrade SOL/USD", () => {
     asset: "SOL",
     dxtradeSymbol: "SOL/USD",
     binanceSymbol: "SOLUSDT",
-    binanceStream: "solusdt@trade"
+    binanceStream: "solusdt@trade",
+    lotStep: 0.01
   });
 });
 
