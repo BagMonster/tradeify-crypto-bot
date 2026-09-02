@@ -5,6 +5,7 @@ import {
   CHRONICLE_DEV_BLURB,
   CHRONICLE_HELP_LINES
 } from "./devCompanionChronicleTelegram.js";
+import { splitTelegramText } from "./telegramMessageSplit.js";
 
 // Every button maps to exactly one action id. Buttons are a shortcut for the
 // slash commands, never a replacement: each slash command below still works.
@@ -142,13 +143,24 @@ export async function startTelegramBot({
 }) {
   const bot = new BotClass(environment.telegramToken, { polling: true });
 
+  async function sendText(chatId, text, options) {
+    const chunks = splitTelegramText(text);
+    let last = null;
+    for (const chunk of chunks) {
+      last = options === undefined
+        ? await bot.sendMessage(chatId, chunk)
+        : await bot.sendMessage(chatId, chunk, options);
+    }
+    return last;
+  }
+
   if (notifications !== null) {
     if (typeof notifications?.setSender !== "function") throw new TypeError("notifications.setSender must be a function");
     notifications.setSender(async (text) => {
       if (!Number.isSafeInteger(environment.telegramAllowedUserId) || environment.telegramAllowedUserId <= 0) {
         throw new Error("Owner Telegram destination is unavailable");
       }
-      await bot.sendMessage(environment.telegramAllowedUserId, text);
+      await sendText(environment.telegramAllowedUserId, text);
     });
   }
 
@@ -215,7 +227,7 @@ export async function startTelegramBot({
   }
 
   async function sendLatched(chatId, command, text) {
-    await bot.sendMessage(chatId, text);
+    await sendText(chatId, text);
     await latchOperatorOutput(command, text);
   }
 
@@ -248,7 +260,7 @@ export async function startTelegramBot({
   }));
 
   bot.onText(/^\/(start|help)(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, HELP_TEXT);
+    await sendText(message.chat.id, HELP_TEXT);
     await sendMenu(message.chat.id);
   }));
 
@@ -321,7 +333,7 @@ export async function startTelegramBot({
 
   bot.onText(/^\/devstatus(?:@\w+)?$/i, withAuthorization(async (message) => {
     if (!devCompanion) return bot.sendMessage(message.chat.id, "Development companion is not configured on this deployment.");
-    await bot.sendMessage(message.chat.id, devStatusText(await devCompanion.status(environment.telegramAllowedUserId)));
+    await sendText(message.chat.id, devStatusText(await devCompanion.status(environment.telegramAllowedUserId)));
   }));
 
   bot.onText(/^\/devreset(?:@\w+)?$/i, withAuthorization(async (message) => {
@@ -385,7 +397,7 @@ export async function startTelegramBot({
     code: (chatId) => enterDevelopment(chatId),
     devstatus: async (chatId) => {
       if (!devCompanion) return bot.sendMessage(chatId, "Development companion is not configured on this deployment.");
-      await bot.sendMessage(chatId, devStatusText(await devCompanion.status(environment.telegramAllowedUserId)));
+      await sendText(chatId, devStatusText(await devCompanion.status(environment.telegramAllowedUserId)));
     },
     devreset: async (chatId) => {
       if (!devCompanion) return bot.sendMessage(chatId, "Development companion is not configured on this deployment.");
@@ -398,7 +410,7 @@ export async function startTelegramBot({
       await bot.sendMessage(chatId, "OpenAI development mode is OFF. Trading commands continue to work normally.");
     },
     whoami: (chatId, query) => bot.sendMessage(chatId, `Your Telegram user ID is: ${query?.from?.id ?? "unknown"}`),
-    help: (chatId) => bot.sendMessage(chatId, HELP_TEXT),
+    help: (chatId) => sendText(chatId, HELP_TEXT),
     menu: (chatId) => sendMenu(chatId, "Tap a command. Every slash command still works."),
     noop: async () => {}
   };
@@ -424,7 +436,7 @@ export async function startTelegramBot({
     // forged payload names one. Confirmation requires a typed one-time code.
     if (CONFIRM_ONLY_COMMANDS.includes(action)) {
       await bot.answerCallbackQuery(query.id, { text: "Type the code to confirm.", show_alert: true });
-      if (!isAuthorized(query.from)) return deny(chatId);
+    if (!isAuthorized(query.from)) return deny(chatId);
       return bot.sendMessage(
         chatId,
         `Confirmation cannot be done with a button. Send /${action} CODE using the code from the request above.`
@@ -464,7 +476,7 @@ export async function startTelegramBot({
         const text = delivery.status === "COMPLETED"
           ? delivery.outputText
           : "The OpenAI request failed. The trading bot was not affected. Check the companion worker logs.";
-        await bot.sendMessage(environment.telegramAllowedUserId, text);
+        await sendText(environment.telegramAllowedUserId, text);
         await devCompanion.markDelivered(delivery.id, environment.telegramAllowedUserId);
       }
     } catch (error) {
