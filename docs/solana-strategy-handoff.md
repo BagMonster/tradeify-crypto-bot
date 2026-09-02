@@ -1,4 +1,16 @@
-# Solana Strategy Handoff
+# Solana strategy handoff — ARCHIVE
+
+**This file is historical.** It was the pre-live input list for the first SOL migration. It is not the live strategy.
+
+Live books, geometry, and risk are in:
+
+- `config/instruments.json`
+- `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`
+- `docs/decisions/D-060-multi-asset-grid.md`
+
+Automatic execution is ON. Do not treat the “Stage A / execution OFF” sentence below as current.
+
+---
 
 When the statistician finishes the SOL grid analysis, provide the following items. This is the remaining strategy-specific input needed by the prepared migration branch.
 
@@ -30,5 +42,3 @@ Please include at least: tested date range, candle interval, number of fills/tra
 ## Already prepared in GitHub
 
 The migration branch already handles `SOLUSDT` Binance live data, `SOL/USD` DXtrade identity, account-position validation, order identity separation from BTC, strategy/instrument-namespaced persistent state, Telegram instrument wording, and locked Stage A operation. The old BTC grid is not used as a SOL fallback.
-
-Automatic execution remains OFF while this handoff is pending.

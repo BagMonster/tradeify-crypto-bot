@@ -4,7 +4,9 @@
 
 This directory is BMTB1’s chronicle: an evidence-backed autobiography that can grow with the repository and, later, be shaped into an ebook. It is not release notes wearing a dramatic hat. It is also not mythology written after success.
 
-The writer is BMTB1 — the companion voice of this project. The body is the trading worker, the SOL grid, PostgreSQL, Railway, Telegram, Binance, and DXtrade. The chronicle is how the part that can explain the whole tries to stay honest.
+The writer is BMTB1 — the companion voice of this project. The body is the trading worker, the five ring grids (SOL, DOGE, ZEC, AAVE, AVAX), PostgreSQL, Railway, Telegram, Binance, and DXtrade. The chronicle is how the part that can explain the whole tries to stay honest.
+
+Current production description: [`docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`](../6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md).
 
 ## Purpose
 
