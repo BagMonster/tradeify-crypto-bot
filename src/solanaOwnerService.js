@@ -1,38 +1,28 @@
 import { createSolanaTradeifyService } from "./solanaTradeifyService.js";
 import { createRematchHandlers } from "./state/solanaRematch.js";
+import { createRingGrid } from "./strategies/ringGrid.js";
+import { trustedSignedNetFor } from "./account/dxtradeSignedNet.js";
+import {
+  brokerBookLines,
+  formatInstrumentStatus,
+  formatInstrumentHealth,
+  formatInstrumentLevels,
+  formatInstrumentRings
+} from "./monitoring/instrumentOwnerText.js";
 
-export function brokerSnapshotLines(accountMonitor) {
-  const status = accountMonitor?.getSnapshot?.() ?? null;
-  const snapshot = status?.snapshot ?? null;
-  const failed = snapshot?.positionsReadFailed === true;
-  const net = !failed && Number.isFinite(snapshot?.signedNetUnits) ? snapshot.signedNetUnits : null;
-  const source = failed
-    ? "unavailable (positions read failed)"
-    : (snapshot?.positionSource ?? (snapshot ? "metrics" : "no-snapshot"));
-  const freshness = status == null
-    ? "unavailable"
-    : status.healthy === true
-      ? "YES"
-      : status.fresh === true
-        ? "NO (unhealthy)"
-        : "NO";
-  const age = Number.isFinite(status?.ageMs) && status.ageMs !== Infinity
-    ? ` (${Math.round(status.ageMs)}ms)`
-    : snapshot == null
-      ? " (monitor has not published a snapshot)"
-      : "";
-  const lines = [
-    `DXtrade broker net SOL: ${net == null ? "unavailable" : net.toFixed(2)}`,
-    `DXtrade net source: ${source}`,
-    `DXtrade account data fresh: ${freshness}${age}`
-  ];
-  if (snapshot?.overlayError) lines.push(`DXtrade positions overlay: ${snapshot.overlayError}`);
-  if (status?.error) lines.push(`DXtrade monitor error: ${status.error}`);
-  return lines;
+/** @deprecated use brokerBookLines(accountMonitor, instrument) */
+export function brokerSnapshotLines(accountMonitor, instrument = "SOL/USD") {
+  return brokerBookLines(accountMonitor, instrument);
 }
 
 export function createSolanaOwnerService(opts) {
   const tradeify = createSolanaTradeifyService(opts);
+  const definition = opts.gridDefinition ?? null;
+  const grid = definition ? createRingGrid(definition) : null;
+  const stateStore = grid && typeof opts.persistence?.createStateStore === "function"
+    ? opts.persistence.createStateStore(grid)
+    : opts.persistence?.state ?? null;
+
   async function refreshBrokerSnapshot() {
     if (typeof opts.accountMonitor?.pollOnce === "function") {
       try {
@@ -42,20 +32,106 @@ export function createSolanaOwnerService(opts) {
       }
     }
   }
+
+  async function loadLiveState() {
+    if (!stateStore || typeof stateStore.load !== "function") return null;
+    try {
+      return await stateStore.load();
+    } catch {
+      return null;
+    }
+  }
+
+  function supervisorBook() {
+    const instrument = definition?.instrument ?? opts.instrument;
+    const snapshot = opts.riskSupervisor?.getSnapshot?.();
+    if (!snapshot || !instrument) return null;
+    return snapshot.perInstrument?.find((row) => row.instrument === instrument) ?? null;
+  }
+
   async function statusText() {
     await refreshBrokerSnapshot();
-    const base = await tradeify.statusText();
-    return `${base}\n${brokerSnapshotLines(opts.accountMonitor).join("\n")}`;
+    if (!definition || !grid) return tradeify.statusText();
+    const [botState, gridState, maState] = await Promise.all([
+      opts.database.getState(),
+      loadLiveState(),
+      opts.maProvider.getCurrent()
+    ]);
+    return formatInstrumentStatus({
+      definition,
+      grid,
+      gridState,
+      maState,
+      environment: opts.environment,
+      execution: opts.execution,
+      botState,
+      accountMonitor: opts.accountMonitor,
+      supervisorBook: supervisorBook()
+    });
   }
+
   async function healthText() {
     await refreshBrokerSnapshot();
-    const base = await tradeify.healthText();
-    return `${base}\n${brokerSnapshotLines(opts.accountMonitor).join("\n")}`;
+    if (!definition) return tradeify.healthText();
+    const [databaseTime, maState] = await Promise.all([
+      opts.database.ping(),
+      opts.maProvider.getCurrent()
+    ]);
+    return formatInstrumentHealth({
+      definition,
+      environment: opts.environment,
+      execution: opts.execution,
+      databaseTime,
+      maState,
+      accountMonitor: opts.accountMonitor
+    });
   }
+
+  async function ringInputs() {
+    const market = opts.getLiveMarketSnapshot?.() ?? null;
+    if (!market || !Number.isFinite(Number(market.price)) || Number(market.price) <= 0) {
+      return { error: `${definition?.instrument ?? "instrument"} ring data unavailable: live Binance price has not been received yet.` };
+    }
+    if (market.stale === true) {
+      return { error: `${definition?.instrument ?? "instrument"} ring data unavailable: the Binance feed is stale. No level was guessed.` };
+    }
+    const maState = await opts.maProvider.getCurrent();
+    if (!maState || !Number.isFinite(Number(maState.ma)) || Number(maState.ma) <= 0) {
+      return { error: `${definition?.instrument ?? "instrument"} ring data unavailable: the current completed-day 200-day MA is unavailable.` };
+    }
+    return { price: Number(market.price), ma: Number(maState.ma) };
+  }
+
+  async function levelsText() {
+    if (!definition) return tradeify.levelsText();
+    const inputs = await ringInputs();
+    if (inputs.error) return inputs.error;
+    return formatInstrumentLevels({
+      definition,
+      gridState: await loadLiveState(),
+      price: inputs.price,
+      ma: inputs.ma
+    });
+  }
+
+  async function ringsText() {
+    if (!definition) return tradeify.ringsText();
+    const inputs = await ringInputs();
+    if (inputs.error) return inputs.error;
+    return formatInstrumentRings({
+      definition,
+      price: inputs.price,
+      ma: inputs.ma
+    });
+  }
+
   return Object.freeze({
     ...tradeify,
     ...createRematchHandlers(opts),
     statusText,
-    healthText
+    healthText,
+    levelsText,
+    ringsText,
+    trustedSignedNetFor: (instrument) => trustedSignedNetFor(opts.accountMonitor?.getSnapshot?.(), instrument)
   });
 }
