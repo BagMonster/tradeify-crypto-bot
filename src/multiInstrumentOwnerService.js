@@ -59,8 +59,6 @@ export function createMultiInstrumentOwnerService({
     return { all: false, books: [book] };
   }
 
-  // Runs one text-producing method across the selected books. A failure in one
-  // instrument must never hide the others, so each is caught individually.
   async function fanOut(method, arg, args = []) {
     const target = resolve(arg);
     if (target.error) return target.error;
@@ -94,6 +92,7 @@ export function createMultiInstrumentOwnerService({
     ];
     const braked = Array.isArray(snapshot.brakedInstruments) ? snapshot.brakedInstruments : [];
     lines.push(`  braked today: ${braked.length === 0 ? "none" : braked.join(", ")}`);
+    if (snapshot.lastError) lines.push(`  supervisor note: ${snapshot.lastError}`);
     if (snapshot.flattenedToday === true) {
       lines.push("  *** ACCOUNT FLATTENED TODAY - all entries blocked until 22:00 UTC rollover ***");
     }
@@ -106,7 +105,6 @@ export function createMultiInstrumentOwnerService({
   return Object.freeze({
     instruments: Object.freeze(books.map((b) => b.instrument)),
 
-    // ---- read commands: account summary first, then every instrument ----
     async statusText(arg) {
       const per = await fanOut("statusText", arg);
       return `${accountSummaryLines().join("\n")}\n\n${per}`;
@@ -120,16 +118,9 @@ export function createMultiInstrumentOwnerService({
     dxPreflightText: (arg) => fanOut("dxPreflightText", arg),
     canaryText: (arg) => fanOut("canaryText", arg),
 
-    // /flat must cover every instrument. This is the command the owner reaches
-    // for during an incident; showing one book out of five would be worse than
-    // showing none, because it reads as complete.
     flatText: (arg) => fanOut("flatText", arg),
     flatInstructions: (arg) => fanOut("flatInstructions", arg),
 
-    // ---- control commands ----
-
-    // Global. Pausing must stop every instrument at once, so it does not accept
-    // an instrument argument.
     async kill() {
       const results = [];
       for (const book of books) {
@@ -143,9 +134,6 @@ export function createMultiInstrumentOwnerService({
       return ["BOT PAUSED - every instrument", ...results].join("\n");
     },
 
-    // Two-step codes stay per instrument. A single code that resumed or
-    // reconciled five books at once would collapse five separate decisions into
-    // one thumb press, which is the friction these commands exist to create.
     async requestResume(arg) {
       const target = resolve(arg);
       if (target.error) return { message: target.error };
