@@ -6,118 +6,46 @@ import {
   CHRONICLE_HELP_LINES
 } from "./devCompanionChronicleTelegram.js";
 import { splitTelegramText } from "./telegramMessageSplit.js";
+import {
+  CONFIRM_ONLY_COMMANDS,
+  bookSymbolsFrom,
+  buildMenuKeyboard,
+  instrumentArg,
+  keyboardForView,
+  menuActionIds,
+  panelLead,
+  parseMenuCallback
+} from "./telegramMenu.js";
 
-// Every button maps to exactly one action id. Buttons are a shortcut for the
-// slash commands, never a replacement: each slash command below still works.
-//
-// SAFETY RULE: the three confirm* commands are deliberately NOT on this panel.
-// /confirmresume, /confirmreconcile and /confirmrematch each require a one-time
-// code typed by hand. That friction IS the safety gate. A tap-to-confirm button
-// would erase a two-step control down to one thumb press. Buttons may REQUEST a
-// code; only the owner typing it can confirm.
-const CONFIRM_ONLY_COMMANDS = Object.freeze([
-  "confirmresume",
-  "confirmreconcile",
-  "confirmrematch"
-]);
-
-const MENU_LAYOUT = Object.freeze([
-  { header: "\u2014 Monitor \u2014" },
-  [
-    { text: "Status", action: "status" },
-    { text: "Health", action: "health" }
-  ],
-  [
-    { text: "Grid Levels", action: "levels" },
-    { text: "Ring Position", action: "rings" }
-  ],
-  { header: "\u2014 Control \u2014" },
-  [
-    { text: "Pause Bot", action: "kill" },
-    { text: "Request Resume", action: "resume" }
-  ],
-  [
-    { text: "Request Reconcile", action: "reconcile" },
-    { text: "Request Rematch", action: "rematch" }
-  ],
-  { header: "\u2014 Diagnostics \u2014" },
-  [
-    { text: "DX Preflight", action: "dxpreflight" },
-    { text: "Canary", action: "solcanary" }
-  ],
-  [
-    { text: "Flat Instructions", action: "flat" },
-    { text: "Who Am I", action: "whoami" }
-  ],
-  { header: "\u2014 Chronicle \u2014" },
-  [
-    { text: "Chronicle Status", action: "chroniclestatus" },
-    { text: "Chronicle Pause", action: "chroniclepause" }
-  ],
-  [
-    { text: "Chronicle Resume", action: "chronicleresume" }
-  ],
-  { header: "\u2014 Development \u2014" },
-  [
-    { text: "Enter Dev Mode", action: "code" },
-    { text: "Dev Status", action: "devstatus" }
-  ],
-  [
-    { text: "Dev Reset", action: "devreset" },
-    { text: "Dev Exit", action: "devexit" }
-  ],
-  [
-    { text: "Help", action: "help" },
-    { text: "Refresh Panel", action: "menu" }
-  ]
-]);
-
-export function buildMenuKeyboard(layout = MENU_LAYOUT) {
-  return layout.map((row) => (
-    Array.isArray(row)
-      ? row.map((b) => ({ text: b.text, callback_data: b.action }))
-      : [{ text: row.header, callback_data: "noop" }]
-  ));
-}
-
-export function menuActionIds(layout = MENU_LAYOUT) {
-  return layout
-    .filter((row) => Array.isArray(row))
-    .flat()
-    .map((b) => b.action);
-}
-
-const MAIN_MENU = {
-  reply_markup: { inline_keyboard: buildMenuKeyboard() }
-};
+export { buildMenuKeyboard, menuActionIds, CONFIRM_ONLY_COMMANDS };
 
 const HELP_TEXT = [
   "TRADEIFY BOT COMMANDS",
   "",
-  "/status - show account risk, then every instrument's state and execution controls",
-  "/health - confirm the worker, PostgreSQL, MA provider, and execution state",
-  "/levels [INSTRUMENT] - ring ladder summary for every instrument; add an instrument for its full ladder",
-  "/rings [INSTRUMENT] - where each instrument sits against its ring ladder and next levels",
-  "/dxpreflight - inspect active-instrument order settings without placing an order",
-  "/canary - inspect the approved lifecycle canary; available only while automatic execution is OFF",
-  "/kill - pause the bot and persist the pause",
-  "/resume INSTRUMENT - request a 6-digit resume code for one instrument",
-  "/confirmresume CODE INSTRUMENT - confirm the restart for that instrument",
-  "/reconcile INSTRUMENT - request a 6-digit code to flatten stale virtual lots for one instrument",
-  "/confirmreconcile CODE INSTRUMENT - apply the audited virtual flatten for that instrument",
-  "/rematch INSTRUMENT - request a 6-digit code to keep current lots for one instrument",
-  "/confirmrematch CODE INSTRUMENT - clear that instrument's halt, keep its lots, lift the pause",
-  "/flat [INSTRUMENT] - manual flattening instructions; every instrument if omitted",
+  "/status [INSTRUMENT] - account risk, then every book; add SOL or AAVE for one book",
+  "/health [INSTRUMENT] - worker, PostgreSQL, MA, execution",
+  "/levels [INSTRUMENT] - ring ladder; omit for all five",
+  "/rings [INSTRUMENT] - where price sits versus each book",
+  "/dxpreflight - inspect order settings without placing an order",
+  "/canary - inspect the lifecycle canary; only while automatic execution is OFF",
+  "/kill - pause every book",
+  "/resume INSTRUMENT - request a 6-digit resume code for one book",
+  "/confirmresume CODE INSTRUMENT - type the code; not a button",
+  "/reconcile INSTRUMENT - request a flatten-virtual-lots code for one book",
+  "/confirmreconcile CODE INSTRUMENT - type the code; not a button",
+  "/rematch INSTRUMENT - request a keep-lots rematch code for one book",
+  "/confirmrematch CODE INSTRUMENT - type the code; not a button",
+  "/flat [INSTRUMENT] - manual flattening instructions",
   ...CHRONICLE_HELP_LINES,
   "/code - enter the owner-only OpenAI development conversation",
-  "/devstatus - show development companion queue/session status",
-  "/devreset - reset OpenAI conversation context and remain in development mode",
+  "/devstatus - development companion queue",
+  "/devreset - reset companion context",
   "/devexit - leave development mode",
-  "/whoami - show your Telegram numeric user ID",
-  "/b - show every command as tappable buttons (/buttons, /menu do the same)",
-  "/help - show this list",
+  "/whoami - your Telegram numeric user ID",
+  "/b - five-book button panel (/buttons, /menu do the same)",
+  "/help - this list",
   "",
-  "There are no /long or /short commands. /levels and /rings are read-only. Each instrument trades automatically only when both live execution controls are ON and every safety gate passes. Reads cover all instruments; /resume, /reconcile and /rematch act on ONE instrument and require its name.",
+  "Reads can cover all five books. Resume, reconcile and rematch always name one book. Confirm codes are typed. There is no confirm button.",
   CHRONICLE_DEV_BLURB
 ].join("\n");
 
@@ -142,6 +70,7 @@ export async function startTelegramBot({
   BotClass = TelegramBot
 }) {
   const bot = new BotClass(environment.telegramToken, { polling: true });
+  const books = bookSymbolsFrom(service);
 
   async function sendText(chatId, text, options) {
     const chunks = splitTelegramText(text);
@@ -203,8 +132,28 @@ export async function startTelegramBot({
     };
   }
 
-  async function sendMenu(chatId, lead = "Tradeify control panel") {
-    return bot.sendMessage(chatId, lead, MAIN_MENU);
+  async function showPanel(chatId, view, symbol = null, query = null) {
+    const text = panelLead(view, symbol);
+    const markup = {
+      reply_markup: { inline_keyboard: keyboardForView(view, { symbol, books }) }
+    };
+    if (query?.message?.message_id) {
+      try {
+        await bot.editMessageText(text, {
+          chat_id: chatId,
+          message_id: query.message.message_id,
+          ...markup
+        });
+        return;
+      } catch {
+        // Telegram rejects an edit when the markup is unchanged; send a fresh panel.
+      }
+    }
+    return bot.sendMessage(chatId, text, markup);
+  }
+
+  async function sendMenu(chatId, _lead) {
+    return showPanel(chatId, "home");
   }
 
   async function sendTyping(chatId) {
@@ -253,15 +202,13 @@ export async function startTelegramBot({
     await bot.sendMessage(message.chat.id, `Your Telegram user ID is: ${message.from.id}`);
   });
 
-  // /b is the shortcut the owner asked for: show every button at once.
-  // It ADDS to the slash commands; it does not replace any of them.
   bot.onText(/^\/(b|buttons|menu)(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await sendMenu(message.chat.id, "Tap a command. Every slash command still works.");
+    await showPanel(message.chat.id, "home");
   }));
 
   bot.onText(/^\/(start|help)(?:@\w+)?$/i, withAuthorization(async (message) => {
     await sendText(message.chat.id, HELP_TEXT);
-    await sendMenu(message.chat.id);
+    await showPanel(message.chat.id, "home");
   }));
 
   bot.onText(/^\/status(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
@@ -361,26 +308,23 @@ export async function startTelegramBot({
     }
   });
 
-  // Single source of truth. Both the button panel and the slash commands route
-  // through this table, so a button can never do something different from the
-  // command it is labelled with.
   const MENU_ACTIONS = {
-    status: (chatId) => runLatched(chatId, "/status", () => service.statusText()),
-    health: (chatId) => runLatched(chatId, "/health", () => service.healthText()),
-    levels: (chatId) => runLatched(chatId, "/levels", () => service.levelsText()),
-    rings: (chatId) => runLatched(chatId, "/rings", () => service.ringsText()),
-    flat: (chatId) => runLatched(chatId, "/flat", () => service.flatInstructions()),
+    status: (chatId, _query, symbol) => runLatched(chatId, "/status", () => service.statusText(instrumentArg(symbol))),
+    health: (chatId, _query, symbol) => runLatched(chatId, "/health", () => service.healthText(instrumentArg(symbol))),
+    levels: (chatId, _query, symbol) => runLatched(chatId, "/levels", () => service.levelsText(instrumentArg(symbol))),
+    rings: (chatId, _query, symbol) => runLatched(chatId, "/rings", () => service.ringsText(instrumentArg(symbol))),
+    flat: (chatId, _query, symbol) => runLatched(chatId, "/flat", () => service.flatInstructions(instrumentArg(symbol))),
     kill: (chatId) => runLatched(chatId, "/kill", () => service.kill()),
-    resume: async (chatId) => {
-      const result = await service.requestResume();
+    resume: async (chatId, _query, symbol) => {
+      const result = await service.requestResume(instrumentArg(symbol));
       await sendLatched(chatId, "/resume", result.message);
     },
-    reconcile: async (chatId) => {
-      const result = await service.requestReconcile();
+    reconcile: async (chatId, _query, symbol) => {
+      const result = await service.requestReconcile(instrumentArg(symbol));
       await sendLatched(chatId, "/reconcile", result.message);
     },
-    rematch: async (chatId) => {
-      const result = await service.requestRematch();
+    rematch: async (chatId, _query, symbol) => {
+      const result = await service.requestRematch(instrumentArg(symbol));
       await sendLatched(chatId, "/rematch", result.message);
     },
     dxpreflight: async (chatId) => {
@@ -411,7 +355,7 @@ export async function startTelegramBot({
     },
     whoami: (chatId, query) => bot.sendMessage(chatId, `Your Telegram user ID is: ${query?.from?.id ?? "unknown"}`),
     help: (chatId) => sendText(chatId, HELP_TEXT),
-    menu: (chatId) => sendMenu(chatId, "Tap a command. Every slash command still works."),
+    menu: (chatId, query) => showPanel(chatId, "home", null, query),
     noop: async () => {}
   };
 
@@ -430,26 +374,42 @@ export async function startTelegramBot({
   bot.on("callback_query", async (query) => {
     const chatId = query.message?.chat?.id;
     if (!chatId) return;
-    const action = typeof query.data === "string" ? query.data : "";
+    const parsed = parseMenuCallback(typeof query.data === "string" ? query.data : "");
 
-    // A confirm* action must never be reachable from a tap, even if a stale or
-    // forged payload names one. Confirmation requires a typed one-time code.
-    if (CONFIRM_ONLY_COMMANDS.includes(action)) {
+    if (parsed.kind === "confirm") {
       await bot.answerCallbackQuery(query.id, { text: "Type the code to confirm.", show_alert: true });
-    if (!isAuthorized(query.from)) return deny(chatId);
+      if (!isAuthorized(query.from)) return deny(chatId);
       return bot.sendMessage(
         chatId,
-        `Confirmation cannot be done with a button. Send /${action} CODE using the code from the request above.`
+        `Confirmation cannot be done with a button. Send /${parsed.action} CODE INSTRUMENT using the code from the request above.`
       );
     }
 
-    await bot.answerCallbackQuery(query.id);
-    if (!isAuthorized(query.from)) return deny(chatId);
+    if (!isAuthorized(query.from)) {
+      try { await bot.answerCallbackQuery(query.id); } catch { /* already answered or stale */ }
+      return deny(chatId);
+    }
 
-    const handler = MENU_ACTIONS[action];
+    try { await bot.answerCallbackQuery(query.id); } catch { /* stale query */ }
+
+    if (parsed.kind === "noop") return;
+    if (parsed.kind === "view") {
+      try {
+        await showPanel(chatId, parsed.view, parsed.symbol ?? null, query);
+      } catch (error) {
+        console.error("Telegram panel failed:", error.message);
+        await bot.sendMessage(chatId, "The panel failed. Send /b again.");
+      }
+      return;
+    }
+    if (parsed.kind !== "command") {
+      return bot.sendMessage(chatId, "Unknown button. Send /help or /b.");
+    }
+
+    const handler = MENU_ACTIONS[parsed.action];
     if (!handler) return bot.sendMessage(chatId, "Unknown button. Send /help or /b.");
     try {
-      await handler(chatId, query);
+      await handler(chatId, query, parsed.symbol);
     } catch (error) {
       console.error("Telegram button failed:", error.message);
       await bot.sendMessage(chatId, "The button failed. Check Railway logs for the error.");
@@ -495,22 +455,22 @@ export async function startTelegramBot({
   await bot.setMyCommands([
     { command: "status", description: "Show bot and risk status" },
     { command: "health", description: "Check worker and database" },
-    { command: "levels", description: "Show ring levels for every instrument" },
+    { command: "levels", description: "Show ring levels" },
     { command: "rings", description: "Show live position versus rings" },
-    { command: "dxpreflight", description: "Inspect active instrument settings" },
+    { command: "dxpreflight", description: "Inspect instrument settings" },
     { command: "solcanary", description: "Inspect approved lifecycle canary" },
-    { command: "kill", description: "Pause the bot" },
-    { command: "resume", description: "Request a resume code" },
+    { command: "kill", description: "Pause every book" },
+    { command: "resume", description: "Request a resume code for one book" },
     { command: "reconcile", description: "Request a virtual flatten code" },
-    { command: "rematch", description: "Rematch broker and virtual books" },
-    { command: "flat", description: "Show flattening instructions for every instrument" },
+    { command: "rematch", description: "Rematch one book" },
+    { command: "flat", description: "Show flattening instructions" },
     ...CHRONICLE_COMMANDS,
     { command: "code", description: "Enter OpenAI development mode" },
     { command: "devstatus", description: "Show development companion status" },
     { command: "devreset", description: "Reset development conversation" },
     { command: "devexit", description: "Leave development mode" },
     { command: "whoami", description: "Show your Telegram user ID" },
-    { command: "b", description: "Show every command as buttons" },
+    { command: "b", description: "Five-book button panel" },
     { command: "help", description: "Show commands" }
   ]);
 
