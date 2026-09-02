@@ -70,9 +70,19 @@ function signedMoney(value) {
   return `${n < 0 ? "\u2212" : "+"}$${Math.abs(n).toFixed(2)}`;
 }
 
-function quantity(value) {
+function headingInstrument(value) {
+  if (typeof value !== "string" || value.trim() === "") return "SOL";
+  return safeText("instrument", value.trim(), { max: 16, pattern: /^[A-Z0-9]+\/[A-Z]+$/ });
+}
+
+function quantityUnit(instrument) {
+  if (typeof instrument === "string" && instrument.includes("/")) return instrument.split("/")[0];
+  return "SOL";
+}
+
+function quantity(value, instrument) {
   const n = nonNegative("quantity", value);
-  return `${Number(n.toFixed(8))} SOL`;
+  return `${Number(n.toFixed(8))} ${quantityUnit(instrument)}`;
 }
 
 function timestamp(value) {
@@ -80,11 +90,11 @@ function timestamp(value) {
 }
 
 function ringTag(value) {
-  return safeText("ringTag", value, { max: 16, pattern: /^(BUY|SELL)(?:[1-9]|10)$/ });
+  return safeText("ringTag", value, { max: 16, pattern: /^(BUY|SELL)([1-9]|[1-9][0-9])$/ });
 }
 
-function netLabel(value) {
-  return `${quantity(Math.abs(value))}${value < 0 ? " SHORT" : value > 0 ? " LONG" : ""}`;
+function netLabel(value, instrument) {
+  return `${quantity(Math.abs(value), instrument)}${value < 0 ? " SHORT" : value > 0 ? " LONG" : ""}`;
 }
 
 function formatEvent(event) {
@@ -92,6 +102,7 @@ function formatEvent(event) {
   const kind = safeText("kind", event.kind, { max: 48, pattern: /^[A-Z0-9_]+$/ });
   if (!KINDS.has(kind)) throw new TypeError("notification kind is unsupported");
   const eventKey = safeText("eventKey", event.eventKey, { max: 160, pattern: /^[A-Za-z0-9_.:-]+$/ });
+  const instrument = headingInstrument(event.instrument);
 
   if (kind === "ENTRY_CONFIRMED") {
     const side = safeText("side", event.side, { max: 4, pattern: /^(BUY|SELL)$/ });
@@ -105,11 +116,11 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "\uD83D\uDFE2 SOL ENTRY CONFIRMED",
+        `\uD83D\uDFE2 ${instrument} ENTRY CONFIRMED`,
         `Ring: ${tag}`,
         `Side: ${side}`,
         `Fill: ${money(fillPrice)}`,
-        `Quantity: ${quantity(filledQuantity)}`,
+        `Quantity: ${quantity(filledQuantity, event.instrument)}`,
         `Virtual lot: ${lotId}`,
         `Current 200-day MA: ${money(ma)}`,
         `Confirmed: ${timestamp(filledAt)}`
@@ -133,15 +144,15 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "\uD83D\uDCB0 SOL TRANCHE EXIT CONFIRMED",
+        `\uD83D\uDCB0 ${instrument} TRANCHE EXIT CONFIRMED`,
         `Ring: ${tag}`,
         `Lot: ${lotId}`,
         `Position side: ${virtualSide}`,
         `Tranche: ${tranche}/4`,
         `Target touched: ${money(target)}`,
         `Broker fill: ${money(fillPrice)}`,
-        `Closed: ${quantity(filledQuantity)}`,
-        `Remaining: ${quantity(remainingQuantity)}`,
+        `Closed: ${quantity(filledQuantity, event.instrument)}`,
+        `Remaining: ${quantity(remainingQuantity, event.instrument)}`,
         `Current 200-day MA: ${money(ma)}`,
         `Confirmed: ${timestamp(filledAt)}`
       ].join("\n")
@@ -161,12 +172,12 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "\u2705 SOL LOT FULLY CLOSED",
+        `\u2705 ${instrument} LOT FULLY CLOSED`,
         `Ring: ${tag}`,
         `Lot: ${lotId}`,
         `Position side: ${virtualSide}`,
         `Entry fill: ${money(entryPrice)}`,
-        `Original quantity: ${quantity(originalQuantity)}`,
+        `Original quantity: ${quantity(originalQuantity, event.instrument)}`,
         `Final exit fill: ${money(finalFillPrice)}`,
         `Opened: ${timestamp(openedAt)}`,
         `Closed: ${timestamp(closedAt)}`
@@ -203,16 +214,16 @@ function formatEvent(event) {
     if (event.stage === "WARNING") {
       const n = Number(event.warningNumber);
       const warningNumber = Number.isInteger(n) && n >= 1 && n <= 3 ? n : 1;
-      const instrument = typeof event.instrument === "string" && event.instrument.trim()
+      const label = typeof event.instrument === "string" && event.instrument.trim()
         ? event.instrument.trim()
         : "GRID";
       return {
         kind,
         eventKey,
         message: [
-          `\u26A0\uFE0F ${instrument} NET MISMATCH \u2014 WARNING ${warningNumber}/3`,
-          `Virtual net: ${netLabel(expected)}`,
-          `DXtrade net: ${netLabel(broker)}`,
+          `\u26A0\uFE0F ${label} NET MISMATCH \u2014 WARNING ${warningNumber}/3`,
+          `Virtual net: ${netLabel(expected, event.instrument)}`,
+          `DXtrade net: ${netLabel(broker, event.instrument)}`,
           `State version: ${stateVersion}`,
           "This book is not taking new grid actions. Other books keep running.",
           "Safety halt in 15 minutes if the nets still disagree."
@@ -224,8 +235,8 @@ function formatEvent(event) {
       eventKey,
       message: [
         "\uD83D\uDEA8 SOL SAFETY HALT \u2014 RECONCILIATION MISMATCH",
-        `Virtual net: ${netLabel(expected)}`,
-        `DXtrade net: ${netLabel(broker)}`,
+        `Virtual net: ${netLabel(expected, event.instrument)}`,
+        `DXtrade net: ${netLabel(broker, event.instrument)}`,
         `State version: ${stateVersion}`,
         "New strategy actions are blocked. Owner review is required."
       ].join("\n")
@@ -283,7 +294,7 @@ function formatEvent(event) {
       message: [
         "\uD83D\uDEA8 PROTECTIVE FLATTEN CONFIRMED",
         `Reason: ${event.reason}`,
-        `Quantity closed: ${quantity(flattenQuantity)}`,
+        `Quantity closed: ${quantity(flattenQuantity, event.instrument)}`,
         `Broker fill: ${money(fillPrice)}`,
         `Confirmed: ${timestamp(filledAt)}`,
         "SOL grid state was reset and new entries remain subject to all account locks."
@@ -307,7 +318,7 @@ function formatEvent(event) {
         "\u26A0\uFE0F D-049 50% DE-RISK CUT CONFIRMED",
         `Daily drawdown at trigger: ${signedMoney(drawdownUsd)}`,
         `Fraction cut: ${(fraction * 100).toFixed(0)}% of each executable virtual lot`,
-        `Broker quantity closed: ${quantity(filledQuantity)}`,
+        `Broker quantity closed: ${quantity(filledQuantity, event.instrument)}`,
         `Broker fill: ${money(fillPrice)}`,
         `Virtual lots affected: ${lotsAffected}`,
         `Confirmed: ${timestamp(filledAt)}`,
@@ -325,7 +336,7 @@ function formatEvent(event) {
       `Daily drawdown at trigger: ${signedMoney(drawdownUsd)}`
     ];
     if (event.fillPrice != null) lines.push(`Broker fill: ${money(positive("fillPrice", event.fillPrice))}`);
-    if (Number(event.filledQuantity) > 0) lines.push(`Quantity closed: ${quantity(event.filledQuantity)}`);
+    if (Number(event.filledQuantity) > 0) lines.push(`Quantity closed: ${quantity(event.filledQuantity, event.instrument)}`);
     lines.push(
       "Broker account: FLAT",
       `Confirmed: ${timestamp(filledAt)}`,

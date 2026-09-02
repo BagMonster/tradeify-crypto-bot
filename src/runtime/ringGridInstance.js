@@ -16,19 +16,36 @@ function requiredStore(store) {
   return store;
 }
 
-// A D-060 instance owns one grid's memory, MA, broker guard, and state row. The
-// multi-asset coordinator is the only account-level decision maker above it.
-export function createRingGridInstance({ grid, stateStore, maProvider, execution, minimumHoldSeconds = 25, addEvent = async () => {} }) {
+function eventPrefix(orderPrefix, instrument) {
+  const raw = typeof orderPrefix === "string" && orderPrefix.trim() !== "" ? orderPrefix.trim() : String(instrument ?? "GRID").replace(/[^A-Za-z0-9]/g, "");
+  return raw.toUpperCase();
+}
+
+export function createRingGridInstance({
+  grid,
+  stateStore,
+  maProvider,
+  execution,
+  minimumHoldSeconds = 25,
+  addEvent = async () => {},
+  notifications = null
+}) {
   if (!grid || typeof grid.createInitialState !== "function" || typeof grid.entryCandidates !== "function") throw new TypeError("grid must be a ring-grid instance");
   const store = requiredStore(stateStore);
   if (typeof maProvider?.getCurrent !== "function") throw new TypeError("maProvider.getCurrent is required");
   if (typeof execution?.executeIntent !== "function" || typeof execution?.executeProtectiveCut !== "function" || typeof execution?.executeProtectiveFlatten !== "function") throw new TypeError("execution interface is invalid");
   if (!Number.isInteger(minimumHoldSeconds) || minimumHoldSeconds < 25) throw new TypeError("minimumHoldSeconds is invalid");
   if (typeof addEvent !== "function") throw new TypeError("addEvent must be a function");
-  const { instrument, marketSymbol, lotStep, perRing, grossExposureCeilingUsd } = grid.definition;
+  if (notifications !== null && typeof notifications?.enqueue !== "function") throw new TypeError("notifications.enqueue must be a function");
+  const { instrument, marketSymbol, lotStep, perRing, grossExposureCeilingUsd, orderPrefix } = grid.definition;
+  const prefix = eventPrefix(orderPrefix, instrument);
   let previousPrice = null;
   let entryBrake = false;
   let currentState = null;
+
+  function enqueueNotification(event) {
+    if (notifications !== null) notifications.enqueue(event);
+  }
 
   async function init() {
     await store.init();
@@ -77,9 +94,41 @@ export function createRingGridInstance({ grid, stateStore, maProvider, execution
       const lot = state.rings.flatMap((ring) => ring.lots).find((candidate) => candidate.id === action.lotId);
       if (!lot || Date.parse(trade.tradeTime) - Date.parse(lot.openedAt) < minimumHoldSeconds * 1000) break;
       if (execution.isEnabled?.() !== true) break;
+      const lotBeforeExit = Object.freeze({ ...lot });
       const result = await execution.executeIntent(action);
       if (result.status !== "FILLED") return Object.freeze({ status: "EXIT_PENDING", state, action, result });
       state = await store.save(state.version, grid.applyConfirmedExit(state, action, result));
+      const lotAfterExit = state.rings.flatMap((ring) => ring.lots).find((candidate) => candidate.id === action.lotId);
+      enqueueNotification({
+        kind: "TRANCHE_EXIT_CONFIRMED",
+        eventKey: `${prefix}-TRANCHE:${result.orderCode}`,
+        instrument,
+        ringTag: action.ringTag,
+        virtualSide: action.virtualSide,
+        lotId: action.lotId,
+        tranche: action.tranche,
+        fillPrice: result.fillPrice,
+        filledQuantity: result.filledQuantity,
+        remainingQuantity: lotAfterExit?.remainingUnits ?? 0,
+        ma,
+        target: action.target,
+        filledAt: result.filledAt
+      });
+      if (!lotAfterExit) {
+        enqueueNotification({
+          kind: "LOT_CLOSED",
+          eventKey: `${prefix}-LOT-CLOSED:${result.orderCode}`,
+          instrument,
+          ringTag: action.ringTag,
+          virtualSide: action.virtualSide,
+          lotId: action.lotId,
+          entryPrice: lotBeforeExit.entryPrice,
+          originalQuantity: lotBeforeExit.originalUnits,
+          finalFillPrice: result.fillPrice,
+          openedAt: lotBeforeExit.openedAt,
+          closedAt: result.filledAt
+        });
+      }
     }
     if (!entryBrake) {
       for (const candidate of grid.entryCandidates(state, { previousPrice, price: trade.price, ma })) {
@@ -92,6 +141,18 @@ export function createRingGridInstance({ grid, stateStore, maProvider, execution
         const result = await execution.executeIntent(intent);
         if (result.status !== "FILLED") return Object.freeze({ status: "ENTRY_PENDING", state, intent, result });
         state = await store.save(state.version, grid.applyConfirmedEntry(state, intent, result));
+        enqueueNotification({
+          kind: "ENTRY_CONFIRMED",
+          eventKey: `${prefix}-ENTRY:${result.orderCode}`,
+          instrument,
+          ringTag: intent.ringTag,
+          side: intent.side,
+          fillPrice: result.fillPrice,
+          filledQuantity: result.filledQuantity,
+          lotId: intent.lotId,
+          ma,
+          filledAt: result.filledAt
+        });
       }
     }
     previousPrice = trade.price;
