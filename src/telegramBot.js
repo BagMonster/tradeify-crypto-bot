@@ -42,7 +42,7 @@ const MENU_LAYOUT = Object.freeze([
   { header: "\u2014 Diagnostics \u2014" },
   [
     { text: "DX Preflight", action: "dxpreflight" },
-    { text: "SOL Canary", action: "solcanary" }
+    { text: "Canary", action: "solcanary" }
   ],
   [
     { text: "Flat Instructions", action: "flat" },
@@ -93,20 +93,20 @@ const MAIN_MENU = {
 const HELP_TEXT = [
   "TRADEIFY BOT COMMANDS",
   "",
-  "/status - show account, floors, SOL strategy state, and live execution controls",
+  "/status - show account risk, then every instrument's state and execution controls",
   "/health - confirm the worker, PostgreSQL, MA provider, and execution state",
-  "/levels - show all 10 BUY and 10 SHORT trigger prices, sizes, estimated SOL quantities, and ring state",
-  "/rings - show where live SOL sits relative to the frozen ring ladder and the next BUY/SHORT levels",
+  "/levels [INSTRUMENT] - ring ladder summary for every instrument; add an instrument for its full ladder",
+  "/rings [INSTRUMENT] - where each instrument sits against its ring ladder and next levels",
   "/dxpreflight - inspect active-instrument order settings without placing an order",
-  "/solcanary - inspect/replay the approved lifecycle canary only while automatic execution is OFF",
+  "/canary - inspect the approved lifecycle canary; available only while automatic execution is OFF",
   "/kill - pause the bot and persist the pause",
-  "/resume - request a 6-digit resume code",
-  "/confirmresume CODE - confirm the restart",
-  "/reconcile - request a 6-digit code to flatten stale virtual lots when DXtrade is flat",
-  "/confirmreconcile CODE - apply the audited virtual flatten and clear the reconciliation halt",
-  "/rematch - request a 6-digit code to keep current lots when DXtrade and the notebook already agree",
-  "/confirmrematch CODE - clear the reconciliation halt, keep the live lot, and lift the operator pause",
-  "/flat - show manual SOL/USD flattening instructions",
+  "/resume INSTRUMENT - request a 6-digit resume code for one instrument",
+  "/confirmresume CODE INSTRUMENT - confirm the restart for that instrument",
+  "/reconcile INSTRUMENT - request a 6-digit code to flatten stale virtual lots for one instrument",
+  "/confirmreconcile CODE INSTRUMENT - apply the audited virtual flatten for that instrument",
+  "/rematch INSTRUMENT - request a 6-digit code to keep current lots for one instrument",
+  "/confirmrematch CODE INSTRUMENT - clear that instrument's halt, keep its lots, lift the pause",
+  "/flat [INSTRUMENT] - manual flattening instructions; every instrument if omitted",
   ...CHRONICLE_HELP_LINES,
   "/code - enter the owner-only OpenAI development conversation",
   "/devstatus - show development companion queue/session status",
@@ -116,7 +116,7 @@ const HELP_TEXT = [
   "/b - show every command as tappable buttons (/buttons, /menu do the same)",
   "/help - show this list",
   "",
-  "There are no /long or /short commands. /levels and /rings are read-only. The frozen SOL grid trades automatically only when both live execution controls are ON and every safety gate passes.",
+  "There are no /long or /short commands. /levels and /rings are read-only. Each instrument trades automatically only when both live execution controls are ON and every safety gate passes. Reads cover all instruments; /resume, /reconcile and /rematch act on ONE instrument and require its name.",
   CHRONICLE_DEV_BLURB
 ].join("\n");
 
@@ -252,20 +252,20 @@ export async function startTelegramBot({
     await sendMenu(message.chat.id);
   }));
 
-  bot.onText(/^\/status(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await sendLatched(message.chat.id, "/status", await service.statusText());
+  bot.onText(/^\/status(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/status", await service.statusText(match?.[1]));
   }));
 
-  bot.onText(/^\/health(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await sendLatched(message.chat.id, "/health", await service.healthText());
+  bot.onText(/^\/health(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/health", await service.healthText(match?.[1]));
   }));
 
-  bot.onText(/^\/levels(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await sendLatched(message.chat.id, "/levels", await service.levelsText());
+  bot.onText(/^\/levels(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/levels", await service.levelsText(match?.[1]));
   }));
 
-  bot.onText(/^\/rings(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await sendLatched(message.chat.id, "/rings", await service.ringsText());
+  bot.onText(/^\/rings(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/rings", await service.ringsText(match?.[1]));
   }));
 
   bot.onText(/^\/dxpreflight(?:@\w+)?$/i, withAuthorization(async (message) => {
@@ -274,7 +274,7 @@ export async function startTelegramBot({
   }));
 
   bot.onText(/^\/solcanary(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await bot.sendMessage(message.chat.id, "Checking the owner-approved 0.01 SOL lifecycle canary. It can run only while automatic execution is OFF.");
+    await bot.sendMessage(message.chat.id, "Checking the owner-approved 0.01-lot lifecycle canary. It can run only while automatic execution is OFF.");
     await sendLatched(message.chat.id, "/solcanary", await service.canaryText());
   }));
 
@@ -282,37 +282,37 @@ export async function startTelegramBot({
     await sendLatched(message.chat.id, "/kill", await service.kill());
   }));
 
-  bot.onText(/^\/resume(?:@\w+)?$/i, withAuthorization(async (message) => {
-    const result = await service.requestResume();
+  bot.onText(/^\/resume(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    const result = await service.requestResume(match?.[1]);
     await sendLatched(message.chat.id, "/resume", result.message);
   }));
 
-  bot.onText(/^\/confirmresume(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
-    await sendLatched(message.chat.id, "/confirmresume", await service.confirmResume(match?.[1] ?? ""));
+  bot.onText(/^\/confirmresume(?:@\w+)?(?:\s+(\S+))?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/confirmresume", await service.confirmResume(match?.[1] ?? "", match?.[2]));
   }));
 
-  bot.onText(/^\/reconcile(?:@\w+)?$/i, withAuthorization(async (message) => {
-    const result = await service.requestReconcile();
+  bot.onText(/^\/reconcile(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    const result = await service.requestReconcile(match?.[1]);
     await sendLatched(message.chat.id, "/reconcile", result.message);
   }));
 
-  bot.onText(/^\/confirmreconcile(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
-    await sendLatched(message.chat.id, "/confirmreconcile", await service.confirmReconcile(match?.[1] ?? ""));
+  bot.onText(/^\/confirmreconcile(?:@\w+)?(?:\s+(\S+))?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/confirmreconcile", await service.confirmReconcile(match?.[1] ?? "", match?.[2]));
   }));
 
-  bot.onText(/^\/rematch(?:@\w+)?$/i, withAuthorization(async (message) => {
-    const result = await service.requestRematch();
+  bot.onText(/^\/rematch(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    const result = await service.requestRematch(match?.[1]);
     await sendLatched(message.chat.id, "/rematch", result.message);
   }));
 
-  bot.onText(/^\/confirmrematch(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
-    await sendLatched(message.chat.id, "/confirmrematch", await service.confirmRematch(match?.[1] ?? ""));
+  bot.onText(/^\/confirmrematch(?:@\w+)?(?:\s+(\S+))?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/confirmrematch", await service.confirmRematch(match?.[1] ?? "", match?.[2]));
   }));
 
   attachChronicleCommands({ bot, devCompanion, withAuthorization, sendLatched });
 
-  bot.onText(/^\/flat(?:@\w+)?$/i, withAuthorization(async (message) => {
-    await sendLatched(message.chat.id, "/flat", service.flatInstructions());
+  bot.onText(/^\/flat(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/flat", await service.flatInstructions(match?.[1]));
   }));
 
   bot.onText(/^\/code(?:@\w+)?$/i, withAuthorization(async (message) => {
@@ -357,7 +357,7 @@ export async function startTelegramBot({
     health: (chatId) => runLatched(chatId, "/health", () => service.healthText()),
     levels: (chatId) => runLatched(chatId, "/levels", () => service.levelsText()),
     rings: (chatId) => runLatched(chatId, "/rings", () => service.ringsText()),
-    flat: (chatId) => sendLatched(chatId, "/flat", service.flatInstructions()),
+    flat: (chatId) => runLatched(chatId, "/flat", () => service.flatInstructions()),
     kill: (chatId) => runLatched(chatId, "/kill", () => service.kill()),
     resume: async (chatId) => {
       const result = await service.requestResume();
@@ -376,7 +376,7 @@ export async function startTelegramBot({
       await sendLatched(chatId, "/dxpreflight", await service.dxPreflightText());
     },
     solcanary: async (chatId) => {
-      await bot.sendMessage(chatId, "Checking the owner-approved 0.01 SOL lifecycle canary. It can run only while automatic execution is OFF.");
+      await bot.sendMessage(chatId, "Checking the owner-approved 0.01-lot lifecycle canary. It can run only while automatic execution is OFF.");
       await sendLatched(chatId, "/solcanary", await service.canaryText());
     },
     chroniclestatus: (chatId) => runChronicle(chatId, "chronicleStatus", "/chroniclestatus"),
@@ -483,15 +483,15 @@ export async function startTelegramBot({
   await bot.setMyCommands([
     { command: "status", description: "Show bot and risk status" },
     { command: "health", description: "Check worker and database" },
-    { command: "levels", description: "Show all SOL grid levels and sizes" },
-    { command: "rings", description: "Show live SOL position versus grid rings" },
+    { command: "levels", description: "Show ring levels for every instrument" },
+    { command: "rings", description: "Show live position versus rings" },
     { command: "dxpreflight", description: "Inspect active instrument settings" },
-    { command: "solcanary", description: "Inspect approved 0.01 SOL lifecycle canary" },
+    { command: "solcanary", description: "Inspect approved lifecycle canary" },
     { command: "kill", description: "Pause the bot" },
     { command: "resume", description: "Request a resume code" },
     { command: "reconcile", description: "Request a virtual flatten code" },
     { command: "rematch", description: "Rematch broker and virtual books" },
-    { command: "flat", description: "Show flattening instructions" },
+    { command: "flat", description: "Show flattening instructions for every instrument" },
     ...CHRONICLE_COMMANDS,
     { command: "code", description: "Enter OpenAI development mode" },
     { command: "devstatus", description: "Show development companion status" },
