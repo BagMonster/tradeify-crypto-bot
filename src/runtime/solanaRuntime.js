@@ -86,7 +86,8 @@ function createD060Runtime({
   getRiskSnapshot,
   execution,
   minimumHoldSeconds = 25,
-  addEvent = async () => {}
+  addEvent = async () => {},
+  notifications = null
 }) {
   if (!gridDefinition || typeof gridDefinition !== "object") throw new TypeError("gridDefinition is required");
   if (typeof instrument !== "string" || instrument !== gridDefinition.instrument) throw new TypeError("instrument must match gridDefinition");
@@ -100,7 +101,8 @@ function createD060Runtime({
     maProvider,
     execution,
     minimumHoldSeconds,
-    addEvent
+    addEvent,
+    notifications
   });
   let riskSupervisor = null;
   let latestRisk = null;
@@ -239,7 +241,8 @@ export function createSolanaRuntime({
       getRiskSnapshot,
       execution,
       minimumHoldSeconds,
-      addEvent
+      addEvent,
+      notifications
     });
   }
   for (const method of ["init", "load", "initializeIfMissing", "save"]) {
@@ -387,7 +390,6 @@ export function createSolanaRuntime({
       return Object.freeze({ status: "RECONCILIATION_BLOCKED", state, ma, reconciliation: Object.freeze({ ...recon }), stateVersion: state.version });
     }
 
-    // Existing funded-account floor protections remain highest-priority emergency actions.
     if (firstRisk.risk.protectiveAction === "FLATTEN_AND_LOCK") {
       const result = await execution.executeProtectiveFlatten({ stateVersion: state.version, reason: firstRisk.risk.reason });
       if (result.status === "FILLED" || result.status === "ALREADY_FLAT") {
@@ -414,7 +416,6 @@ export function createSolanaRuntime({
       return Object.freeze({ status: "PROTECTIVE_PENDING", state, ma, result });
     }
 
-    // D-049 is evaluated before normal re-arm, tranche exits, entries, or heartbeat work.
     const ladder = await ladderVerdict(firstRisk.snapshot, trade);
     let verdict = ladder.verdict;
     let blockEntries = verdict.action !== LADDER_ACTIONS.NORMAL;
@@ -539,7 +540,6 @@ export function createSolanaRuntime({
       await addEvent("INFO", "SOL_RING_REARMED", { stateVersion: state.version, price: trade.price, ma });
     }
 
-    // Live production rule: all eligible exits before any entries.
     while (true) {
       const action = nextExitAction(state, { price: trade.price, ma });
       if (!action) break;
