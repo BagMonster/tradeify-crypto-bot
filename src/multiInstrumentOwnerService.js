@@ -124,6 +124,7 @@ export function createMultiInstrumentOwnerService({
     // for during an incident; showing one book out of five would be worse than
     // showing none, because it reads as complete.
     flatText: (arg) => fanOut("flatText", arg),
+    flatInstructions: (arg) => fanOut("flatInstructions", arg),
 
     // ---- control commands ----
 
