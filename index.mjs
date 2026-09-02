@@ -412,7 +412,19 @@ const service = createMultiInstrumentOwnerService({
     return createSolanaOwnerService({
       database,
       account,
-      strategy: { ...cfg, strategyId: stack.definition.strategyId, riskLadder: accountRisk },
+      // The legacy owner/tradeify services still call resolveInstrumentProfile(strategy),
+      // which reads strategy.instruments and requires exactly one enabled entry. Give
+      // each per-instrument service a strategy object of that shape so it resolves its
+      // own profile. strategyStatus and execution are read by those services too.
+      strategy: {
+        ...cfg,
+        strategyId: stack.definition.strategyId,
+        strategyType: "moving-ma-outer-heavy-grid",
+        strategyStatus: "active",
+        instruments: { [cfg.instrument]: { enabled: true } },
+        execution: { autoExecute: cfg.execution?.autoExecute ?? true },
+        riskLadder: accountRisk
+      },
       environment,
       instrument: cfg.instrument,
       gridDefinition: stack.definition,
