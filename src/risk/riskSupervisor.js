@@ -3,25 +3,17 @@
  *
  * D-060: the account-level risk ladder.
  *
- * Before D-060 the ladder lived inside the execution guard and could only see one
- * instrument. With several books open, "the account is down $1,000" is a fact about
- * the account, not about any one instrument, so the ladder has to sit above them.
- *
  * Three rungs, evaluated in this order:
  *
  *   1. FULL FLATTEN   combined day P&L <= -fullFlattenUsd
- *                     every instrument flattens; all entries blocked until rollover
  *   2. PARTIAL CUT    combined day P&L <= -partialCutUsd
- *                     50% cut allocated PROPORTIONAL TO LOSS; winners are never trimmed
- *   3. ENTRY BRAKE    evaluated PER INSTRUMENT on that instrument's own day P&L
- *                     the losing book stops opening; the others carry on
+ *   3. ENTRY BRAKE    per instrument on that instrument's own day P&L
  *
- * Flatten is checked first so a fast move that crosses both thresholds inside one
- * evaluation flattens rather than merely cutting.
- *
- * Research basis: the per-instrument brake was worth +$3,720 across nine books
- * against an account-scoped brake, because an account-wide brake punishes four
- * healthy instruments for one that is losing.
+ * An unreadable book is not a flat book. Flatten and cut still wait until every
+ * book can be read. Entries are different: only the unreadable book is paused,
+ * and that pause is transient. It is not recorded as "braked today". When the
+ * snapshot is readable again and that book has not lost -$entryBrakeUsd, entries
+ * resume. A real -$300 brake, or a flatten, still holds until rollover.
  */
 
 const REQUIRED_CONFIG = Object.freeze([
@@ -42,18 +34,6 @@ function fixed2(value) {
   return Number(Number(value).toFixed(2));
 }
 
-/**
- * Allocates a 50% cut across the losing instruments in proportion to how much of the
- * account's unrealised loss each one is responsible for.
- *
- *   loss_i     = max(0, -unrealised_i)
- *   share_i    = loss_i / sum(loss)
- *   fraction_i = clamp(partialCutFraction * share_i * N, 0, 1)
- *
- * The * N term keeps the total cut near partialCutFraction of the losing side rather
- * than shrinking as instruments are added. An instrument in profit gets 0 and is not
- * touched — the owner's rule is "close losers proportionately, do not trim winners".
- */
 export function allocateProportionalCut(instrumentLosses, partialCutFraction) {
   const losses = instrumentLosses.map((entry) => Object.freeze({
     instrument: entry.instrument,
@@ -62,11 +42,6 @@ export function allocateProportionalCut(instrumentLosses, partialCutFraction) {
   const lossSum = losses.reduce((sum, entry) => sum + entry.loss, 0);
   if (lossSum <= 0) return Object.freeze([]);
 
-  // Every losing instrument surrenders the same FRACTION of its position. That is
-  // already proportional to loss in dollar terms: a book down twice as much has
-  // roughly twice the position, so half of it is twice the dollars. Weighting the
-  // fraction by share as well double-counts and, with one dominant loser, clamps to
-  // 1.0 — closing that book entirely rather than cutting half of it.
   return Object.freeze(losses
     .filter((entry) => entry.loss > 0)
     .map((entry) => Object.freeze({
@@ -120,18 +95,24 @@ export function createRiskSupervisor({
   let evaluating = false;
   let lastError = null;
 
+  function stickyBrake(instrument) {
+    return flattenedToday === true || brakedToday.has(instrument);
+  }
+
+  function applyEntryBrake(book, on) {
+    try {
+      book.setEntryBrake(on === true);
+    } catch {
+      // a book that cannot accept the flag stays in the last known state
+    }
+  }
+
   function rollover(nextDayKey) {
     dayKey = nextDayKey;
     flattenedToday = false;
     cutsToday = 0;
     brakedToday.clear();
-    for (const book of instruments) {
-      try {
-        book.setEntryBrake(false);
-      } catch {
-        // a book that cannot clear its brake stays braked; it is the safe direction
-      }
-    }
+    for (const book of instruments) applyEntryBrake(book, false);
   }
 
   function readBooks() {
@@ -161,17 +142,10 @@ export function createRiskSupervisor({
       if (incomingDayKey !== dayKey) rollover(incomingDayKey);
 
       const readings = readBooks();
-
-      // D-054 principle: an unreadable book is not a flat book. If any instrument
-      // cannot be read the combined figure is untrustworthy, so brake everything
-      // rather than act on a number that may be missing a losing position.
       const unreadable = readings.filter((r) => r.readFailed);
       if (unreadable.length > 0) {
         for (const reading of readings) {
-          if (!brakedToday.has(reading.instrument)) {
-            brakedToday.add(reading.instrument);
-            try { reading.book.setEntryBrake(true); } catch { /* stays braked */ }
-          }
+          applyEntryBrake(reading.book, stickyBrake(reading.instrument) || reading.readFailed);
         }
         lastError = `Cannot read ${unreadable.map((r) => r.instrument).join(", ")}`;
         await addEvent("ERROR", "RISK_SUPERVISOR_ACCOUNT_DATA_UNAVAILABLE", {
@@ -183,13 +157,12 @@ export function createRiskSupervisor({
 
       const combined = fixed2(readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
 
-      // ---- rung 1: full flatten, account-wide, held until rollover ----
       if (combined <= -fullFlattenUsd) {
         if (flattenedToday) return Object.freeze({ action: "ALREADY_FLATTENED", combinedDayPnlUsd: combined });
         flattenedToday = true;
         const results = [];
         for (const reading of readings) {
-          try { reading.book.setEntryBrake(true); } catch { /* stays braked */ }
+          applyEntryBrake(reading.book, true);
           brakedToday.add(reading.instrument);
           try {
             results.push({
@@ -224,15 +197,12 @@ export function createRiskSupervisor({
         });
       }
 
-      // ---- rung 2: partial cut, proportional to loss ----
       if (combined <= -partialCutUsd) {
         const allocations = allocateProportionalCut(
           readings.map((r) => ({ instrument: r.instrument, unrealisedUsd: r.unrealisedUsd })),
           partialCutFraction
         );
         if (allocations.length === 0) {
-          // The account is down on realised P&L but nothing is currently in an
-          // unrealised loss. There is nothing to cut; the brake below still applies.
           await addEvent("WARN", "RISK_SUPERVISOR_CUT_NO_LOSING_BOOK", { combinedDayPnlUsd: combined });
         } else {
           cutsToday += 1;
@@ -264,16 +234,20 @@ export function createRiskSupervisor({
         }
       }
 
-      // ---- rung 3: entry brake, per instrument ----
       const newlyBraked = [];
       for (const reading of readings) {
         if (brakedToday.has(reading.instrument)) continue;
         if (reading.dayPnlUsd <= -entryBrakeUsd) {
           brakedToday.add(reading.instrument);
-          try { reading.book.setEntryBrake(true); } catch { /* stays braked */ }
+          applyEntryBrake(reading.book, true);
           newlyBraked.push(reading.instrument);
         }
       }
+
+      for (const reading of readings) {
+        if (!stickyBrake(reading.instrument)) applyEntryBrake(reading.book, false);
+      }
+
       if (newlyBraked.length > 0) {
         await addEvent("WARN", "RISK_SUPERVISOR_ENTRY_BRAKE", {
           instruments: newlyBraked,

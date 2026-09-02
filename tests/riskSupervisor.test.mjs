@@ -31,15 +31,30 @@ test("D-060 cuts half of every losing book and never a winner", async () => {
   assert.equal(allocateProportionalCut([{ instrument: "SOL/USD", unrealisedUsd: -1000 }], 0.5)[0].fraction, 0.5);
 });
 
-test("D-060 flatten takes priority and unreadable data brakes every book", async () => {
+test("D-060 flatten takes priority over a cut", async () => {
   const sol = book("SOL/USD", { day: -1300 });
   const doge = book("DOGE/USD", { day: 0 });
   const supervisor = createRiskSupervisor({ config, instruments: [sol, doge] });
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-01" })).action, "FLATTEN");
   assert.equal(sol.calls.some(([kind]) => kind === "flatten"), true);
-  const unreadable = book("ZEC/USD", { unreadable: true });
+});
+
+test("unread data pauses only the unread book and does not stick after a good read", async () => {
+  const unread = book("ZEC/USD", { unreadable: true });
   const safe = book("AVAX/USD");
-  const failClosed = createRiskSupervisor({ config, instruments: [unreadable, safe] });
-  assert.equal((await failClosed.evaluate({ dayKey: "2026-09-01" })).action, "ACCOUNT_DATA_UNAVAILABLE");
-  assert.equal(safe.calls.some(([kind, on]) => kind === "brake" && on === true), true);
+  const supervisor = createRiskSupervisor({ config, instruments: [unread, safe] });
+  assert.equal((await supervisor.evaluate({ dayKey: "2026-09-01" })).action, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.equal(unread.calls.some(([kind, on]) => kind === "brake" && on === true), true);
+  assert.equal(safe.calls.some(([kind, on]) => kind === "brake" && on === true), false);
+  assert.deepEqual(supervisor.getSnapshot().brakedInstruments, []);
+
+  const recoveredZec = book("ZEC/USD", { day: 0 });
+  const recoveredAvax = book("AVAX/USD", { day: 0 });
+  const recovered = createRiskSupervisor({ config, instruments: [recoveredZec, recoveredAvax] });
+  await recovered.evaluate({ dayKey: "2026-09-01" });
+  const again = await recovered.evaluate({ dayKey: "2026-09-01" });
+  assert.equal(again.action, "NONE");
+  assert.equal(recovered.getSnapshot().brakedInstruments.length, 0);
+  assert.equal(recoveredZec.calls.at(-1)[1], false);
+  assert.equal(recoveredAvax.calls.at(-1)[1], false);
 });
