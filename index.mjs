@@ -17,6 +17,7 @@ import { formatDxtradeAccountDiagnostic } from "./src/account/dxtradeDiagnostics
 import { createSolanaPersistence } from "./src/state/solanaPersistence.js";
 import { createSolanaRuntime } from "./src/runtime/solanaRuntime.js";
 import { clearLatchedBaselineMismatchHalt } from "./src/runtime/d049BaselineHaltClear.js";
+import { nextReconciliationWarning } from "./src/runtime/reconciliationWarning.js";
 import { createSolanaHeartbeat } from "./src/runtime/solanaHeartbeat.js";
 import { createLiveTelegramNotifications } from "./src/notifications/liveTelegramNotifications.js";
 import { accountDayKey } from "./src/risk/dailyRiskLadder.js";
@@ -30,9 +31,6 @@ import { startTelegramBot } from "./src/telegramBot.js";
 const configuration = await loadConfiguration();
 const { account, environment } = configuration;
 
-// ---------------------------------------------------------------------------
-// D-060: instruments come from config, not from a frozen single-asset check.
-// ---------------------------------------------------------------------------
 const instrumentsFile = JSON.parse(await readFile(new URL("./config/instruments.json", import.meta.url), "utf8"));
 const accountRisk = instrumentsFile.accountRisk;
 const enabledInstruments = instrumentsFile.instruments.filter((entry) => entry.enabled === true);
@@ -62,8 +60,6 @@ const companionStore = createDevCompanionStore({
 await companionStore.init();
 const devCompanion = wrapCompanionWithChronicleControl(companionStore);
 
-// Shared across every instrument. Persistence is keyed by (strategyId, instrument)
-// per D-060 §4, so one store serves all books.
 const persistence = createSolanaPersistence(environment);
 await persistence.init();
 
@@ -72,10 +68,6 @@ const liveNotifications = createLiveTelegramNotifications({
   addEvent: database.addEvent
 });
 
-// ---------------------------------------------------------------------------
-// Account monitor is account-wide, not per instrument. It must accept every
-// enabled instrument as legitimate; anything else is still a foreign position.
-// ---------------------------------------------------------------------------
 const dxtradeClient = new DxtradeExecutionClient({
   restBaseUrl: environment.dxtrade.restBaseUrl,
   username: environment.dxtrade.username,
@@ -128,11 +120,6 @@ const accountMonitor = createDxtradeAccountMonitor({
   }
 });
 
-// ---------------------------------------------------------------------------
-// One stack per instrument. Each stack is the single-instrument production
-// pipeline, instantiated with its own geometry. A fault in one book cannot
-// reach another.
-// ---------------------------------------------------------------------------
 let maintenanceBusy = false;
 
 async function buildInstrumentStack(cfg) {
@@ -189,6 +176,7 @@ async function buildInstrumentStack(cfg) {
     persistedFeedStale: true,
     runtimeErrorLatched: false,
     reconciliationHaltLatched: false,
+    reconciliationWarning: null,
     haltNotifications: new Set()
   };
 
@@ -227,10 +215,6 @@ const stacks = [];
 for (const cfg of enabledInstruments) stacks.push(await buildInstrumentStack(cfg));
 const stackByInstrument = new Map(stacks.map((s) => [s.cfg.instrument, s]));
 
-// ---------------------------------------------------------------------------
-// Account-level risk supervisor. Owns the D-049 ladder across every book:
-// brake per instrument, 50% cut proportional to loss, account-wide flatten.
-// ---------------------------------------------------------------------------
 const riskSupervisor = createRiskSupervisor({
   config: accountRisk,
   instruments: stacks.map((s) => Object.freeze({
@@ -248,10 +232,6 @@ const riskSupervisor = createRiskSupervisor({
 
 for (const stack of stacks) stack.runtime.attachRiskSupervisor(riskSupervisor);
 
-// ---------------------------------------------------------------------------
-// Trade draining, per instrument. maintenanceBusy stays global because the
-// heartbeat must not run while any book is mid-trade.
-// ---------------------------------------------------------------------------
 async function persistD049SafetyHalt(stack, result) {
   const code = result.status;
   const reasonCode = ["D049_PARTIAL_CUT_UNCONFIRMED", "D049_FULL_FLATTEN_UNCONFIRMED", "D049_BASELINE_MISMATCH"].includes(code)
@@ -275,28 +255,59 @@ async function persistD049SafetyHalt(stack, result) {
   }
 }
 
-async function processLatestTrade(stack, trade) {
-  const result = await stack.runtime.processTrade(trade);
-  if (result.status === "RECONCILIATION_BLOCKED" && !stack.reconciliationHaltLatched) {
+async function applyReconciliationBlocked(stack, result) {
+  const decision = nextReconciliationWarning(stack.reconciliationWarning, { now: Date.now(), mismatched: true });
+  stack.reconciliationWarning = decision.state;
+  const recon = result.reconciliation;
+  const version = Number.isSafeInteger(result.stateVersion)
+    ? result.stateVersion
+    : (Number.isSafeInteger(result.state?.version) ? result.state.version : 0);
+  if (decision.action === "ALERT" && recon && Number.isFinite(recon.actual) && Number.isFinite(recon.expected)) {
+    liveNotifications.enqueue({
+      kind: "RECONCILIATION_MISMATCH",
+      eventKey: `RECON-WARN:${stack.cfg.orderPrefix}:${decision.alertNumber}:${version}`,
+      instrument: stack.cfg.instrument,
+      stage: "WARNING",
+      warningNumber: decision.alertNumber,
+      stateVersion: version,
+      expectedVirtualNetUnits: recon.expected,
+      brokerNetUnits: recon.actual
+    });
+    await database.addEvent("WARN", "RECONCILIATION_MISMATCH_WARNING", {
+      instrument: stack.cfg.instrument,
+      alertNumber: decision.alertNumber,
+      expectedVirtualNetUnits: recon.expected,
+      brokerNetUnits: recon.actual
+    });
+  }
+  if (decision.action === "HALT" && !stack.reconciliationHaltLatched) {
     stack.reconciliationHaltLatched = true;
-    await database.setSafetyHalt(`${stack.cfg.instrument} virtual-lot state does not reconcile to the DXtrade net position; owner review required`);
+    await database.setSafetyHalt(`${stack.cfg.instrument} virtual-lot state does not reconcile to the DXtrade net position after 15 minutes; owner review required`);
     await database.addEvent("ERROR", "RECONCILIATION_SAFETY_HALT", { instrument: stack.cfg.instrument, action: "SAFETY_HALT" });
-    const recon = result.reconciliation;
-    if (recon && Number.isFinite(recon.actual)) {
+    if (recon && Number.isFinite(recon.actual) && Number.isFinite(recon.expected)) {
       liveNotifications.enqueue({
         kind: "RECONCILIATION_MISMATCH",
-        eventKey: `RECON:${stack.cfg.orderPrefix}:${result.state.version}:${Number(recon.expected).toFixed(8)}:${Number(recon.actual).toFixed(8)}`,
+        eventKey: `RECON-HALT:${stack.cfg.orderPrefix}:${version}:${Number(recon.expected).toFixed(8)}:${Number(recon.actual).toFixed(8)}`,
         instrument: stack.cfg.instrument,
-        stateVersion: result.state.version,
+        stage: "HALT",
+        stateVersion: version,
         expectedVirtualNetUnits: recon.expected,
         brokerNetUnits: recon.actual
       });
     }
   }
+}
+
+async function processLatestTrade(stack, trade) {
+  const result = await stack.runtime.processTrade(trade);
+  if (result.status === "RECONCILIATION_BLOCKED") {
+    await applyReconciliationBlocked(stack, result);
+  } else {
+    stack.reconciliationWarning = null;
+  }
   if (["D049_PARTIAL_CUT_UNCONFIRMED", "D049_FULL_FLATTEN_UNCONFIRMED", "D049_BASELINE_MISMATCH"].includes(result.status)) {
     await persistD049SafetyHalt(stack, result);
   }
-  // The ladder is evaluated on combined equity after every processed trade.
   await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
 }
 
@@ -333,9 +344,6 @@ async function drainLatestTrades(stack) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// One Binance feed per instrument.
-// ---------------------------------------------------------------------------
 for (const stack of stacks) {
   stack.feed = createBinanceLiveFeed({
     symbol: stack.cfg.marketSymbol,
@@ -359,10 +367,6 @@ for (const stack of stacks) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Inactivity heartbeat is an ACCOUNT-level obligation, not a per-instrument one.
-// One round trip on the first enabled instrument satisfies it for the account.
-// ---------------------------------------------------------------------------
 const heartbeatStack = stacks[0];
 const heartbeat = createSolanaHeartbeat({
   persistence,
@@ -389,9 +393,6 @@ const heartbeat = createSolanaHeartbeat({
   notifications: liveNotifications
 });
 
-// ---------------------------------------------------------------------------
-// Canary runs on one instrument only, and only while execution is OFF.
-// ---------------------------------------------------------------------------
 const liveCanary = createSolanaLiveCanary({
   adapter: heartbeatStack.adapter,
   client: heartbeatStack.quantityClient,
@@ -401,9 +402,6 @@ const liveCanary = createSolanaLiveCanary({
   minimumHoldSeconds: account.minimumHoldSeconds
 });
 
-// ---------------------------------------------------------------------------
-// Telegram: one owner service per instrument, fanned out by the wrapper.
-// ---------------------------------------------------------------------------
 const service = createMultiInstrumentOwnerService({
   instrumentConfigs: enabledInstruments,
   riskSupervisor,
@@ -412,10 +410,6 @@ const service = createMultiInstrumentOwnerService({
     return createSolanaOwnerService({
       database,
       account,
-      // The legacy owner/tradeify services still call resolveInstrumentProfile(strategy),
-      // which reads strategy.instruments and requires exactly one enabled entry. Give
-      // each per-instrument service a strategy object of that shape so it resolves its
-      // own profile. strategyStatus and execution are read by those services too.
       strategy: {
         ...cfg,
         strategyId: stack.definition.strategyId,
@@ -436,6 +430,7 @@ const service = createMultiInstrumentOwnerService({
       accountMonitor,
       onBooksRematched: async () => {
         stack.reconciliationHaltLatched = false;
+        stack.reconciliationWarning = null;
       },
       getLiveMarketSnapshot: () => Object.freeze({
         price: stack.lastTrade?.price ?? null,
@@ -453,7 +448,6 @@ const telegramBot = await startTelegramBot({
   devCompanion
 });
 
-// Start live inputs only after the owner notification destination is ready.
 await accountMonitor.start();
 for (const stack of stacks) stack.feed.start();
 
