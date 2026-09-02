@@ -74,7 +74,6 @@ export function createSolanaQuantityAdapter({
       side: text("side", request.side, 8).toUpperCase(),
       quantity: positive("quantity", request.quantity)
     });
-    if (request.instrument !== "SOL/USD") throw new TypeError("SOL adapter requires SOL/USD");
     if (request.side !== "BUY" && request.side !== "SELL") throw new TypeError("side must be BUY or SELL");
 
     let row = await persistence.getOrder(request.orderCode);

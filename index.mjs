@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { loadConfiguration } from "./src/config.js";
 import { createDatabase } from "./src/database.js";
 import { createDevCompanionStore } from "./src/devCompanionStore.js";
@@ -8,10 +9,10 @@ import { DxtradeExecutionClient } from "./src/execution/dxtradeExecutionClient.j
 import { createPinnedDxtradeFetch } from "./src/execution/pinnedDxtradeFetch.js";
 import { SolanaQuantityClient } from "./src/execution/solanaQuantityClient.js";
 import { createSolanaQuantityAdapter } from "./src/execution/solanaQuantityAdapter.js";
-import { createSolanaExecutionGuard } from "./src/execution/solanaExecutionGuard.js";
+import { createRingExecutionGuard } from "./src/execution/ringExecutionGuard.js";
 import { createSolanaLiveCanary } from "./src/execution/solanaCanary.js";
 import { createDxtradeAccountMonitor } from "./src/account/dxtradeAccountMonitor.js";
-import { trustedSignedNet } from "./src/account/dxtradeSignedNet.js";
+import { trustedSignedNetFor } from "./src/account/dxtradeSignedNet.js";
 import { formatDxtradeAccountDiagnostic } from "./src/account/dxtradeDiagnostics.js";
 import { createSolanaPersistence } from "./src/state/solanaPersistence.js";
 import { createSolanaRuntime } from "./src/runtime/solanaRuntime.js";
@@ -19,21 +20,35 @@ import { clearLatchedBaselineMismatchHalt } from "./src/runtime/d049BaselineHalt
 import { createSolanaHeartbeat } from "./src/runtime/solanaHeartbeat.js";
 import { createLiveTelegramNotifications } from "./src/notifications/liveTelegramNotifications.js";
 import { accountDayKey } from "./src/risk/dailyRiskLadder.js";
-import { GRID_DEFINITION } from "./src/strategies/solanaGrid.js";
+import { createRiskSupervisor } from "./src/risk/riskSupervisor.js";
+import { buildGridDefinition } from "./src/strategies/ringGridDefinition.js";
+import { createRingGrid } from "./src/strategies/ringGrid.js";
 import { createSolanaOwnerService } from "./src/solanaOwnerService.js";
+import { createMultiInstrumentOwnerService } from "./src/multiInstrumentOwnerService.js";
 import { startTelegramBot } from "./src/telegramBot.js";
 
 const configuration = await loadConfiguration();
-const { account, strategy, environment, instrument } = configuration;
+const { account, environment } = configuration;
 
-if (instrument.asset !== "SOL" || instrument.dxtradeSymbol !== "SOL/USD" || instrument.binanceSymbol !== "SOLUSDT") {
-  throw new Error("The active production worker is frozen for SOL/USD with Binance SOLUSDT");
+// ---------------------------------------------------------------------------
+// D-060: instruments come from config, not from a frozen single-asset check.
+// ---------------------------------------------------------------------------
+const instrumentsFile = JSON.parse(await readFile(new URL("./config/instruments.json", import.meta.url), "utf8"));
+const accountRisk = instrumentsFile.accountRisk;
+const enabledInstruments = instrumentsFile.instruments.filter((entry) => entry.enabled === true);
+
+if (enabledInstruments.length === 0) throw new Error("config/instruments.json enables no instruments");
+for (const field of ["entryBrakeUsd", "entryBrakeScope", "partialCutUsd", "partialCutFraction", "fullFlattenUsd", "dailyLossLimitUsd"]) {
+  if (accountRisk?.[field] === undefined) throw new Error(`config/instruments.json accountRisk.${field} is missing`);
 }
-if (strategy.strategyId !== GRID_DEFINITION.strategyId) {
-  throw new Error(`strategy.strategyId must equal ${GRID_DEFINITION.strategyId}`);
-}
-if (typeof strategy.strategyStatus === "string" && strategy.strategyStatus.startsWith("pending-")) {
-  throw new Error("The SOL strategy may not start while strategyStatus is pending");
+const seenPrefixes = new Set();
+for (const cfg of enabledInstruments) {
+  if (seenPrefixes.has(cfg.orderPrefix)) throw new Error(`Duplicate orderPrefix "${cfg.orderPrefix}"`);
+  seenPrefixes.add(cfg.orderPrefix);
+  if (!Number.isFinite(cfg.sizing?.lotStep) || cfg.sizing.lotStep <= 0) {
+    throw new Error(`${cfg.instrument}: sizing.lotStep must be a positive number read from the DXtrade platform`);
+  }
+  buildGridDefinition(cfg);
 }
 
 const database = createDatabase(environment);
@@ -47,65 +62,33 @@ const companionStore = createDevCompanionStore({
 await companionStore.init();
 const devCompanion = wrapCompanionWithChronicleControl(companionStore);
 
-const solPersistence = createSolanaPersistence(environment);
-await solPersistence.init();
+// Shared across every instrument. Persistence is keyed by (strategyId, instrument)
+// per D-060 §4, so one store serves all books.
+const persistence = createSolanaPersistence(environment);
+await persistence.init();
 
 const liveNotifications = createLiveTelegramNotifications({
-  persistence: solPersistence,
+  persistence,
   addEvent: database.addEvent
 });
 
-const maProvider = createBinanceDailyMaProvider({ marketSymbol: instrument.binanceSymbol, days: 200 });
-await maProvider.refresh();
-
+// ---------------------------------------------------------------------------
+// Account monitor is account-wide, not per instrument. It must accept every
+// enabled instrument as legitimate; anything else is still a foreign position.
+// ---------------------------------------------------------------------------
 const dxtradeClient = new DxtradeExecutionClient({
   restBaseUrl: environment.dxtrade.restBaseUrl,
   username: environment.dxtrade.username,
   domain: environment.dxtrade.domain,
   password: environment.dxtrade.password,
   accountCode: environment.dxtrade.accountCode,
-  instrument: instrument.dxtradeSymbol,
+  instrument: enabledInstruments[0].instrument,
   fetchImpl: createPinnedDxtradeFetch()
-});
-
-const solanaQuantityClient = new SolanaQuantityClient({
-  restBaseUrl: environment.dxtrade.restBaseUrl,
-  username: environment.dxtrade.username,
-  domain: environment.dxtrade.domain,
-  password: environment.dxtrade.password,
-  accountCode: environment.dxtrade.accountCode,
-  instrument: instrument.dxtradeSymbol,
-  fetchImpl: createPinnedDxtradeFetch()
-});
-
-const solanaQuantityAdapter = createSolanaQuantityAdapter({
-  client: solanaQuantityClient,
-  persistence: solPersistence
-});
-
-const solanaExecution = createSolanaExecutionGuard({
-  autoExecute: environment.autoExecute,
-  strategyAutoExecute: strategy.execution.autoExecute,
-  adapter: solanaQuantityAdapter,
-  client: solanaQuantityClient,
-  persistence: solPersistence,
-  protectiveOrdersBypassSlippageCap: strategy.riskLadder.protectiveOrdersBypassSlippageCap,
-  addEvent: database.addEvent
-});
-
-const liveCanary = createSolanaLiveCanary({
-  adapter: solanaQuantityAdapter,
-  client: solanaQuantityClient,
-  persistence: solPersistence,
-  addEvent: database.addEvent,
-  automaticExecutionEnabled: solanaExecution.isEnabled,
-  minimumHoldSeconds: account.minimumHoldSeconds
 });
 
 function accountLockReasonCode(invariantError) {
   if (typeof invariantError !== "string") return null;
-  if (invariantError.startsWith("A non-SOL/USD position exists")) return "FOREIGN_POSITION";
-  if (invariantError === "More than one open position exists on the Tradeify account") return "MULTIPLE_POSITIONS";
+  if (invariantError.startsWith("A foreign position exists")) return "FOREIGN_POSITION";
   if (invariantError === "DXtrade open-position count does not match position metrics") return "POSITION_COUNT_MISMATCH";
   return null;
 }
@@ -115,7 +98,7 @@ let accountLockLatched = false;
 const accountMonitor = createDxtradeAccountMonitor({
   client: dxtradeClient,
   startingBalance: account.startingBalance,
-  instrument: instrument.dxtradeSymbol,
+  instruments: enabledInstruments.map((cfg) => cfg.instrument),
   getPersistedPeakClosedBalance: database.getPersistedPeakClosedBalance,
   onSnapshot: async (snapshot) => {
     accountErrorLogged = false;
@@ -128,7 +111,7 @@ const accountMonitor = createDxtradeAccountMonitor({
           const day = snapshot.fetchedAt.slice(0, 10).replaceAll("-", "");
           liveNotifications.enqueue({
             kind: "ACCOUNT_LOCKOUT",
-            eventKey: `SOL-ACCOUNT-LOCK:${day}:${reasonCode}`,
+            eventKey: `ACCOUNT-LOCK:${day}:${reasonCode}`,
             reasonCode
           });
         }
@@ -140,208 +123,315 @@ const accountMonitor = createDxtradeAccountMonitor({
   onError: (error) => {
     if (!accountErrorLogged) {
       accountErrorLogged = true;
-      console.error(`DXtrade account state is unavailable; new SOL actions remain blocked. ${formatDxtradeAccountDiagnostic(error)}`);
+      console.error(`DXtrade account state is unavailable; new actions remain blocked on every instrument. ${formatDxtradeAccountDiagnostic(error)}`);
     }
   }
 });
 
-let liveFeedState = Object.freeze({
-  running: false,
-  connected: false,
-  stale: true,
-  lastTradeAt: null,
-  lastTradeId: null,
-  reconnectAttempt: 0
-});
-let lastLiveTrade = null;
-let persistedFeedStale = true;
-let runtimeErrorLatched = false;
-let reconciliationHaltLatched = false;
-const d049HaltNotifications = new Set();
-
-const solanaRuntime = createSolanaRuntime({
-  stateStore: solPersistence.state,
-  riskLadderStore: solPersistence,
-  riskLadderConfig: strategy.riskLadder,
-  maProvider,
-  minimumHoldSeconds: account.minimumHoldSeconds,
-  execution: solanaExecution,
-  addEvent: database.addEvent,
-  notifications: liveNotifications,
-  getRiskSnapshot: async () => {
-    const [botState, accountStatus] = await Promise.all([
-      database.getState(),
-      Promise.resolve(accountMonitor.getSnapshot())
-    ]);
-    const snapshot = accountStatus.snapshot;
-    return Object.freeze({
-      startingBalance: account.startingBalance,
-      maxLossOffset: account.maxLossOffset,
-      peakClosedBalance: snapshot?.peakClosedBalance ?? botState.high_water,
-      payoutTaken: botState.payout_taken,
-      previousDayClosingBalance: snapshot?.previousDayClosingBalance ?? botState.prev_day_close,
-      dailyLossLimit: account.dailyLossLimit,
-      liveEquity: snapshot?.equity ?? botState.equity,
-      currentNotional: snapshot?.currentNotional ?? 0,
-      maxNotional: account.maxNotional,
-      operatorPaused: botState.operator_killed,
-      safetyHalt: botState.safety_halt,
-      accountLocked: snapshot?.accountLocked ?? true,
-      feedHealthy: liveFeedState.connected === true && liveFeedState.stale === false,
-      accountDataFresh: accountStatus.healthy === true,
-      nettingConfirmed: true,
-      brokerNetUnits: trustedSignedNet(accountStatus)
-    });
-  }
-});
-await solanaRuntime.init();
-
-let pendingTrade = null;
-let drainingTrades = false;
+// ---------------------------------------------------------------------------
+// One stack per instrument. Each stack is the single-instrument production
+// pipeline, instantiated with its own geometry. A fault in one book cannot
+// reach another.
+// ---------------------------------------------------------------------------
 let maintenanceBusy = false;
 
-async function persistD049SafetyHalt(result) {
+async function buildInstrumentStack(cfg) {
+  const definition = buildGridDefinition(cfg);
+
+  const maProvider = createBinanceDailyMaProvider({
+    marketSymbol: cfg.marketSymbol,
+    days: cfg.geometry.maDays
+  });
+  await maProvider.refresh();
+
+  const quantityClient = new SolanaQuantityClient({
+    restBaseUrl: environment.dxtrade.restBaseUrl,
+    username: environment.dxtrade.username,
+    domain: environment.dxtrade.domain,
+    password: environment.dxtrade.password,
+    accountCode: environment.dxtrade.accountCode,
+    instrument: cfg.instrument,
+    fetchImpl: createPinnedDxtradeFetch()
+  });
+
+  const adapter = createSolanaQuantityAdapter({
+    client: quantityClient,
+    persistence,
+    instrument: cfg.instrument
+  });
+
+  const execution = createRingExecutionGuard({
+    autoExecute: environment.autoExecute,
+    strategyAutoExecute: cfg.execution?.autoExecute ?? true,
+    instrument: cfg.instrument,
+    orderPrefix: cfg.orderPrefix,
+    strategyId: definition.strategyId,
+    adapter,
+    client: quantityClient,
+    persistence,
+    protectiveOrdersBypassSlippageCap: accountRisk.protectiveOrdersBypassSlippageCap ?? true,
+    addEvent: database.addEvent
+  });
+
+  const stack = {
+    cfg,
+    definition,
+    maProvider,
+    quantityClient,
+    adapter,
+    execution,
+    runtime: null,
+    feed: null,
+    pendingTrade: null,
+    draining: false,
+    lastTrade: null,
+    feedState: Object.freeze({ running: false, connected: false, stale: true }),
+    persistedFeedStale: true,
+    runtimeErrorLatched: false,
+    reconciliationHaltLatched: false,
+    haltNotifications: new Set()
+  };
+
+  const grid = createRingGrid(definition);
+  stack.runtime = createSolanaRuntime({
+    instrument: cfg.instrument,
+    strategyId: definition.strategyId,
+    gridDefinition: definition,
+    stateStore: persistence.createStateStore(grid),
+    riskLadderStore: persistence,
+    riskLadderConfig: accountRisk,
+    maProvider,
+    minimumHoldSeconds: account.minimumHoldSeconds,
+    execution,
+    addEvent: database.addEvent,
+    notifications: liveNotifications,
+    getRiskSnapshot: async () => {
+      const accountStatus = accountMonitor.getSnapshot();
+      const snapshot = accountStatus.snapshot;
+      const book = snapshot?.signedNetByInstrument?.[cfg.instrument] ?? null;
+      return Object.freeze({
+        accountDataFresh: accountStatus.healthy === true,
+        brokerNetUnits: trustedSignedNetFor(accountStatus, cfg.instrument),
+        instrumentUnrealisedUsd: book?.openPl,
+        instrumentDayPnlUsd: book ? Number(book.dayClosedPl) + Number(book.openPl) : null,
+        instrumentExposureUsd: book?.notional
+      });
+    }
+  });
+  await stack.runtime.init();
+
+  return stack;
+}
+
+const stacks = [];
+for (const cfg of enabledInstruments) stacks.push(await buildInstrumentStack(cfg));
+const stackByInstrument = new Map(stacks.map((s) => [s.cfg.instrument, s]));
+
+// ---------------------------------------------------------------------------
+// Account-level risk supervisor. Owns the D-049 ladder across every book:
+// brake per instrument, 50% cut proportional to loss, account-wide flatten.
+// ---------------------------------------------------------------------------
+const riskSupervisor = createRiskSupervisor({
+  config: accountRisk,
+  instruments: stacks.map((s) => Object.freeze({
+    instrument: s.cfg.instrument,
+    getUnrealisedUsd: () => s.runtime.getUnrealisedUsd(),
+    getDayPnlUsd: () => s.runtime.getDayPnlUsd(),
+    getExposureUsd: () => s.runtime.getExposureUsd(),
+    setEntryBrake: (on) => s.runtime.setEntryBrake(on),
+    executeProtectiveCut: (args) => s.runtime.executeProtectiveCut(args),
+    executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args)
+  })),
+  addEvent: database.addEvent,
+  notifications: liveNotifications
+});
+
+for (const stack of stacks) stack.runtime.attachRiskSupervisor(riskSupervisor);
+
+// ---------------------------------------------------------------------------
+// Trade draining, per instrument. maintenanceBusy stays global because the
+// heartbeat must not run while any book is mid-trade.
+// ---------------------------------------------------------------------------
+async function persistD049SafetyHalt(stack, result) {
   const code = result.status;
-  const reasonCode = code === "D049_PARTIAL_CUT_UNCONFIRMED"
-    ? "D049_PARTIAL_CUT_UNCONFIRMED"
-    : code === "D049_FULL_FLATTEN_UNCONFIRMED"
-      ? "D049_FULL_FLATTEN_UNCONFIRMED"
-      : code === "D049_BASELINE_MISMATCH"
-        ? "D049_BASELINE_MISMATCH"
-        : null;
+  const reasonCode = ["D049_PARTIAL_CUT_UNCONFIRMED", "D049_FULL_FLATTEN_UNCONFIRMED", "D049_BASELINE_MISMATCH"].includes(code)
+    ? code
+    : null;
   if (!reasonCode) return;
 
   const reason = reasonCode === "D049_PARTIAL_CUT_UNCONFIRMED"
-    ? "D-049 protective partial cut did not confirm; owner review required"
+    ? `D-049 protective partial cut did not confirm on ${stack.cfg.instrument}; owner review required`
     : reasonCode === "D049_FULL_FLATTEN_UNCONFIRMED"
-      ? "D-049 protective full flatten did not confirm flat; manual intervention required"
-      : "D-049 persisted daily baseline does not match fresh DXtrade account data; owner review required";
+      ? `D-049 protective full flatten did not confirm flat on ${stack.cfg.instrument}; manual intervention required`
+      : `D-049 persisted daily baseline does not match fresh DXtrade account data; owner review required`;
 
   await database.setSafetyHalt(reason);
-  await database.addEvent("ERROR", "SOL_D049_SAFETY_HALT", { reasonCode, status: code });
+  await database.addEvent("ERROR", "D049_SAFETY_HALT", { instrument: stack.cfg.instrument, reasonCode, status: code });
   const day = accountDayKey(Date.now()).replaceAll("-", "");
-  const eventKey = `SOL-D049-HALT:${day}:${reasonCode}`;
-  if (!d049HaltNotifications.has(eventKey)) {
-    d049HaltNotifications.add(eventKey);
-    liveNotifications.enqueue({ kind: "SAFETY_HALT", eventKey, reasonCode });
+  const eventKey = `D049-HALT:${stack.cfg.orderPrefix}:${day}:${reasonCode}`;
+  if (!stack.haltNotifications.has(eventKey)) {
+    stack.haltNotifications.add(eventKey);
+    liveNotifications.enqueue({ kind: "SAFETY_HALT", eventKey, reasonCode, instrument: stack.cfg.instrument });
   }
 }
 
-async function processLatestTrade(trade) {
-  const result = await solanaRuntime.processTrade(trade);
-  if (result.status === "RECONCILIATION_BLOCKED" && !reconciliationHaltLatched) {
-    reconciliationHaltLatched = true;
-    await database.setSafetyHalt("SOL virtual-lot state does not reconcile to the DXtrade net SOL position; owner review required");
-    await database.addEvent("ERROR", "SOL_RECONCILIATION_SAFETY_HALT", { action: "SAFETY_HALT" });
+async function processLatestTrade(stack, trade) {
+  const result = await stack.runtime.processTrade(trade);
+  if (result.status === "RECONCILIATION_BLOCKED" && !stack.reconciliationHaltLatched) {
+    stack.reconciliationHaltLatched = true;
+    await database.setSafetyHalt(`${stack.cfg.instrument} virtual-lot state does not reconcile to the DXtrade net position; owner review required`);
+    await database.addEvent("ERROR", "RECONCILIATION_SAFETY_HALT", { instrument: stack.cfg.instrument, action: "SAFETY_HALT" });
     const recon = result.reconciliation;
     if (recon && Number.isFinite(recon.actual)) {
       liveNotifications.enqueue({
         kind: "RECONCILIATION_MISMATCH",
-        eventKey: `SOL-RECON:${result.state.version}:${Number(recon.expected).toFixed(8)}:${Number(recon.actual).toFixed(8)}`,
+        eventKey: `RECON:${stack.cfg.orderPrefix}:${result.state.version}:${Number(recon.expected).toFixed(8)}:${Number(recon.actual).toFixed(8)}`,
+        instrument: stack.cfg.instrument,
         stateVersion: result.state.version,
         expectedVirtualNetUnits: recon.expected,
         brokerNetUnits: recon.actual
       });
     }
   }
-  if (new Set(["D049_PARTIAL_CUT_UNCONFIRMED", "D049_FULL_FLATTEN_UNCONFIRMED", "D049_BASELINE_MISMATCH"]).has(result.status)) {
-    await persistD049SafetyHalt(result);
+  if (["D049_PARTIAL_CUT_UNCONFIRMED", "D049_FULL_FLATTEN_UNCONFIRMED", "D049_BASELINE_MISMATCH"].includes(result.status)) {
+    await persistD049SafetyHalt(stack, result);
   }
+  // The ladder is evaluated on combined equity after every processed trade.
+  await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
 }
 
-async function drainLatestTrades() {
-  if (drainingTrades || maintenanceBusy) return;
-  drainingTrades = true;
+async function drainLatestTrades(stack) {
+  if (stack.draining || maintenanceBusy) return;
+  stack.draining = true;
   try {
-    while (pendingTrade && !maintenanceBusy) {
-      const trade = pendingTrade;
-      pendingTrade = null;
-      await processLatestTrade(trade);
+    while (stack.pendingTrade && !maintenanceBusy) {
+      const trade = stack.pendingTrade;
+      stack.pendingTrade = null;
+      await processLatestTrade(stack, trade);
     }
   } catch {
-    if (!runtimeErrorLatched) {
-      runtimeErrorLatched = true;
-      console.error("SOL production runtime error; new strategy actions are being halted.");
+    if (!stack.runtimeErrorLatched) {
+      stack.runtimeErrorLatched = true;
+      console.error(`${stack.cfg.instrument} runtime error; new strategy actions are being halted for that instrument.`);
       try {
-        await database.setSafetyHalt("SOL production runtime error; owner review required");
-        await database.addEvent("ERROR", "SOL_RUNTIME_ERROR", { action: "SAFETY_HALT" });
+        await database.setSafetyHalt(`${stack.cfg.instrument} production runtime error; owner review required`);
+        await database.addEvent("ERROR", "RUNTIME_ERROR", { instrument: stack.cfg.instrument, action: "SAFETY_HALT" });
         const hour = new Date().toISOString().slice(0, 13).replaceAll("-", "").replace("T", "-");
         liveNotifications.enqueue({
           kind: "SAFETY_HALT",
-          eventKey: `SOL-RUNTIME-HALT:${hour}`,
-          reasonCode: "SOL_RUNTIME_ERROR"
+          eventKey: `RUNTIME-HALT:${stack.cfg.orderPrefix}:${hour}`,
+          reasonCode: "RUNTIME_ERROR",
+          instrument: stack.cfg.instrument
         });
       } catch {
-        console.error("Could not persist the SOL runtime safety halt.");
+        console.error(`Could not persist the ${stack.cfg.instrument} runtime safety halt.`);
       }
     }
   } finally {
-    drainingTrades = false;
-    if (pendingTrade && !runtimeErrorLatched && !maintenanceBusy) void drainLatestTrades();
+    stack.draining = false;
+    if (stack.pendingTrade && !stack.runtimeErrorLatched && !maintenanceBusy) void drainLatestTrades(stack);
   }
 }
 
+// ---------------------------------------------------------------------------
+// One Binance feed per instrument.
+// ---------------------------------------------------------------------------
+for (const stack of stacks) {
+  stack.feed = createBinanceLiveFeed({
+    symbol: stack.cfg.marketSymbol,
+    onPrice: (trade) => {
+      stack.lastTrade = trade;
+      stack.pendingTrade = trade;
+      if (!stack.draining && !maintenanceBusy && !stack.runtimeErrorLatched) void drainLatestTrades(stack);
+    },
+    onState: (state) => {
+      stack.feedState = state;
+      const stale = state.connected !== true || state.stale === true;
+      if (stale !== stack.persistedFeedStale) {
+        stack.persistedFeedStale = stale;
+        void database.setFeedStale(stale, stack.cfg.instrument)
+          .catch(() => console.error(`Could not persist ${stack.cfg.marketSymbol} feed-health state.`));
+      }
+    },
+    onError: () => {
+      console.error(`Binance ${stack.cfg.marketSymbol} live-feed message was rejected; feed freshness controls remain active.`);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Inactivity heartbeat is an ACCOUNT-level obligation, not a per-instrument one.
+// One round trip on the first enabled instrument satisfies it for the account.
+// ---------------------------------------------------------------------------
+const heartbeatStack = stacks[0];
 const heartbeat = createSolanaHeartbeat({
-  persistence: solPersistence,
-  adapter: solanaQuantityAdapter,
-  isExecutionEnabled: solanaExecution.isEnabled,
+  persistence,
+  adapter: heartbeatStack.adapter,
+  instrument: heartbeatStack.cfg.instrument,
+  isExecutionEnabled: heartbeatStack.execution.isEnabled,
   isRiskLadderHalted: async () => {
-    const ladder = solanaRuntime.getRiskLadderState();
-    return ladder?.haltedForDay === true && ladder.dayKey === accountDayKey(Date.now());
+    const ladder = riskSupervisor.getSnapshot();
+    return ladder?.flattenedToday === true && ladder.dayKey === accountDayKey(Date.now());
   },
-  triggerDays: strategy.solOuterHeavy.heartbeatDays,
+  triggerDays: accountRisk.heartbeatDays ?? 25,
   acquireMaintenance: async () => {
-    if (maintenanceBusy || drainingTrades) return false;
+    if (maintenanceBusy || stacks.some((s) => s.draining)) return false;
     maintenanceBusy = true;
     return true;
   },
   releaseMaintenance: async () => {
     maintenanceBusy = false;
-    if (pendingTrade && !runtimeErrorLatched) void drainLatestTrades();
+    for (const stack of stacks) {
+      if (stack.pendingTrade && !stack.runtimeErrorLatched) void drainLatestTrades(stack);
+    }
   },
   addEvent: database.addEvent,
   notifications: liveNotifications
 });
 
-const binanceFeed = createBinanceLiveFeed({
-  symbol: instrument.binanceSymbol,
-  onPrice: (trade) => {
-    lastLiveTrade = trade;
-    pendingTrade = trade;
-    if (!drainingTrades && !maintenanceBusy && !runtimeErrorLatched) void drainLatestTrades();
-  },
-  onState: (state) => {
-    liveFeedState = state;
-    const stale = state.connected !== true || state.stale === true;
-    if (stale !== persistedFeedStale) {
-      persistedFeedStale = stale;
-      void database.setFeedStale(stale).catch(() => console.error("Could not persist Binance feed-health state."));
-    }
-  },
-  onError: () => {
-    console.error(`Binance ${instrument.binanceSymbol} live-feed message was rejected; feed freshness controls remain active.`);
-  }
+// ---------------------------------------------------------------------------
+// Canary runs on one instrument only, and only while execution is OFF.
+// ---------------------------------------------------------------------------
+const liveCanary = createSolanaLiveCanary({
+  adapter: heartbeatStack.adapter,
+  client: heartbeatStack.quantityClient,
+  persistence,
+  addEvent: database.addEvent,
+  automaticExecutionEnabled: heartbeatStack.execution.isEnabled,
+  minimumHoldSeconds: account.minimumHoldSeconds
 });
 
-const service = createSolanaOwnerService({
-  database,
-  account,
-  strategy,
-  environment,
-  dxtradeClient,
-  persistence: solPersistence,
-  maProvider,
-  execution: solanaExecution,
-  canary: liveCanary,
-  accountMonitor,
-  onBooksRematched: async () => {
-    reconciliationHaltLatched = false;
-  },
-  getLiveMarketSnapshot: () => Object.freeze({
-    price: lastLiveTrade?.price ?? null,
-    tradeTime: lastLiveTrade?.tradeTime ?? null,
-    stale: liveFeedState.connected !== true || liveFeedState.stale === true
-  })
+// ---------------------------------------------------------------------------
+// Telegram: one owner service per instrument, fanned out by the wrapper.
+// ---------------------------------------------------------------------------
+const service = createMultiInstrumentOwnerService({
+  instrumentConfigs: enabledInstruments,
+  riskSupervisor,
+  buildOwnerService: (cfg) => {
+    const stack = stackByInstrument.get(cfg.instrument);
+    return createSolanaOwnerService({
+      database,
+      account,
+      strategy: { ...cfg, strategyId: stack.definition.strategyId, riskLadder: accountRisk },
+      environment,
+      instrument: cfg.instrument,
+      gridDefinition: stack.definition,
+      dxtradeClient,
+      persistence,
+      maProvider: stack.maProvider,
+      execution: stack.execution,
+      canary: cfg.instrument === heartbeatStack.cfg.instrument ? liveCanary : null,
+      accountMonitor,
+      onBooksRematched: async () => {
+        stack.reconciliationHaltLatched = false;
+      },
+      getLiveMarketSnapshot: () => Object.freeze({
+        price: stack.lastTrade?.price ?? null,
+        tradeTime: stack.lastTrade?.tradeTime ?? null,
+        stale: stack.feedState.connected !== true || stack.feedState.stale === true
+      })
+    });
+  }
 });
 
 const telegramBot = await startTelegramBot({
@@ -353,39 +443,42 @@ const telegramBot = await startTelegramBot({
 
 // Start live inputs only after the owner notification destination is ready.
 await accountMonitor.start();
-binanceFeed.start();
+for (const stack of stacks) stack.feed.start();
 
 const HEARTBEAT_CHECK_MS = 60 * 60 * 1000;
 const heartbeatTimer = setInterval(() => {
   void heartbeat.checkOnce().catch(async () => {
-    console.error("SOL inactivity heartbeat check failed; owner review may be required before the inactivity deadline.");
+    console.error("Inactivity heartbeat check failed; owner review may be required before the inactivity deadline.");
     try {
-      await database.addEvent("ERROR", "SOL_HEARTBEAT_CHECK_FAILED", { action: "REVIEW" });
+      await database.addEvent("ERROR", "HEARTBEAT_CHECK_FAILED", { action: "REVIEW" });
     } catch {
       console.error("Could not persist heartbeat failure event.");
     }
   });
 }, HEARTBEAT_CHECK_MS);
 heartbeatTimer.unref?.();
-void heartbeat.checkOnce().catch(() => console.error("Initial SOL heartbeat check failed."));
+void heartbeat.checkOnce().catch(() => console.error("Initial heartbeat check failed."));
 
-const executionLive = solanaExecution.isEnabled();
-console.log(executionLive
-  ? "Production SOL outer-heavy runtime started with automatic execution LIVE."
-  : "Production SOL outer-heavy runtime started ARMED with automatic execution still blocked by the Railway control.");
-console.log("Market source: Binance SOLUSDT. Account source: DXtrade SOL/USD.");
-console.log("D-049 geometry: 10 rings per side from ±13.5% through ±54%, $6,600 gross virtual-exposure ceiling.");
-console.log("D-049 daily risk ladder: entry brake -$300, 50% cut -$1,000, full flatten -$1,250.");
-console.log("Live-touch semantics: exits before entries.");
+const executionLive = stacks.every((s) => s.execution.isEnabled());
+const anyExecutionLive = stacks.some((s) => s.execution.isEnabled());
+console.log(anyExecutionLive
+  ? "Production multi-instrument runtime started with automatic execution LIVE."
+  : "Production multi-instrument runtime started ARMED with automatic execution still blocked by the Railway control.");
+console.log(`Instruments enabled: ${stacks.length}`);
+for (const stack of stacks) {
+  const d = stack.definition;
+  console.log(`  ${stack.cfg.instrument.padEnd(9)} ${d.levels} rings/side, ±${(d.innermostDistance * 100).toFixed(1)}% .. ±${(d.outermostDistance * 100).toFixed(1)}% of ${stack.cfg.geometry.maDays}d MA, $${stack.cfg.sizing.capUsd.toLocaleString()} cap, feed ${stack.cfg.marketSymbol}`);
+}
+console.log(`Account risk ladder: entry brake -$${accountRisk.entryBrakeUsd} per instrument, ${Math.round(accountRisk.partialCutFraction * 100)}% cut -$${accountRisk.partialCutUsd} account-wide (proportional to loss), full flatten -$${accountRisk.fullFlattenUsd} account-wide until rollover.`);
+console.log(`Daily loss limit: -$${accountRisk.dailyLossLimitUsd}. Rollover ${accountRisk.rolloverHourUtc ?? 22}:00 UTC.`);
+console.log("Live-touch semantics: exits before entries. One-sided per instrument (D-059).");
 console.log("Owner Telegram broker-confirmed trade and safety notifications: armed.");
 console.log("Owner Telegram OpenAI development mode: queue bridge armed; companion processing runs in the separate Railway worker.");
-if (executionLive) {
-  console.log("Owner-triggered lifecycle canary is disabled while automatic grid execution is ON.");
-} else {
-  console.log("Owner-triggered 0.01 SOL lifecycle canary remains available while automatic execution is OFF.");
-}
-console.log(`${strategy.solOuterHeavy.heartbeatDays}-day inactivity heartbeat: armed for 0.01 SOL round trips after live activation.`);
-console.log(`Automatic execution: ${executionLive ? "ON" : "OFF"} (Railway=${environment.autoExecute ? "ON" : "OFF"}, strategy=${strategy.execution.autoExecute ? "ON" : "OFF"}, mode=${environment.appMode}).`);
+console.log(anyExecutionLive
+  ? "Owner-triggered lifecycle canary is disabled while automatic execution is ON."
+  : `Owner-triggered 0.01-lot lifecycle canary remains available on ${heartbeatStack.cfg.instrument} while automatic execution is OFF.`);
+console.log(`${accountRisk.heartbeatDays ?? 25}-day inactivity heartbeat: armed on ${heartbeatStack.cfg.instrument}.`);
+console.log(`Automatic execution: ${executionLive ? "ON" : anyExecutionLive ? "PARTIAL" : "OFF"} (Railway=${environment.autoExecute ? "ON" : "OFF"}, mode=${environment.appMode}).`);
 
 let shuttingDown = false;
 async function shutdown(signal) {
@@ -394,15 +487,21 @@ async function shutdown(signal) {
   console.log(`Received ${signal}; shutting down cleanly.`);
   clearInterval(heartbeatTimer);
   telegramBot.stopDevCompanionDelivery?.();
-  binanceFeed.stop();
+  for (const stack of stacks) stack.feed.stop();
   accountMonitor.stop();
   try {
     await telegramBot.stopPolling();
   } finally {
     try { await liveNotifications.drain(); } catch { console.error("Telegram notification queue did not drain cleanly."); }
     try { await dxtradeClient.logout(); } catch { console.error("DXtrade account-monitor logout did not complete cleanly."); }
-    try { await solanaQuantityClient.logout(); } catch { console.error("DXtrade SOL execution logout did not complete cleanly."); }
-    await Promise.allSettled([database.close(), solPersistence.close(), devCompanion.close()]);
+    for (const stack of stacks) {
+      try {
+        await stack.quantityClient.logout();
+      } catch {
+        console.error(`DXtrade ${stack.cfg.instrument} execution logout did not complete cleanly.`);
+      }
+    }
+    await Promise.allSettled([database.close(), persistence.close(), devCompanion.close()]);
   }
   process.exit(0);
 }

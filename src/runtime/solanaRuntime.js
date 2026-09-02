@@ -26,6 +26,8 @@ import {
   observeRearm,
   resetAfterProtectiveFlatten
 } from "../strategies/solanaGrid.js";
+import { createRingGrid } from "../strategies/ringGrid.js";
+import { createRingGridInstance } from "./ringGridInstance.js";
 
 function positive(name, value) {
   const n = typeof value === "number" ? value : Number(value);
@@ -74,7 +76,140 @@ function ladderStateChanged(left, right) {
     Math.abs(left.worstDrawdownUsd - right.worstDrawdownUsd) >= 1;
 }
 
+function createD060Runtime({
+  instrument,
+  strategyId,
+  gridDefinition,
+  stateStore,
+  maProvider,
+  getRiskSnapshot,
+  execution,
+  minimumHoldSeconds = 25,
+  addEvent = async () => {}
+}) {
+  if (!gridDefinition || typeof gridDefinition !== "object") throw new TypeError("gridDefinition is required");
+  if (typeof instrument !== "string" || instrument !== gridDefinition.instrument) throw new TypeError("instrument must match gridDefinition");
+  if (typeof strategyId !== "string" || strategyId !== gridDefinition.strategyId) throw new TypeError("strategyId must match gridDefinition");
+  if (typeof getRiskSnapshot !== "function") throw new TypeError("getRiskSnapshot is required");
+
+  const grid = createRingGrid(gridDefinition);
+  const instance = createRingGridInstance({
+    grid,
+    stateStore,
+    maProvider,
+    execution,
+    minimumHoldSeconds,
+    addEvent
+  });
+  let riskSupervisor = null;
+  let latestRisk = null;
+
+  function requireLatestRisk(field) {
+    const value = latestRisk?.[field];
+    if (!Number.isFinite(value)) throw new Error(`${instrument} account or market data is unavailable`);
+    if (!Number.isFinite(latestRisk?.price) || latestRisk.price <= 0) {
+      throw new Error(`${instrument} current price is unavailable`);
+    }
+    return value;
+  }
+
+  async function captureRisk(trade) {
+    const snapshot = await getRiskSnapshot({ state: instance.getState(), trade });
+    if (!snapshot || typeof snapshot !== "object") throw new Error(`${instrument} risk snapshot is invalid`);
+    if (snapshot.accountDataFresh !== true) {
+      latestRisk = null;
+      return Object.freeze({ ok: false, status: "ACCOUNT_DATA_UNAVAILABLE" });
+    }
+    const brokerNetUnits = Number(snapshot.brokerNetUnits);
+    if (!Number.isFinite(brokerNetUnits)) {
+      latestRisk = null;
+      return Object.freeze({ ok: false, status: "ACCOUNT_DATA_UNAVAILABLE" });
+    }
+    const state = instance.getState();
+    if (!state) throw new Error(`${instrument} runtime has not been initialized`);
+    const expected = grid.expectedNetUnits(state);
+    if (Math.abs(expected - brokerNetUnits) > 0.0050001) {
+      latestRisk = null;
+      return Object.freeze({ ok: false, status: "RECONCILIATION_BLOCKED", reconciliation: Object.freeze({ expected, actual: brokerNetUnits }) });
+    }
+    const unrealisedUsd = Number(snapshot.instrumentUnrealisedUsd);
+    const dayPnlUsd = Number(snapshot.instrumentDayPnlUsd);
+    const exposureUsd = Number(snapshot.instrumentExposureUsd);
+    const price = Number(trade?.price);
+    if (![unrealisedUsd, dayPnlUsd, exposureUsd, price].every(Number.isFinite) || price <= 0) {
+      latestRisk = null;
+      return Object.freeze({ ok: false, status: "ACCOUNT_DATA_UNAVAILABLE" });
+    }
+    latestRisk = Object.freeze({ unrealisedUsd, dayPnlUsd, exposureUsd, price });
+    return Object.freeze({ ok: true });
+  }
+
+  async function init() {
+    return instance.init();
+  }
+
+  async function processTrade(trade) {
+    const price = Number(trade?.price);
+    if (!Number.isFinite(price) || price <= 0 || grid.definition.lotStep * price > grid.definition.innermostRingUsd) {
+      throw new Error(`${instrument}: minimum lot does not fit the innermost ring at the current price`);
+    }
+    const safety = await captureRisk(trade);
+    if (!safety.ok) return Object.freeze({ status: safety.status, reconciliation: safety.reconciliation ?? null });
+    return instance.process(trade);
+  }
+
+  function getUnrealisedUsd() {
+    return requireLatestRisk("unrealisedUsd");
+  }
+
+  function getDayPnlUsd() {
+    return requireLatestRisk("dayPnlUsd");
+  }
+
+  function getExposureUsd() {
+    return Math.abs(requireLatestRisk("exposureUsd"));
+  }
+
+  function setEntryBrake(on) {
+    void instance.setEntryBrake(on);
+  }
+
+  function attachRiskSupervisor(supervisor) {
+    if (!supervisor || typeof supervisor.getSnapshot !== "function") throw new TypeError("risk supervisor is invalid");
+    riskSupervisor = supervisor;
+  }
+
+  async function executeProtectiveCut({ fraction, reason, dayKey }) {
+    return instance.cut({ fraction, reason, dayKey });
+  }
+
+  async function executeProtectiveFlatten({ reason, dayKey }) {
+    return instance.flatten({ reason, dayKey });
+  }
+
+  function getRiskLadderState() {
+    return riskSupervisor?.getSnapshot?.() ?? null;
+  }
+
+  return Object.freeze({
+    init,
+    processTrade,
+    getRiskLadderState,
+    getUnrealisedUsd,
+    getDayPnlUsd,
+    getExposureUsd,
+    setEntryBrake,
+    attachRiskSupervisor,
+    executeProtectiveCut,
+    executeProtectiveFlatten,
+    definition: grid.definition
+  });
+}
+
 export function createSolanaRuntime({
+  instrument = null,
+  strategyId = null,
+  gridDefinition = null,
   stateStore,
   riskLadderStore,
   riskLadderConfig,
@@ -85,6 +220,19 @@ export function createSolanaRuntime({
   addEvent = async () => {},
   notifications = null
 }) {
+  if (gridDefinition !== null) {
+    return createD060Runtime({
+      instrument,
+      strategyId,
+      gridDefinition,
+      stateStore,
+      maProvider,
+      getRiskSnapshot,
+      execution,
+      minimumHoldSeconds,
+      addEvent
+    });
+  }
   for (const method of ["init", "load", "initializeIfMissing", "save"]) {
     if (typeof stateStore?.[method] !== "function") throw new TypeError(`stateStore.${method} is required`);
   }

@@ -9,7 +9,36 @@ const PROFILES = Object.freeze({
     asset: "SOL",
     dxtradeSymbol: "SOL/USD",
     binanceSymbol: "SOLUSDT",
-    binanceStream: "solusdt@trade"
+    binanceStream: "solusdt@trade",
+    lotStep: 0.01
+  }),
+  "DOGE/USD": Object.freeze({
+    asset: "DOGE",
+    dxtradeSymbol: "DOGE/USD",
+    binanceSymbol: "DOGEUSDT",
+    binanceStream: "dogeusdt@trade",
+    lotStep: 0.01
+  }),
+  "ZEC/USD": Object.freeze({
+    asset: "ZEC",
+    dxtradeSymbol: "ZEC/USD",
+    binanceSymbol: "ZECUSDT",
+    binanceStream: "zecusdt@trade",
+    lotStep: 0.01
+  }),
+  "AAVE/USD": Object.freeze({
+    asset: "AAVE",
+    dxtradeSymbol: "AAVE/USD",
+    binanceSymbol: "AAVEUSDT",
+    binanceStream: "aaveusdt@trade",
+    lotStep: 0.01
+  }),
+  "AVAX/USD": Object.freeze({
+    asset: "AVAX",
+    dxtradeSymbol: "AVAX/USD",
+    binanceSymbol: "AVAXUSDT",
+    binanceStream: "avaxusdt@trade",
+    lotStep: 0.01
   })
 });
 

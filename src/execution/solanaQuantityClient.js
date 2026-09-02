@@ -115,7 +115,6 @@ export class SolanaQuantityClient {
     this.#password = text("DXtrade password", password);
     this.#accountCode = text("DXtrade account code", accountCode, 128);
     this.#instrument = text("instrument", instrument, 64);
-    if (this.#instrument !== "SOL/USD") throw new TypeError("SolanaQuantityClient requires SOL/USD");
     if (typeof fetchImpl !== "function") throw new TypeError("fetch implementation is required");
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60_000) throw new TypeError("timeoutMs is invalid");
     this.#fetch = fetchImpl;

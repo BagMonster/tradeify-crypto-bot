@@ -128,3 +128,11 @@ EXIT intents close live same-side SOL/USD broker tickets by `positionCode`; prot
 This decision documents the material one-sided strategy rule shipped in PR #61 and requires owner approval before deployment. The heartbeat close bug, live partial-close canary, virtual-lot-to-position binding, and multi-asset expansion remain out of scope.
 
 Full decision: `docs/decisions/D-059-one-sided-grid-and-position-linked-exits.md`.
+
+## D-060 — Multi-asset grid and account-level risk supervisor
+
+**Status:** DRAFT — awaiting owner approval.
+
+Ring geometry, sizing caps, verified 0.01 lot steps, and order-code prefixes move into `config/instruments.json` for SOL/USD, DOGE/USD, ZEC/USD, AAVE/USD, and AVAX/USD. The owner has authorized all five as enabled while both execution locks remain unchanged. The account-level supervisor brakes entries per instrument at −$300, allocates the −$1,000 partial cut only across losing instruments, and flattens all instruments at −$1,250 until the 22:00 UTC rollover. The historical SOL $6,600 compatibility shape now uses derived sizing; byte-identical historical sizing is explicitly waived.
+
+Full decision: `docs/decisions/D-060-multi-asset-grid.md`.

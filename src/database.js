@@ -184,6 +184,13 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS instrument_feed_health (
+        instrument TEXT PRIMARY KEY,
+        feed_stale BOOLEAN NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS daily_ledger (
@@ -326,8 +333,22 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     return normalizeState(result.rows[0]);
   }
 
-  async function setFeedStale(stale) {
+  async function setFeedStale(stale, instrument = null) {
     if (typeof stale !== "boolean") throw new Error("feed stale state must be boolean");
+    if (instrument !== null) {
+      const symbol = requiredText("feed instrument", instrument, 32);
+      const result = await pool.query(
+        `INSERT INTO instrument_feed_health (instrument, feed_stale, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (instrument) DO UPDATE SET
+             feed_stale = EXCLUDED.feed_stale,
+             updated_at = NOW()
+           RETURNING feed_stale`,
+        [symbol, stale]
+      );
+      if (result.rowCount !== 1) throw new Error("instrument feed-health row was not saved");
+      return result.rows[0].feed_stale === true;
+    }
     const result = await pool.query(
       `UPDATE bot_state SET feed_stale = $1, updated_at = NOW() WHERE id = 1 RETURNING feed_stale`,
       [stale]

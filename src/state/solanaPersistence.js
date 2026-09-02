@@ -1,5 +1,6 @@
 import pg from "pg";
 import { createPostgresSolanaGridStateStore } from "./solanaGridState.js";
+import { createPostgresRingGridStateStore } from "./ringGridState.js";
 
 const { Pool } = pg;
 
@@ -154,6 +155,10 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
   });
   const query = (sql, params = []) => pool.query(sql, params);
   const state = createPostgresSolanaGridStateStore({ query });
+
+  function createStateStore(grid) {
+    return createPostgresRingGridStateStore({ query, grid });
+  }
 
   async function init() {
     await state.init();
@@ -393,6 +398,7 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
   return Object.freeze({
     init,
     state,
+    createStateStore,
     getOrder,
     claimOrder,
     markSubmitted,
