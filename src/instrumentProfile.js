@@ -26,6 +26,13 @@ const PROFILES = Object.freeze({
     binanceStream: "zecusdt@trade",
     lotStep: 0.01
   }),
+  "INJ/USD": Object.freeze({
+    asset: "INJ",
+    dxtradeSymbol: "INJ/USD",
+    binanceSymbol: "INJUSDT",
+    binanceStream: "injusdt@trade",
+    lotStep: 0.01
+  }),
   "AAVE/USD": Object.freeze({
     asset: "AAVE",
     dxtradeSymbol: "AAVE/USD",

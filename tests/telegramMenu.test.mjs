@@ -15,21 +15,22 @@ const TABLE = SOURCE.slice(SOURCE.indexOf("const MENU_ACTIONS = {"), SOURCE.inde
 test("home panel lists every live book and account reads", () => {
   const rows = buildHomeKeyboard();
   const labels = rows.flat().map((b) => b.text);
-  for (const book of ["SOL", "DOGE", "ZEC", "AAVE", "AVAX"]) {
+  for (const book of ["SOL", "DOGE", "INJ", "AAVE", "AVAX"]) {
     assert.ok(labels.includes(book), `${book} missing from home panel`);
   }
+  assert.ok(!labels.includes("ZEC"));
   assert.ok(labels.includes("All Status"));
   assert.ok(labels.includes("Pause Bot"));
   assert.equal(rows.find((row) => row[0]?.callback_data === "resume"), undefined, "home must not resume without a book");
 });
 
 test("book panel scopes resume/reconcile/rematch to that coin", () => {
-  const rows = buildBookKeyboard("AAVE");
+  const rows = buildBookKeyboard("INJ");
   const data = rows.flat().map((b) => b.callback_data);
-  assert.ok(data.includes("status:AAVE"));
-  assert.ok(data.includes("resume:AAVE"));
-  assert.ok(data.includes("reconcile:AAVE"));
-  assert.ok(data.includes("rematch:AAVE"));
+  assert.ok(data.includes("status:INJ"));
+  assert.ok(data.includes("resume:INJ"));
+  assert.ok(data.includes("reconcile:INJ"));
+  assert.ok(data.includes("rematch:INJ"));
   assert.ok(data.includes("menu"));
   assert.ok(!data.some((id) => id.startsWith("confirm")));
 });
@@ -60,7 +61,7 @@ test("button callbacks are owner-authorized before any action runs", () => {
 });
 
 test("header rows are inert and every keyboard row is well formed", () => {
-  const boards = [buildMenuKeyboard(), buildBookKeyboard("SOL"), buildBookKeyboard("DOGE")];
+  const boards = [buildMenuKeyboard(), buildBookKeyboard("SOL"), buildBookKeyboard("INJ")];
   for (const rows of boards) {
     const headers = rows.filter((r) => r.length === 1 && r[0].callback_data === "noop");
     assert.ok(headers.length >= 1, "expected a section header");
@@ -78,9 +79,9 @@ test("header rows are inert and every keyboard row is well formed", () => {
 
 test("instrument callback maps to the live book name", () => {
   assert.equal(instrumentArg("SOL"), "SOL/USD");
-  assert.equal(instrumentArg("AAVE"), "AAVE/USD");
-  assert.equal(parseMenuCallback("resume:ZEC").action, "resume");
-  assert.equal(parseMenuCallback("resume:ZEC").symbol, "ZEC");
+  assert.equal(instrumentArg("INJ"), "INJ/USD");
+  assert.equal(parseMenuCallback("resume:INJ").action, "resume");
+  assert.equal(parseMenuCallback("resume:INJ").symbol, "INJ");
   assert.equal(parseMenuCallback("book:AVAX").view, "book");
 });
 

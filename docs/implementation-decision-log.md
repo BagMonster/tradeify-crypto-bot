@@ -2,7 +2,15 @@
 
 This log records approved and proposed changes to the production bot.
 
-> **Current production (2026-09-01):** Five ring grids from `config/instruments.json` under **D-060**, one-sided per instrument with position-linked exits under **D-059**. Live continuity: `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`. D-049 remains the historical SOL resize that D-060 replaced.
+> **Current production (2026-09-01):** Five ring grids from `config/instruments.json` under **D-060**, one-sided per instrument with position-linked exits under **D-059**. Live continuity: `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`. D-049 remains the historical SOL resize that D-060 replaced. **D-062 (DRAFT)** would replace enabled ZEC/USD with INJ/USD; it is not live until the owner merges and deploys.
+
+## D-062 — Swap ZEC/USD for INJ/USD
+
+**Status:** DRAFT — awaiting owner approval. Not on live Railway until merged and the trading worker is deployed.
+
+ZEC sits outside its ±12–33% band 23.6% of measured days and was +87.75% versus its 200-day MA with no open lots. No MA length brings the live print inside the outer short. INJ uses its own fit: 5.0% bands, dead zone 3, 12 levels, ±20% to ±75%, derived base $12.23, cap $6,300. Enabled set becomes SOL, DOGE, INJ, AAVE, AVAX. ZEC profile stays registered.
+
+Full decision: `docs/decisions/D-062-swap-zec-for-inj.md`.
 
 ## D-060 — Multi-asset grid and account-level risk supervisor
 
