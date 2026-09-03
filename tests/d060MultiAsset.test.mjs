@@ -6,13 +6,37 @@ import { createRingGrid } from "../src/strategies/ringGrid.js";
 import { buildGridDefinition } from "../src/strategies/ringGridDefinition.js";
 import { createSolanaRuntime } from "../src/runtime/solanaRuntime.js";
 import { signedNetByInstrument, trustedSignedNetFor } from "../src/account/dxtradeSignedNet.js";
+import { getSupportedInstrumentProfile, resolveInstrumentProfile } from "../src/instrumentProfile.js";
 
 const raw = JSON.parse(await readFile(new URL("../config/instruments.json", import.meta.url), "utf8"));
 
 test("D-060 config enables the five owner-authorized instruments", () => {
   const config = loadInstrumentConfigObject(raw);
-  assert.deepEqual(config.enabled.map((entry) => entry.instrument), ["SOL/USD", "DOGE/USD", "ZEC/USD", "AAVE/USD", "AVAX/USD"]);
+  assert.deepEqual(config.enabled.map((entry) => entry.instrument), ["SOL/USD", "DOGE/USD", "INJ/USD", "AAVE/USD", "AVAX/USD"]);
   assert.equal(config.enabled.every((entry) => entry.sizing.lotStep === 0.01), true);
+  assert.equal(config.enabled.some((entry) => entry.instrument === "ZEC/USD"), false);
+});
+
+test("INJ/USD profile resolves to INJUSDT", () => {
+  const supported = getSupportedInstrumentProfile("INJ/USD");
+  assert.equal(supported.asset, "INJ");
+  assert.equal(supported.binanceSymbol, "INJUSDT");
+  assert.equal(supported.dxtradeSymbol, "INJ/USD");
+  assert.equal(supported.lotStep, 0.01);
+  const resolved = resolveInstrumentProfile({ instruments: { "INJ/USD": { enabled: true } } });
+  assert.equal(resolved.asset, "INJ");
+  assert.equal(resolved.binanceSymbol, "INJUSDT");
+});
+
+test("INJ fitted geometry is ±20% to ±75% at $12.23 base and $6,300 gross", () => {
+  const entry = raw.instruments.find((item) => item.instrument === "INJ/USD");
+  const definition = buildGridDefinition(entry, 5.06);
+  assert.equal(Number(definition.baseUsd.toFixed(2)), 12.23);
+  assert.equal(definition.levels, 12);
+  assert.equal(definition.innermostDistance, 0.20);
+  assert.equal(definition.outermostDistance, 0.75);
+  assert.equal(definition.grossExposureCeilingUsd, 6300);
+  assert.ok(definition.innermostRingUsd > 0.01 * 5.06);
 });
 
 test("D-060 current live SOL compatibility geometry derives the $6,600 cap", () => {
