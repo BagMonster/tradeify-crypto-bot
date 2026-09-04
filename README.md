@@ -2,7 +2,7 @@
 
 Owner-operated automation for a **$50,000 Tradeify Crypto Instant Funding** account with the **95% profit-split** add-on.
 
-**Live now:** five independent moving-MA ring grids on DXtrade — SOL, DOGE, ZEC, AAVE, AVAX — under **D-060**, with one-sided books and position-linked exits (**D-059**). Automatic execution is **ON** when Railway `APP_MODE=live` and `AUTO_EXECUTE=true`.
+**Live now:** five independent moving-MA ring grids on DXtrade — SOL, DOGE, INJ, AAVE, AVAX — under **D-060**, with one-sided books and position-linked exits (**D-059**). Automatic execution is **ON** when Railway `APP_MODE=live` and `AUTO_EXECUTE=true`.
 
 Current continuity write-up: [6th authoritative project state](docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md)  
 Chronicle: [Brutal Markets, Tamed By One](docs/chronicle/README.md)
@@ -25,11 +25,11 @@ Configured in `config/instruments.json`. `baseUsd` is derived from the cap.
 
 | Instrument | Feed | Rings/side | From 200d MA | Cap |
 |---|---|---:|---|---:|
-| SOL/USD | SOLUSDT | 10 | ±10% … ±55% | $6,300 |
-| DOGE/USD | DOGEUSDT | 12 | ±9% … ±42% | $6,300 |
-| ZEC/USD | ZECUSDT | 8 | ±12% … ±33% | $6,300 |
-| AAVE/USD | AAVEUSDT | 12 | ±18% … ±67.5% | $6,300 |
-| AVAX/USD | AVAXUSDT | 12 | ±16% … ±60% | $6,300 |
+| SOL/USD | SOLUSDT | 10 | ±10% … ±55% | $10,000 |
+| DOGE/USD | DOGEUSDT | 12 | ±9% … ±42% | $10,000 |
+| INJ/USD | INJUSDT | 12 | ±20% … ±75% | $10,000 |
+| AAVE/USD | AAVEUSDT | 12 | ±18% … ±67.5% | $10,000 |
+| AVAX/USD | AVAXUSDT | 12 | ±16% … ±60% | $10,000 |
 
 Shared: 2 lots per ring, 0.5-band re-arm, 0.01 lot step, four-tranche exits back toward the MA.
 
@@ -41,9 +41,16 @@ Tradeify day rolls at **22:00 UTC**. Daily loss limit **$1,500**.
 
 | Layer | Trigger | Action |
 |---|---|---|
-| Brake | −$300 | Stop **that instrument’s** new entries. Exits still run. |
-| Partial cut | −$1,000 | Close 50% of **losing** books only. |
+| Brake | −$600 | Stop **that instrument’s** new entries. Exits still run. |
+| Cut, tier 1 | −$500 | Close 10% of **losing** books only. |
+| Cut, tier 2 | −$750 | Close 20% of losing books. |
+| Cut, tier 3 | −$1,000 | Close 50% of losing books. |
 | Flatten | −$1,250 | Flatten every instrument. Halt entries until rollover. |
+
+Cuts are account-wide and measured on combined day P&L; the brake is measured on a
+single instrument's day P&L, which is why a cut can fire before the brake. A cut
+re-fires on every evaluation while the account stays below its tier, so it trims
+repeatedly rather than once. Winners are never trimmed.
 
 An unreadable book is not treated as flat. The supervisor then brakes every instrument.
 
@@ -105,6 +112,8 @@ After **25 days** with no confirmed bot trade, a 0.01-unit round trip is suppose
 
 - [6th project state](docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md) — what is live
 - [Decision log](docs/implementation-decision-log.md)
+- [D-063 tiered cut ladder](docs/decisions/D-063-tiered-cut-ladder.md)
+- [D-062 swap ZEC for INJ](docs/decisions/D-062-swap-zec-for-inj.md)
 - [D-060 multi-asset grid](docs/decisions/D-060-multi-asset-grid.md)
 - [D-059 one-sided + close-by-position](docs/decisions/D-059-one-sided-grid-and-position-linked-exits.md)
 - [D-049 historical SOL resize / original ladder](docs/decisions/D-049-sol-risk-ladder-and-resize.md)
