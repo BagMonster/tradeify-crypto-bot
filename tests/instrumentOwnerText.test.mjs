@@ -20,7 +20,7 @@ function book(symbol) {
   return { definition, grid, state: grid.createInitialState() };
 }
 
-test("SOL status uses the D-060 identity and $6,300 cap, not the SOL-only template", () => {
+test("SOL status uses the live identity and $10,000 cap, not the SOL-only template", () => {
   const { definition, grid, state } = book("SOL/USD");
   const text = formatInstrumentStatus({
     definition,
@@ -48,7 +48,7 @@ test("SOL status uses the D-060 identity and $6,300 cap, not the SOL-only templa
   assert.match(text, /Binance SOLUSDT/);
   assert.doesNotMatch(text, /sol-outer-heavy-v1/);
   assert.doesNotMatch(text, /OUTER-HEAVY/);
-  assert.match(text, /\$6,300\.00/);
+  assert.match(text, /\$10,000\.00/);
   assert.doesNotMatch(text, /\$6,600\.00/);
   assert.match(text, /Occupied rings: 0\/20/);
   assert.match(text, /DXtrade broker net: 0\.00/);
@@ -87,7 +87,7 @@ test("DOGE status does not inherit SOL labels or the 20-ring SOL notebook", () =
 });
 
 test("health and levels name the instrument they describe", () => {
-  const { definition, state } = book("ZEC/USD");
+  const { definition, state } = book("INJ/USD");
   const health = formatInstrumentHealth({
     definition,
     environment: { appMode: "live" },
@@ -96,15 +96,15 @@ test("health and levels name the instrument they describe", () => {
     maState: { completedThrough: "2026-09-02T00:00:00.000Z" },
     accountMonitor: { getSnapshot: () => ({ healthy: true, fresh: true, ageMs: 1, snapshot: { signedNetReadOk: true, signedNetByInstrument: {} } }) }
   });
-  assert.match(health, /ZEC\/USD HEALTH/);
-  assert.match(health, /zec-ring-grid-v1/);
+  assert.match(health, /INJ\/USD HEALTH/);
+  assert.match(health, /inj-ring-grid-v1/);
   const levels = formatInstrumentLevels({
     definition,
     gridState: state,
-    price: 432.1,
-    ma: 432.1
+    price: 12.23,
+    ma: 12.23
   });
-  assert.match(levels, /ZEC\/USD GRID LEVELS/);
-  assert.match(levels, /BUY8 /);
-  assert.doesNotMatch(levels, /BUY10 /);
+  assert.match(levels, /INJ\/USD GRID LEVELS/);
+  assert.match(levels, /BUY12 /);
+  assert.doesNotMatch(levels, /BUY13 /);
 });
