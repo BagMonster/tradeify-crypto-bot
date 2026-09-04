@@ -2,13 +2,21 @@
 
 This log records approved and proposed changes to the production bot.
 
-> **Current production (2026-09-01):** Five ring grids from `config/instruments.json` under **D-060**, one-sided per instrument with position-linked exits under **D-059**. Live continuity: `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`. D-049 remains the historical SOL resize that D-060 replaced. **D-062 (DRAFT)** would replace enabled ZEC/USD with INJ/USD; it is not live until the owner merges and deploys.
+> **Current production:** Five ring grids from `config/instruments.json` under **D-060** + **D-062** (INJ in place of ZEC). One-sided per instrument with position-linked exits under **D-059**. Live continuity: `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`. **D-063 (DRAFT)** adds shallow cut tiers, a $10,000 cap, and a −$600 brake.
+
+## D-063 — Tiered cut ladder, $10,000 cap, −$600 brake
+
+**Status:** DRAFT — awaiting owner approval. Owner authorized merge and trading-worker deploy of this draft.
+
+Adds 10% at −$500 and 20% at −$750 ahead of the existing 50% at −$1,000 and flatten at −$1,250. Absent `cutTiers` keeps the old single cut. Cap $10,000 per book; entry brake −$600 per instrument. Ring distances unchanged, so open lots are not resized. Backtested worst day −$1,154 → −$813; margin to the $1,500 limit $346 → $687; 0 breaches; 0 flattens.
+
+Full decision: `docs/decisions/D-063-tiered-cut-ladder.md`.
 
 ## D-062 — Swap ZEC/USD for INJ/USD
 
-**Status:** DRAFT — awaiting owner approval. Not on live Railway until merged and the trading worker is deployed.
+**Status:** On `main` as of 2026-09-02 (PR #72). Live after the trading worker that includes `18fe64ca`.
 
-ZEC sits outside its ±12–33% band 23.6% of measured days and was +87.75% versus its 200-day MA with no open lots. No MA length brings the live print inside the outer short. INJ uses its own fit: 5.0% bands, dead zone 3, 12 levels, ±20% to ±75%, derived base $12.23, cap $6,300. Enabled set becomes SOL, DOGE, INJ, AAVE, AVAX. ZEC profile stays registered.
+ZEC sat outside its ±12–33% band 23.6% of measured days. INJ uses its own fit: 5.0% bands, dead zone 3, 12 levels, ±20% to ±75%. Enabled set: SOL, DOGE, INJ, AAVE, AVAX. ZEC profile stays registered.
 
 Full decision: `docs/decisions/D-062-swap-zec-for-inj.md`.
 
@@ -16,7 +24,7 @@ Full decision: `docs/decisions/D-062-swap-zec-for-inj.md`.
 
 **Status:** LIVE on `main` as of 2026-09-01. Railway trading worker is running all five enabled books with automatic execution ON.
 
-Ring geometry, caps, lot steps, and prefixes live in `config/instruments.json` for SOL/USD, DOGE/USD, ZEC/USD, AAVE/USD, and AVAX/USD. `baseUsd` is derived from each cap. Account supervisor: brake −$300 per instrument, 50% cut at −$1,000 on losers only, flatten all books at −$1,250 until 22:00 UTC. Daily loss limit $1,500.
+Ring geometry, caps, lot steps, and prefixes live in `config/instruments.json`. `baseUsd` is derived from each cap. Account supervisor (until D-063): brake −$300 per instrument, 50% cut at −$1,000 on losers only, flatten all books at −$1,250 until 22:00 UTC. Daily loss limit $1,500.
 
 Telegram reads fan out; `/kill` is global; `/resume`, `/reconcile`, and `/rematch` require an instrument.
 
