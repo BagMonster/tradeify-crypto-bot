@@ -1,5 +1,5 @@
 import pg from "pg";
-import { formatSnapshotPack, parseSnapshotPack, upsertSnapshotPack } from "./devCompanionSnapshots.js";
+import { appendAlertTape, formatSnapshotPack, parseSnapshotPack, upsertSnapshotPack } from "./devCompanionSnapshots.js";
 import { createChroniclePersistence, initChroniclePersistence } from "./devCompanionChroniclePersistence.js";
 
 const { Pool } = pg;
@@ -97,15 +97,7 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     `, [ownerId]);
   }
 
-  async function saveOperatorSnapshot(ownerIdValue, commandValue, textValue) {
-    const ownerId = requireOwnerId(ownerIdValue);
-    const command = requireText("command", commandValue, 32);
-    const snapshot = requireText("snapshot", textValue, 12000);
-    const current = await pool.query(
-      "SELECT last_operator_command, last_operator_snapshot, last_operator_at, last_operator_pack FROM ai_dev_sessions WHERE owner_id = $1",
-      [ownerId]
-    );
-    const pack = upsertSnapshotPack(packFromRow(current.rows[0] ?? {}), command, snapshot);
+  async function writePack(ownerId, command, pack, snapshot) {
     await pool.query(`
       INSERT INTO ai_dev_sessions (
         owner_id, active, last_operator_command, last_operator_snapshot, last_operator_at, last_operator_pack, updated_at
@@ -118,6 +110,29 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
         last_operator_pack = EXCLUDED.last_operator_pack,
         updated_at = NOW()
     `, [ownerId, command, snapshot, JSON.stringify(pack)]);
+  }
+
+  async function saveOperatorSnapshot(ownerIdValue, commandValue, textValue) {
+    const ownerId = requireOwnerId(ownerIdValue);
+    const command = requireText("command", commandValue, 32);
+    const snapshot = requireText("snapshot", textValue, 12000);
+    const current = await pool.query(
+      "SELECT last_operator_command, last_operator_snapshot, last_operator_at, last_operator_pack FROM ai_dev_sessions WHERE owner_id = $1",
+      [ownerId]
+    );
+    const pack = upsertSnapshotPack(packFromRow(current.rows[0] ?? {}), command, snapshot);
+    await writePack(ownerId, command, pack, snapshot);
+  }
+
+  async function appendOperatorAlert(ownerIdValue, textValue) {
+    const ownerId = requireOwnerId(ownerIdValue);
+    const snapshot = requireText("alert", textValue, 4000);
+    const current = await pool.query(
+      "SELECT last_operator_command, last_operator_snapshot, last_operator_at, last_operator_pack FROM ai_dev_sessions WHERE owner_id = $1",
+      [ownerId]
+    );
+    const pack = appendAlertTape(packFromRow(current.rows[0] ?? {}), snapshot);
+    await writePack(ownerId, "/alerts", pack, snapshot);
   }
 
   async function latestOperatorSnapshot(ownerIdValue) {
@@ -274,6 +289,7 @@ export function createDevCompanionStore({ databaseUrl, databaseSsl = false, Pool
     isSessionActive,
     resetSession,
     saveOperatorSnapshot,
+    appendOperatorAlert,
     latestOperatorSnapshot,
     enqueue,
     claimNext,
