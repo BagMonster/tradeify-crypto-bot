@@ -131,3 +131,5 @@ The August 22 [5th project state](docs/5th_AUTHORITATIVE_PROJECT_STATE_Tradeify_
 3. Manual tickets on an enabled instrument desync the virtual notebook — flatten the broker, then `/reconcile INSTRUMENT`, or stop the bot.
 4. Unread broker data is unknown, never zero.
 5. Docs-only merges must not restart the trading worker.
+6. `placePositionPartialClose` has never been broker-validated. Every tranche exit on
+   every instrument uses it.
