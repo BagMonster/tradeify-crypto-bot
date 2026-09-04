@@ -77,6 +77,21 @@ export function createRiskSupervisor({
   const partialCutUsd = positiveNumber("partialCutUsd", config.partialCutUsd);
   const fullFlattenUsd = positiveNumber("fullFlattenUsd", config.fullFlattenUsd);
   const dailyLossLimitUsd = positiveNumber("dailyLossLimitUsd", config.dailyLossLimitUsd);
+  // D-063: an ordered ladder of cut tiers, deepest first. The legacy single
+  // partialCutUsd/partialCutFraction pair remains the deepest tier, so an absent
+  // cutTiers array reproduces the previous behaviour exactly.
+  const cutTiers = Object.freeze(
+    (Array.isArray(config.cutTiers) ? config.cutTiers : [])
+      .map((tier, i) => {
+        const thresholdUsd = Number(tier?.thresholdUsd);
+        const fraction = Number(tier?.fraction);
+        if (!Number.isFinite(thresholdUsd) || thresholdUsd <= 0) throw new TypeError(`cutTiers[${i}].thresholdUsd must be positive`);
+        if (!(fraction > 0) || fraction > 1) throw new TypeError(`cutTiers[${i}].fraction must be between 0 and 1`);
+        return Object.freeze({ thresholdUsd, fraction });
+      })
+      .concat([{ thresholdUsd: Number(config.partialCutUsd), fraction: Number(config.partialCutFraction) }])
+      .sort((a, b) => b.thresholdUsd - a.thresholdUsd)
+  );
   const partialCutFraction = Number(config.partialCutFraction);
   if (!(partialCutFraction > 0) || partialCutFraction > 1) {
     throw new TypeError("partialCutFraction must be between 0 and 1");
@@ -84,6 +99,17 @@ export function createRiskSupervisor({
   if (!(partialCutUsd < fullFlattenUsd)) {
     throw new TypeError("partialCutUsd must be smaller than fullFlattenUsd");
   }
+  for (let i = 0; i < cutTiers.length - 1; i += 1) {
+    if (!(cutTiers[i].thresholdUsd > cutTiers[i + 1].thresholdUsd)) {
+      throw new TypeError("cutTiers thresholds must be strictly decreasing after the deepest tier");
+    }
+  }
+  if (cutTiers[0].thresholdUsd >= fullFlattenUsd) {
+    throw new TypeError("the deepest cut tier must trigger before the full flatten");
+  }
+  // No ordering is required between cut tiers and the entry brake: the brake is
+  // measured on ONE instrument's day P&L, the cut on the COMBINED account. A shallow
+  // tier firing before the brake is a valid and intended configuration.
   if (!(fullFlattenUsd < dailyLossLimitUsd)) {
     throw new TypeError("fullFlattenUsd must be smaller than dailyLossLimitUsd");
   }
@@ -197,10 +223,11 @@ export function createRiskSupervisor({
         });
       }
 
-      if (combined <= -partialCutUsd) {
+      const activeTier = cutTiers.find((tier) => combined <= -tier.thresholdUsd) ?? null;
+      if (activeTier) {
         const allocations = allocateProportionalCut(
           readings.map((r) => ({ instrument: r.instrument, unrealisedUsd: r.unrealisedUsd })),
-          partialCutFraction
+          activeTier.fraction
         );
         if (allocations.length === 0) {
           await addEvent("WARN", "RISK_SUPERVISOR_CUT_NO_LOSING_BOOK", { combinedDayPnlUsd: combined });
@@ -215,7 +242,7 @@ export function createRiskSupervisor({
                 fraction: allocation.fraction,
                 result: await reading.book.executeProtectiveCut({
                   fraction: allocation.fraction,
-                  reason: `D-060 proportional cut at ${combined.toFixed(2)} (share ${(allocation.share * 100).toFixed(1)}%)`,
+                  reason: `D-063 tier cut ${(activeTier.fraction * 100).toFixed(0)}% at ${combined.toFixed(2)} (threshold -${activeTier.thresholdUsd}, share ${(allocation.share * 100).toFixed(1)}%)`,
                   dayKey: incomingDayKey,
                   bypassSlippageCap: true
                 })
@@ -226,11 +253,12 @@ export function createRiskSupervisor({
           }
           await addEvent("WARN", "RISK_SUPERVISOR_PARTIAL_CUT", {
             combinedDayPnlUsd: combined,
-            threshold: -partialCutUsd,
+            threshold: -activeTier.thresholdUsd,
+            tierFraction: activeTier.fraction,
             cutNumber: cutsToday,
             allocations: results.map((r) => ({ instrument: r.instrument, fraction: r.fraction, status: r.result?.status ?? "UNKNOWN" }))
           });
-          return Object.freeze({ action: "CUT", combinedDayPnlUsd: combined, results: Object.freeze(results) });
+          return Object.freeze({ action: "CUT", combinedDayPnlUsd: combined, tier: activeTier, results: Object.freeze(results) });
         }
       }
 
@@ -277,6 +305,7 @@ export function createRiskSupervisor({
       entryBrakeUsd,
       partialCutUsd,
       partialCutFraction,
+      cutTiers,
       fullFlattenUsd,
       brakedInstruments: Object.freeze([...brakedToday]),
       flattenedToday,
