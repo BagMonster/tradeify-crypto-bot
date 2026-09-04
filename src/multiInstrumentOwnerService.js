@@ -28,6 +28,26 @@ function money(value) {
   return `${value < 0 ? "-$" : "$"}${Math.abs(value).toFixed(2)}`;
 }
 
+function pct(fraction) {
+  const n = Number(fraction);
+  if (!Number.isFinite(n)) return "?";
+  return `${Math.round(n * 100)}%`;
+}
+
+export function formatRiskLadderLine(snapshot) {
+  const brake = money(-Math.abs(snapshot?.entryBrakeUsd ?? 300));
+  const flatten = money(-Math.abs(snapshot?.fullFlattenUsd ?? 1250));
+  const rawTiers = Array.isArray(snapshot?.cutTiers) && snapshot.cutTiers.length > 0
+    ? snapshot.cutTiers
+    : [{ thresholdUsd: snapshot?.partialCutUsd ?? 1000, fraction: snapshot?.partialCutFraction ?? 0.5 }];
+  const cuts = [...rawTiers]
+    .filter((tier) => Number.isFinite(Number(tier?.thresholdUsd)) && Number(tier.thresholdUsd) > 0)
+    .sort((a, b) => a.thresholdUsd - b.thresholdUsd)
+    .map((tier) => `${pct(tier.fraction)} at ${money(-Math.abs(tier.thresholdUsd))}`)
+    .join(", ");
+  return `  ladder: brake ${brake} per instrument | cuts ${cuts || money(-Math.abs(snapshot?.partialCutUsd ?? 1000))} | flatten ${flatten} account-wide`;
+}
+
 export function createMultiInstrumentOwnerService({
   instrumentConfigs,
   buildOwnerService = createSolanaOwnerService,
@@ -86,9 +106,7 @@ export function createMultiInstrumentOwnerService({
       `  combined day P&L: ${money(snapshot.dayPnlUsd)}`,
       `  combined exposure: ${money(snapshot.exposureUsd)}`,
       `  daily loss limit: ${money(-Math.abs(snapshot.dailyLossLimitUsd ?? 1500))}   margin: ${money(snapshot.marginToLimitUsd)}`,
-      `  ladder: brake ${money(-Math.abs(snapshot.entryBrakeUsd ?? 300))} per instrument` +
-        ` | cut ${money(-Math.abs(snapshot.partialCutUsd ?? 1000))} account-wide` +
-        ` | flatten ${money(-Math.abs(snapshot.fullFlattenUsd ?? 1250))} account-wide`
+      formatRiskLadderLine(snapshot)
     ];
     const braked = Array.isArray(snapshot.brakedInstruments) ? snapshot.brakedInstruments : [];
     lines.push(`  braked today: ${braked.length === 0 ? "none" : braked.join(", ")}`);
