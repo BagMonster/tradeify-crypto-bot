@@ -1,4 +1,7 @@
-export const SNAPSHOT_SLOTS = Object.freeze(["/status", "/levels", "/rings", "/health", "/other"]);
+export const SNAPSHOT_SLOTS = Object.freeze(["/status", "/levels", "/rings", "/health", "/alerts", "/other"]);
+
+const MAX_ALERTS = 12;
+const MAX_ALERT_CHARS = 8000;
 
 export function snapshotSlot(command) {
   const value = String(command ?? "").trim().toLowerCase();
@@ -6,6 +9,7 @@ export function snapshotSlot(command) {
   if (value === "/levels" || value === "levels") return "/levels";
   if (value === "/rings" || value === "rings") return "/rings";
   if (value === "/health" || value === "health") return "/health";
+  if (value === "/alerts" || value === "alerts") return "/alerts";
   return "/other";
 }
 
@@ -15,6 +19,7 @@ export function emptySnapshotPack() {
     "/levels": null,
     "/rings": null,
     "/health": null,
+    "/alerts": null,
     "/other": null
   };
 }
@@ -42,6 +47,30 @@ export function upsertSnapshotPack(existing, command, text, at = new Date().toIS
   pack[slot] = {
     command: slot === "/other" ? String(command) : slot,
     text: String(text).trim(),
+    at
+  };
+  return pack;
+}
+
+export function appendAlertTape(existing, text, at = new Date().toISOString()) {
+  const pack = parseSnapshotPack(existing);
+  const incoming = String(text ?? "").trim();
+  if (!incoming) return pack;
+  const block = `${at}\n${incoming}`;
+  const prior = pack["/alerts"]?.text ?? "";
+  const parts = prior
+    ? prior.split("\n\n---\n\n").filter((part) => part.trim())
+    : [];
+  parts.push(block);
+  while (parts.length > MAX_ALERTS) parts.shift();
+  let joined = parts.join("\n\n---\n\n");
+  while (joined.length > MAX_ALERT_CHARS && parts.length > 1) {
+    parts.shift();
+    joined = parts.join("\n\n---\n\n");
+  }
+  pack["/alerts"] = {
+    command: "/alerts",
+    text: joined,
     at
   };
   return pack;
