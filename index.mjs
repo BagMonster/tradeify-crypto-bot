@@ -320,13 +320,20 @@ async function drainLatestTrades(stack) {
       stack.pendingTrade = null;
       await processLatestTrade(stack, trade);
     }
-  } catch {
+  } catch (error) {
     if (!stack.runtimeErrorLatched) {
       stack.runtimeErrorLatched = true;
+      const detail = error instanceof Error ? error.message : String(error);
       console.error(`${stack.cfg.instrument} runtime error; new strategy actions are being halted for that instrument.`);
+      console.error(detail);
+      if (error instanceof Error && error.stack) console.error(error.stack);
       try {
         await database.setSafetyHalt(`${stack.cfg.instrument} production runtime error; owner review required`);
-        await database.addEvent("ERROR", "RUNTIME_ERROR", { instrument: stack.cfg.instrument, action: "SAFETY_HALT" });
+        await database.addEvent("ERROR", "RUNTIME_ERROR", {
+          instrument: stack.cfg.instrument,
+          action: "SAFETY_HALT",
+          message: detail.slice(0, 500)
+        });
         const hour = new Date().toISOString().slice(0, 13).replaceAll("-", "").replace("T", "-");
         liveNotifications.enqueue({
           kind: "SAFETY_HALT",
