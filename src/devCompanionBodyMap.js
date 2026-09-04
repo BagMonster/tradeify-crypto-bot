@@ -5,12 +5,12 @@ const BLOCKED_NAME = /(?:^|\/)(?:\.env(?:\..*)?|credentials|secrets?)(?:\/|$)/i;
 
 const SOURCES = Object.freeze([
   { path: "docs/chronicle/WHO_I_AM.md", maxChars: 2200 },
-  { path: "docs/chronicle/AUTHORIAL_CHARTER.md", maxChars: 2200 },
-  { path: "config/strategy.json", maxChars: 2500 },
-  { path: "README.md", maxChars: 3500 },
-  { path: "docs/decisions/D-049-sol-risk-ladder-and-resize.md", maxChars: 4000 },
-  { path: "src/strategies/solanaGrid.js", maxChars: 2200, headOnly: true },
-  { path: "docs/telegram-command-reference.md", maxChars: 2200, headOnly: true }
+  { path: "docs/chronicle/AUTHORIAL_CHARTER.md", maxChars: 1800 },
+  { path: "docs/chronicle/LIVE_CONTEXT.md", maxChars: 2800 },
+  { path: "config/instruments.json", maxChars: 2800 },
+  { path: "docs/implementation-decision-log.md", maxChars: 2800, headOnly: true },
+  { path: "README.md", maxChars: 2500 },
+  { path: "docs/telegram-command-reference.md", maxChars: 1800, headOnly: true }
 ]);
 
 function clip(text, maxChars) {
@@ -40,7 +40,9 @@ export function loadBodyMap(rootDir = process.cwd()) {
     }
   }
   return [
-    "BODY MAP from this Railway checkout. Treat as your own deployed body, not live account telemetry.",
+    "BODY MAP from this Railway checkout. Treat as your own deployed body.",
+    "Live fills and warnings live in SNAPSHOT /alerts when present. That tape beats this map for 'what just happened'.",
+    "config/strategy.json is historical SOL-only. Live books are config/instruments.json: SOL, DOGE, INJ, AAVE, AVAX.",
     "Never quote or request secrets, tokens, database URLs, or DXtrade credentials.",
     sections.join("\n\n")
   ].join("\n\n");

@@ -90,6 +90,13 @@ export async function startTelegramBot({
         throw new Error("Owner Telegram destination is unavailable");
       }
       await sendText(environment.telegramAllowedUserId, text);
+      if (typeof devCompanion?.appendOperatorAlert === "function") {
+        try {
+          await devCompanion.appendOperatorAlert(environment.telegramAllowedUserId, text);
+        } catch (error) {
+          console.error("Live alert latch failed:", error.message);
+        }
+      }
     });
   }
 
@@ -146,7 +153,6 @@ export async function startTelegramBot({
         });
         return;
       } catch {
-        // Telegram rejects an edit when the markup is unchanged; send a fresh panel.
       }
     }
     return bot.sendMessage(chatId, text, markup);
