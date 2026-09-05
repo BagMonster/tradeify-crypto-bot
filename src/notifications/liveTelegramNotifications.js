@@ -97,6 +97,14 @@ function netLabel(value, instrument) {
   return `${quantity(Math.abs(value), instrument)}${value < 0 ? " SHORT" : value > 0 ? " LONG" : ""}`;
 }
 
+function oppositeSide(side) {
+  return side === "BUY" ? "SELL" : "BUY";
+}
+
+function positionWord(side) {
+  return side === "BUY" ? "LONG" : "SHORT";
+}
+
 function formatEvent(event) {
   if (!event || typeof event !== "object" || Array.isArray(event)) throw new TypeError("notification event must be an object");
   const kind = safeText("kind", event.kind, { max: 48, pattern: /^[A-Z0-9_]+$/ });
@@ -117,8 +125,9 @@ function formatEvent(event) {
       eventKey,
       message: [
         `\uD83D\uDFE2 ${instrument} ENTRY CONFIRMED`,
+        `Opening order: ${side} ${quantity(filledQuantity, event.instrument)}`,
+        `Position opened: ${positionWord(side)}`,
         `Ring: ${tag}`,
-        `Side: ${side}`,
         `Fill: ${money(fillPrice)}`,
         `Quantity: ${quantity(filledQuantity, event.instrument)}`,
         `Virtual lot: ${lotId}`,
@@ -145,9 +154,10 @@ function formatEvent(event) {
       eventKey,
       message: [
         `\uD83D\uDCB0 ${instrument} TRANCHE EXIT CONFIRMED`,
+        `Closing order: ${oppositeSide(virtualSide)} ${quantity(filledQuantity, event.instrument)}`,
+        `Position: ${positionWord(virtualSide)}`,
         `Ring: ${tag}`,
         `Lot: ${lotId}`,
-        `Position side: ${virtualSide}`,
         `Tranche: ${tranche}/4`,
         `Target touched: ${money(target)}`,
         `Broker fill: ${money(fillPrice)}`,
@@ -173,9 +183,10 @@ function formatEvent(event) {
       eventKey,
       message: [
         `\u2705 ${instrument} LOT FULLY CLOSED`,
+        `Closed with: ${oppositeSide(virtualSide)}`,
+        `Position was: ${positionWord(virtualSide)}`,
         `Ring: ${tag}`,
         `Lot: ${lotId}`,
-        `Position side: ${virtualSide}`,
         `Entry fill: ${money(entryPrice)}`,
         `Original quantity: ${quantity(originalQuantity, event.instrument)}`,
         `Final exit fill: ${money(finalFillPrice)}`,
