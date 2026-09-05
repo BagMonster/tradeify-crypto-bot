@@ -217,41 +217,66 @@ const stackByInstrument = new Map(stacks.map((s) => [s.cfg.instrument, s]));
 
 // The account ladder reads the BROKER, not the strategy's per-tick cache.
 //
-// Previously these delegated to stack.runtime, whose figures are only populated
-// inside captureRisk() on a processed Binance tick. That coupled account risk to the
-// price feed: with no ticks the reads throw, the supervisor treats every book as
-// unreadable, and the ladder can brake but cannot cut or flatten. A dead Binance feed
-// while positions bleed is precisely when cut and flatten must still work, and the
-// $1,500 limit is measured on broker equity regardless of what the feed is doing.
+// P&L comes from /metrics, NOT from the /positions overlay. DXtrade's /positions
+// payload is a position list — code, symbol, quantity, open price — and carries no
+// P&L. signedNetByInstrument therefore defaults openPl and notional to 0 for every
+// row, which is why the ladder read $0.00 while real positions were open. Nets were
+// correct because quantity and symbol have fallbacks; openPl has none.
 //
-// The account monitor already polls DXtrade on its own timer and already carries
-// openPl, dayClosedPl and notional per instrument. Reading it directly makes the
-// ladder correct from the first poll after boot, with or without a tick.
+// Combined day P&L is what the cut and flatten act on, and /metrics reports it for
+// the whole account, so that figure is exact. Per-instrument P&L is only needed for
+// the proportional allocation and the per-instrument brake; where /metrics supplies
+// per-position rows we use them, and otherwise we apportion the account figure by
+// each book's share of notional. That keeps the allocator directionally right rather
+// than silently zero.
 //
-// D-054 is preserved: an unread book THROWS. The supervisor catches that, marks the
-// book unreadable, and brakes everything. Unknown is never reported as zero.
-function brokerBook(instrument) {
+// D-054 is preserved: an unread account THROWS. The supervisor catches it, marks the
+// books unreadable, and brakes. Unknown is never reported as zero.
+function accountMetrics() {
   const accountStatus = accountMonitor.getSnapshot();
-  if (accountStatus?.healthy !== true) throw new Error(`${instrument} broker account data is unavailable`);
-  const table = accountStatus.snapshot?.signedNetByInstrument;
-  if (!table || typeof table !== "object") throw new Error(`${instrument} broker position table is unavailable`);
-  // An enabled instrument with no position is a genuine flat, not an unknown.
-  return table[instrument] ?? Object.freeze({ openPl: 0, dayClosedPl: 0, notional: 0 });
+  if (accountStatus?.healthy !== true) throw new Error("Broker account data is unavailable");
+  const snapshot = accountStatus.snapshot;
+  if (!snapshot || typeof snapshot !== "object") throw new Error("Broker account snapshot is unavailable");
+  const openPl = Number(snapshot.openPl);
+  const dayClosedPl = Number(snapshot.dayClosedPl ?? 0);
+  if (!Number.isFinite(openPl) || !Number.isFinite(dayClosedPl)) {
+    throw new Error("Broker account P&L is not a finite number");
+  }
+  return { snapshot, openPl, dayClosedPl };
 }
 
-function brokerNumber(instrument, field) {
-  const value = Number(brokerBook(instrument)[field]);
-  if (!Number.isFinite(value)) throw new Error(`${instrument} broker ${field} is not a finite number`);
-  return value;
+function bookNotional(snapshot, instrument) {
+  const entry = snapshot.signedNetByInstrument?.[instrument];
+  const notional = Number(entry?.notional ?? 0);
+  return Number.isFinite(notional) ? Math.abs(notional) : 0;
+}
+
+// Share of the account's exposure carried by one book, used to apportion account P&L
+// when per-position figures are unavailable.
+function notionalShare(snapshot, instrument) {
+  const own = bookNotional(snapshot, instrument);
+  const total = stacks.reduce((sum, s) => sum + bookNotional(snapshot, s.cfg.instrument), 0);
+  if (!(total > 0)) return 0;
+  return own / total;
+}
+
+function instrumentPl(instrument, field) {
+  const { snapshot, openPl, dayClosedPl } = accountMetrics();
+  const entry = snapshot.signedNetByInstrument?.[instrument];
+  const direct = Number(entry?.[field]);
+  // Use a per-position figure when the broker actually supplied one.
+  if (Number.isFinite(direct) && direct !== 0) return direct;
+  const accountValue = field === "openPl" ? openPl : dayClosedPl;
+  return accountValue * notionalShare(snapshot, instrument);
 }
 
 const riskSupervisor = createRiskSupervisor({
   config: accountRisk,
   instruments: stacks.map((s) => Object.freeze({
     instrument: s.cfg.instrument,
-    getUnrealisedUsd: () => brokerNumber(s.cfg.instrument, "openPl"),
-    getDayPnlUsd: () => brokerNumber(s.cfg.instrument, "dayClosedPl") + brokerNumber(s.cfg.instrument, "openPl"),
-    getExposureUsd: () => Math.abs(brokerNumber(s.cfg.instrument, "notional")),
+    getUnrealisedUsd: () => instrumentPl(s.cfg.instrument, "openPl"),
+    getDayPnlUsd: () => instrumentPl(s.cfg.instrument, "dayClosedPl") + instrumentPl(s.cfg.instrument, "openPl"),
+    getExposureUsd: () => bookNotional(accountMetrics().snapshot, s.cfg.instrument),
     setEntryBrake: (on) => s.runtime.setEntryBrake(on),
     executeProtectiveCut: (args) => s.runtime.executeProtectiveCut(args),
     executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args)
