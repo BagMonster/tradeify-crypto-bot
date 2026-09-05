@@ -215,13 +215,43 @@ const stacks = [];
 for (const cfg of enabledInstruments) stacks.push(await buildInstrumentStack(cfg));
 const stackByInstrument = new Map(stacks.map((s) => [s.cfg.instrument, s]));
 
+// The account ladder reads the BROKER, not the strategy's per-tick cache.
+//
+// Previously these delegated to stack.runtime, whose figures are only populated
+// inside captureRisk() on a processed Binance tick. That coupled account risk to the
+// price feed: with no ticks the reads throw, the supervisor treats every book as
+// unreadable, and the ladder can brake but cannot cut or flatten. A dead Binance feed
+// while positions bleed is precisely when cut and flatten must still work, and the
+// $1,500 limit is measured on broker equity regardless of what the feed is doing.
+//
+// The account monitor already polls DXtrade on its own timer and already carries
+// openPl, dayClosedPl and notional per instrument. Reading it directly makes the
+// ladder correct from the first poll after boot, with or without a tick.
+//
+// D-054 is preserved: an unread book THROWS. The supervisor catches that, marks the
+// book unreadable, and brakes everything. Unknown is never reported as zero.
+function brokerBook(instrument) {
+  const accountStatus = accountMonitor.getSnapshot();
+  if (accountStatus?.healthy !== true) throw new Error(`${instrument} broker account data is unavailable`);
+  const table = accountStatus.snapshot?.signedNetByInstrument;
+  if (!table || typeof table !== "object") throw new Error(`${instrument} broker position table is unavailable`);
+  // An enabled instrument with no position is a genuine flat, not an unknown.
+  return table[instrument] ?? Object.freeze({ openPl: 0, dayClosedPl: 0, notional: 0 });
+}
+
+function brokerNumber(instrument, field) {
+  const value = Number(brokerBook(instrument)[field]);
+  if (!Number.isFinite(value)) throw new Error(`${instrument} broker ${field} is not a finite number`);
+  return value;
+}
+
 const riskSupervisor = createRiskSupervisor({
   config: accountRisk,
   instruments: stacks.map((s) => Object.freeze({
     instrument: s.cfg.instrument,
-    getUnrealisedUsd: () => s.runtime.getUnrealisedUsd(),
-    getDayPnlUsd: () => s.runtime.getDayPnlUsd(),
-    getExposureUsd: () => s.runtime.getExposureUsd(),
+    getUnrealisedUsd: () => brokerNumber(s.cfg.instrument, "openPl"),
+    getDayPnlUsd: () => brokerNumber(s.cfg.instrument, "dayClosedPl") + brokerNumber(s.cfg.instrument, "openPl"),
+    getExposureUsd: () => Math.abs(brokerNumber(s.cfg.instrument, "notional")),
     setEntryBrake: (on) => s.runtime.setEntryBrake(on),
     executeProtectiveCut: (args) => s.runtime.executeProtectiveCut(args),
     executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args)
