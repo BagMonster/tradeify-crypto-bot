@@ -142,6 +142,20 @@ export function createMultiInstrumentOwnerService({
     ];
     const braked = Array.isArray(snapshot.brakedInstruments) ? snapshot.brakedInstruments : [];
     lines.push(`  braked today: ${braked.length === 0 ? "none" : braked.join(", ")}`);
+
+    // Diagnostic. A combined figure of $0.00 has two very different causes: the books
+    // are genuinely flat, or every per-book read threw and defaulted to zero. Without
+    // these lines the two are indistinguishable, and lastError is only ever set inside
+    // evaluate(), so it is guaranteed empty in exactly the case you need it.
+    const per = Array.isArray(snapshot.perInstrument) ? snapshot.perInstrument : [];
+    const unread = per.filter((entry) => entry.readFailed === true).map((entry) => entry.instrument);
+    if (unread.length > 0) {
+      lines.push(`  *** RISK DATA UNREADABLE on ${unread.length}/${per.length}: ${unread.join(", ")} ***`);
+      lines.push("  Combined figures above are NOT reliable. The ladder cannot act on an unread book.");
+    } else if (per.length > 0) {
+      lines.push(`  risk reads: ${per.length}/${per.length} OK`);
+    }
+    lines.push(`  supervisor day: ${snapshot.dayKey ?? "not yet evaluated (no price tick processed since start)"}`);
     if (snapshot.lastError) lines.push(`  supervisor note: ${snapshot.lastError}`);
     if (snapshot.flattenedToday === true) {
       lines.push("  *** ACCOUNT FLATTENED TODAY - all entries blocked until 22:00 UTC rollover ***");
