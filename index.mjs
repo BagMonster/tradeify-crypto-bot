@@ -412,6 +412,14 @@ const liveCanary = createSolanaLiveCanary({
 const service = createMultiInstrumentOwnerService({
   instrumentConfigs: enabledInstruments,
   riskSupervisor,
+  // Required by /re-run. Without `database` the rerun handlers degrade to
+  // "Re-run is not configured on this deployment." and the command does nothing.
+  database,
+  // A latched runtime error also lives in memory on each stack, so clearing only
+  // the Postgres safety_halt would leave the books blocked. Both must clear.
+  onRuntimeHaltCleared: () => {
+    for (const stack of stacks) stack.runtimeErrorLatched = false;
+  },
   buildOwnerService: (cfg) => {
     const stack = stackByInstrument.get(cfg.instrument);
     return createSolanaOwnerService({
