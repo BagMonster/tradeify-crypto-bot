@@ -476,6 +476,10 @@ export async function startTelegramBot({
     { command: "resume", description: "Request a resume code for one book" },
     { command: "reconcile", description: "Request a virtual flatten code" },
     { command: "rematch", description: "Rematch one book" },
+    // Telegram command names allow only a-z, 0-9 and _, so the menu entry is "rerun".
+    // The handler accepts /re-run and /rerun. confirmrerun stays OFF this list for the
+    // same reason the other confirm* commands do: typing the code by hand is the gate.
+    { command: "rerun", description: "Clear a runtime-error halt when books match" },
     { command: "flat", description: "Show flattening instructions" },
     ...CHRONICLE_COMMANDS,
     { command: "code", description: "Enter OpenAI development mode" },
