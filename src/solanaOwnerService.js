@@ -1,7 +1,7 @@
 import { createSolanaTradeifyService } from "./solanaTradeifyService.js";
 import { createRematchHandlers } from "./state/solanaRematch.js";
 import { createRingGrid } from "./strategies/ringGrid.js";
-import { trustedSignedNetFor } from "./account/dxtradeSignedNet.js";
+import { netsMatch, trustedSignedNetFor } from "./account/dxtradeSignedNet.js";
 import {
   brokerBookLines,
   formatInstrumentStatus,
@@ -125,6 +125,37 @@ export function createSolanaOwnerService(opts) {
     });
   }
 
+  async function inspectForRerun() {
+    await refreshBrokerSnapshot();
+    const instrument = definition?.instrument ?? opts.instrument;
+    const state = await loadLiveState();
+    const accountStatus = opts.accountMonitor?.getSnapshot?.() ?? null;
+    const brokerNet = trustedSignedNetFor(accountStatus, instrument);
+    if (!state || !grid) {
+      return Object.freeze({
+        instrument,
+        ok: false,
+        match: false,
+        virtualNet: null,
+        brokerNet,
+        openLots: 0,
+        error: "grid state missing"
+      });
+    }
+    const virtualNet = grid.expectedNetUnits(state);
+    const openLots = state.rings.reduce((n, ring) => n + (Array.isArray(ring.lots) ? ring.lots.length : 0), 0);
+    const ok = Number.isFinite(brokerNet);
+    return Object.freeze({
+      instrument,
+      ok,
+      match: ok && netsMatch(virtualNet, brokerNet),
+      virtualNet,
+      brokerNet,
+      openLots,
+      error: ok ? null : "broker net unavailable"
+    });
+  }
+
   return Object.freeze({
     ...tradeify,
     ...createRematchHandlers(opts),
@@ -132,6 +163,7 @@ export function createSolanaOwnerService(opts) {
     healthText,
     levelsText,
     ringsText,
+    inspectForRerun,
     trustedSignedNetFor: (instrument) => trustedSignedNetFor(opts.accountMonitor?.getSnapshot?.(), instrument)
   });
 }

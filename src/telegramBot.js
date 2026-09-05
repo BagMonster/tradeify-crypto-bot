@@ -6,6 +6,7 @@ import {
   CHRONICLE_HELP_LINES
 } from "./devCompanionChronicleTelegram.js";
 import { splitTelegramText } from "./telegramMessageSplit.js";
+import { registerRerunCommands } from "./telegramRerunCommands.js";
 import {
   CONFIRM_ONLY_COMMANDS,
   bookSymbolsFrom,
@@ -35,6 +36,8 @@ const HELP_TEXT = [
   "/confirmreconcile CODE INSTRUMENT - type the code; not a button",
   "/rematch INSTRUMENT - request a keep-lots rematch code for one book",
   "/confirmrematch CODE INSTRUMENT - type the code; not a button",
+  "/re-run - clear a production runtime-error halt when every book already matches",
+  "/confirmrerun CODE - type the code; not a button",
   "/flat [INSTRUMENT] - manual flattening instructions",
   ...CHRONICLE_HELP_LINES,
   "/code - enter the owner-only OpenAI development conversation",
@@ -273,6 +276,10 @@ export async function startTelegramBot({
   bot.onText(/^\/confirmrematch(?:@\w+)?(?:\s+(\S+))?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
     await sendLatched(message.chat.id, "/confirmrematch", await service.confirmRematch(match?.[1] ?? "", match?.[2]));
   }));
+
+  // /re-run and /confirmrerun clear a latched production runtime-error halt when
+  // every book already reconciles. Typed confirm only; deliberately no button.
+  registerRerunCommands({ bot, service, withAuthorization, sendLatched });
 
   attachChronicleCommands({ bot, devCompanion, withAuthorization, sendLatched });
 

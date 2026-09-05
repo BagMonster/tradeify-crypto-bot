@@ -1,4 +1,5 @@
 import { createSolanaOwnerService } from "./solanaOwnerService.js";
+import { createRuntimeHaltRerunHandlers } from "./state/runtimeHaltRerun.js";
 
 /**
  * src/multiInstrumentOwnerService.js
@@ -52,7 +53,9 @@ export function createMultiInstrumentOwnerService({
   instrumentConfigs,
   buildOwnerService = createSolanaOwnerService,
   riskSupervisor = null,
-  sharedPause = null
+  sharedPause = null,
+  database = null,
+  onRuntimeHaltCleared = async () => {}
 }) {
   if (!Array.isArray(instrumentConfigs) || instrumentConfigs.length === 0) {
     throw new TypeError("instrumentConfigs must be a non-empty array");
@@ -67,6 +70,35 @@ export function createMultiInstrumentOwnerService({
     service: buildOwnerService(cfg)
   }));
   const byInstrument = new Map(books.map((b) => [b.instrument, b]));
+
+  const rerun = database
+    ? createRuntimeHaltRerunHandlers({
+      database,
+      onRuntimeHaltCleared,
+      inspectBooks: async () => {
+        const rows = [];
+        for (const book of books) {
+          if (typeof book.service.inspectForRerun !== "function") {
+            rows.push(Object.freeze({
+              instrument: book.instrument,
+              ok: false,
+              match: false,
+              virtualNet: null,
+              brokerNet: null,
+              openLots: 0,
+              error: "inspectForRerun is not available"
+            }));
+            continue;
+          }
+          rows.push(await book.service.inspectForRerun());
+        }
+        return rows;
+      }
+    })
+    : {
+      requestRerun: async () => ({ message: "Re-run is not configured on this deployment." }),
+      confirmRerun: async () => "Re-run is not configured on this deployment."
+    };
 
   function resolve(arg) {
     const key = normaliseInstrument(arg);
@@ -193,6 +225,8 @@ export function createMultiInstrumentOwnerService({
       if (target.error) return Promise.resolve(target.error);
       if (target.all) return Promise.resolve("Specify an instrument: /confirmrematch CODE <INSTRUMENT>");
       return target.books[0].service.confirmRematch(code);
-    }
+    },
+    requestRerun: () => rerun.requestRerun(),
+    confirmRerun: (code) => rerun.confirmRerun(code)
   });
 }
