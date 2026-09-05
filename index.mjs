@@ -232,17 +232,46 @@ const stackByInstrument = new Map(stacks.map((s) => [s.cfg.instrument, s]));
 //
 // D-054 is preserved: an unread account THROWS. The supervisor catches it, marks the
 // books unreadable, and brakes. Unknown is never reported as zero.
+// Balance captured at the last 22:00 UTC rollover. Day P&L is measured against it.
+let dayOpenBalance = null;
+let dayOpenBalanceKey = null;
+
 function accountMetrics() {
   const accountStatus = accountMonitor.getSnapshot();
   if (accountStatus?.healthy !== true) throw new Error("Broker account data is unavailable");
   const snapshot = accountStatus.snapshot;
   if (!snapshot || typeof snapshot !== "object") throw new Error("Broker account snapshot is unavailable");
-  const openPl = Number(snapshot.openPl);
-  const dayClosedPl = Number(snapshot.dayClosedPl ?? 0);
-  if (!Number.isFinite(openPl) || !Number.isFinite(dayClosedPl)) {
-    throw new Error("Broker account P&L is not a finite number");
+
+  const equity = Number(snapshot.equity);
+  const balance = Number(snapshot.balance);
+  if (!Number.isFinite(equity) || !Number.isFinite(balance)) {
+    throw new Error("Broker equity or balance is not a finite number");
   }
-  return { snapshot, openPl, dayClosedPl };
+
+  // DXtrade's /metrics payload does not use the field names openPl or dayClosedPl on
+  // this account, so both parse as 0 and the ladder saw a flat book while positions
+  // were open. equity and balance DO parse, and everything needed follows from them:
+  //
+  //   unrealised = equity - balance
+  //   realised today = balance - balance at the last rollover
+  //   day P&L = unrealised + realised = equity - balance at the last rollover
+  //
+  // A named field is still preferred if the broker ever supplies a real one.
+  const namedOpenPl = Number(snapshot.openPl);
+  const openPl = Number.isFinite(namedOpenPl) && namedOpenPl !== 0 ? namedOpenPl : equity - balance;
+
+  const key = accountDayKey(Date.now());
+  if (dayOpenBalanceKey !== key) {
+    dayOpenBalanceKey = key;
+    dayOpenBalance = balance;
+  }
+
+  const namedDayClosedPl = Number(snapshot.dayClosedPl);
+  const dayClosedPl = Number.isFinite(namedDayClosedPl) && namedDayClosedPl !== 0
+    ? namedDayClosedPl
+    : balance - dayOpenBalance;
+
+  return { snapshot, equity, balance, openPl, dayClosedPl, dayOpenBalance };
 }
 
 function bookNetUnits(snapshot, instrument) {
@@ -487,8 +516,9 @@ const service = createMultiInstrumentOwnerService({
     const bal = Number(snap.balance);
     const gap = Number.isFinite(eq) && Number.isFinite(bal) ? eq - bal : null;
     return `  broker /metrics: equity ${money(eq)}  balance ${money(bal)}` +
-      `  openPl ${money(Number(snap.openPl))}  dayClosedPl ${money(Number(snap.dayClosedPl ?? 0))}` +
-      (gap === null ? "" : `  (equity-balance ${money(gap)})`);
+      (gap === null ? "" : `  unrealised ${money(gap)}`) +
+      `  day-open balance ${money(Number(dayOpenBalance))}` +
+      `  realised today ${money(Number.isFinite(bal) && Number.isFinite(Number(dayOpenBalance)) ? bal - Number(dayOpenBalance) : NaN)}`;
   },
   instrumentConfigs: enabledInstruments,
   riskSupervisor,
