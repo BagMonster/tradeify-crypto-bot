@@ -14,7 +14,7 @@ Replies longer than 4096 characters are split into `[1/n]` pages. That is normal
 
 `/b` (`/buttons`, `/menu`) shows the same commands as tappable buttons.
 
-**Confirm commands have no buttons.** `/confirmresume`, `/confirmreconcile`, and `/confirmrematch` need a typed one-time code plus the instrument name. A button may request a code. Only typing it confirms.
+**Confirm commands have no buttons.** `/confirmresume`, `/confirmreconcile`, `/confirmrematch`, and `/confirmrerun` need a typed one-time code. A button may request a code. Only typing it confirms.
 
 ---
 
@@ -98,6 +98,18 @@ Do **not** rematch after a manual flatten. That keeps the stale lot. Use `/recon
 
 Keeps current virtual lots, clears only that halt, lifts the pause. No broker order.
 
+### `/re-run`
+
+Account-wide. Allowed only while the latched halt is a production runtime error (`…production runtime error; owner review required`) **and** every enabled book already matches a fresh DXtrade net.
+
+Does **not** change virtual lots. Does **not** place an order. Does **not** lift an operator pause. `/rerun` is the same command.
+
+### `/confirmrerun CODE`
+
+Example: `/confirmrerun 123456`
+
+Clears that runtime halt only. Then `/status`. Bot should read RUNNING unless `/kill` is also on.
+
 ---
 
 ## Chronicle and companion
@@ -142,5 +154,5 @@ Telegram failure cannot undo a fill or delay a protective action.
 - Reconcile refused, broker open — flatten DXtrade first.
 - Rematch refused, books disagree — if the broker is flat, that is a reconcile, not a rematch.
 - `braked today: all five` with $0 combined P&L — supervisor could not read a book and fail-closed. Unread ≠ flat.
-- Safety halt still on after resume — resume only lifts the pause.
+- Safety halt still on after resume — resume only lifts the pause. A leftover runtime-error halt is `/re-run` when every book already matches.
 - Canary blocked — automatic execution is ON.

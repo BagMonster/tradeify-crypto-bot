@@ -10,7 +10,8 @@ export const DEFAULT_BOOKS = Object.freeze(["SOL", "DOGE", "INJ", "AAVE", "AVAX"
 export const CONFIRM_ONLY_COMMANDS = Object.freeze([
   "confirmresume",
   "confirmreconcile",
-  "confirmrematch"
+  "confirmrematch",
+  "confirmrerun"
 ]);
 
 const BOOK_PATTERN = /^[A-Z0-9]{2,8}$/;
@@ -79,7 +80,8 @@ export function buildHomeKeyboard(books = DEFAULT_BOOKS) {
     header("\u2014 Account \u2014"),
     pair(btn("All Status", "status"), btn("All Health", "health")),
     pair(btn("All Rings", "rings"), btn("All Levels", "levels")),
-    pair(btn("Pause Bot", "kill"), btn("Flatten Info", "flat")),
+    pair(btn("Pause Bot", "kill"), btn("Re-run Halt", "rerun")),
+    pair(btn("Flatten Info", "flat"), btn("Help", "help")),
     header("\u2014 Open a book \u2014"),
     ...bookRows,
     header("\u2014 More \u2014"),
