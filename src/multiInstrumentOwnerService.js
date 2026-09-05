@@ -50,6 +50,7 @@ export function formatRiskLadderLine(snapshot) {
 }
 
 export function createMultiInstrumentOwnerService({
+  brokerAccountLine = null,
   instrumentConfigs,
   buildOwnerService = createSolanaOwnerService,
   riskSupervisor = null,
@@ -156,6 +157,14 @@ export function createMultiInstrumentOwnerService({
       lines.push(`  risk reads: ${per.length}/${per.length} OK`);
     }
     lines.push(`  supervisor day: ${snapshot.dayKey ?? "not yet evaluated (no price tick processed since start)"}`);
+
+    // Raw broker figures, so a $0.00 combined line can be traced to its source rather
+    // than inferred. equity minus balance IS the account's open P&L; if that gap is
+    // non-zero while combined day P&L reads $0.00, the ladder is not seeing the broker.
+    if (typeof brokerAccountLine === "function") {
+      const raw = brokerAccountLine();
+      if (raw) lines.push(raw);
+    }
     if (snapshot.lastError) lines.push(`  supervisor note: ${snapshot.lastError}`);
     if (snapshot.flattenedToday === true) {
       lines.push("  *** ACCOUNT FLATTENED TODAY - all entries blocked until 22:00 UTC rollover ***");
