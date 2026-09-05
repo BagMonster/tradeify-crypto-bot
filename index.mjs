@@ -28,6 +28,8 @@ import { createSolanaOwnerService } from "./src/solanaOwnerService.js";
 import { createMultiInstrumentOwnerService } from "./src/multiInstrumentOwnerService.js";
 import { startTelegramBot } from "./src/telegramBot.js";
 
+const money = (v) => (Number.isFinite(v) ? `${v < 0 ? "-$" : "$"}${Math.abs(v).toFixed(2)}` : "unavailable");
+
 const configuration = await loadConfiguration();
 const { account, environment } = configuration;
 
@@ -217,18 +219,16 @@ const stackByInstrument = new Map(stacks.map((s) => [s.cfg.instrument, s]));
 
 // The account ladder reads the BROKER, not the strategy's per-tick cache.
 //
-// P&L comes from /metrics, NOT from the /positions overlay. DXtrade's /positions
-// payload is a position list — code, symbol, quantity, open price — and carries no
-// P&L. signedNetByInstrument therefore defaults openPl and notional to 0 for every
-// row, which is why the ladder read $0.00 while real positions were open. Nets were
-// correct because quantity and symbol have fallbacks; openPl has none.
+// DXtrade's /positions payload is a position LIST: code, symbol, quantity, open price.
+// It carries neither P&L nor markPrice. signedNetByInstrument therefore reports
+// openPl 0 and notional 0 for every row, which is why the ladder saw $0.00 while real
+// positions were open. Nets survived only because quantity and symbol have fallbacks.
 //
-// Combined day P&L is what the cut and flatten act on, and /metrics reports it for
-// the whole account, so that figure is exact. Per-instrument P&L is only needed for
-// the proportional allocation and the per-instrument brake; where /metrics supplies
-// per-position rows we use them, and otherwise we apportion the account figure by
-// each book's share of notional. That keeps the allocator directionally right rather
-// than silently zero.
+// P&L for the whole account comes from /metrics, which is exact and is what the cut
+// and flatten act on. Per-instrument figures are needed only for the proportional
+// allocation and the per-instrument brake, so the account figure is apportioned by
+// each book's share of live exposure. Exposure is computed from broker net units at
+// the book's own last traded price, because the broker gives no mark.
 //
 // D-054 is preserved: an unread account THROWS. The supervisor catches it, marks the
 // books unreadable, and brakes. Unknown is never reported as zero.
@@ -245,29 +245,40 @@ function accountMetrics() {
   return { snapshot, openPl, dayClosedPl };
 }
 
-function bookNotional(snapshot, instrument) {
-  const entry = snapshot.signedNetByInstrument?.[instrument];
-  const notional = Number(entry?.notional ?? 0);
-  return Number.isFinite(notional) ? Math.abs(notional) : 0;
+function bookNetUnits(snapshot, instrument) {
+  const units = Number(snapshot.signedNetByInstrument?.[instrument]?.netUnits ?? 0);
+  return Number.isFinite(units) ? Math.abs(units) : 0;
 }
 
-// Share of the account's exposure carried by one book, used to apportion account P&L
-// when per-position figures are unavailable.
-function notionalShare(snapshot, instrument) {
-  const own = bookNotional(snapshot, instrument);
-  const total = stacks.reduce((sum, s) => sum + bookNotional(snapshot, s.cfg.instrument), 0);
-  if (!(total > 0)) return 0;
-  return own / total;
+// Broker notional when the broker supplies one; otherwise net units at this book's
+// own last traded price. Exposure is reported, never used to trigger a rung, so a
+// price that is a few seconds old is acceptable here.
+function bookExposure(snapshot, instrument) {
+  const brokerNotional = Number(snapshot.signedNetByInstrument?.[instrument]?.notional ?? 0);
+  if (Number.isFinite(brokerNotional) && brokerNotional > 0) return Math.abs(brokerNotional);
+  const stack = stackByInstrument.get(instrument);
+  const price = Number(stack?.lastTrade?.price);
+  const units = bookNetUnits(snapshot, instrument);
+  if (!Number.isFinite(price) || price <= 0 || units === 0) return 0;
+  return units * price;
+}
+
+// Share of account P&L attributed to one book. Exposure-weighted when exposure is
+// known; otherwise split equally across the books that actually hold a position, so
+// the per-instrument figures always sum to the exact account P&L rather than to zero.
+function plShare(snapshot, instrument) {
+  const totalExposure = stacks.reduce((sum, s) => sum + bookExposure(snapshot, s.cfg.instrument), 0);
+  if (totalExposure > 0) return bookExposure(snapshot, instrument) / totalExposure;
+  const holding = stacks.filter((s) => bookNetUnits(snapshot, s.cfg.instrument) > 0);
+  if (holding.length === 0) return 0;
+  return bookNetUnits(snapshot, instrument) > 0 ? 1 / holding.length : 0;
 }
 
 function instrumentPl(instrument, field) {
   const { snapshot, openPl, dayClosedPl } = accountMetrics();
-  const entry = snapshot.signedNetByInstrument?.[instrument];
-  const direct = Number(entry?.[field]);
-  // Use a per-position figure when the broker actually supplied one.
-  if (Number.isFinite(direct) && direct !== 0) return direct;
-  const accountValue = field === "openPl" ? openPl : dayClosedPl;
-  return accountValue * notionalShare(snapshot, instrument);
+  const direct = Number(snapshot.signedNetByInstrument?.[instrument]?.[field]);
+  if (Number.isFinite(direct) && direct !== 0) return direct;   // broker gave a real figure
+  return (field === "openPl" ? openPl : dayClosedPl) * plShare(snapshot, instrument);
 }
 
 const riskSupervisor = createRiskSupervisor({
@@ -276,7 +287,7 @@ const riskSupervisor = createRiskSupervisor({
     instrument: s.cfg.instrument,
     getUnrealisedUsd: () => instrumentPl(s.cfg.instrument, "openPl"),
     getDayPnlUsd: () => instrumentPl(s.cfg.instrument, "dayClosedPl") + instrumentPl(s.cfg.instrument, "openPl"),
-    getExposureUsd: () => bookNotional(accountMetrics().snapshot, s.cfg.instrument),
+    getExposureUsd: () => bookExposure(accountMetrics().snapshot, s.cfg.instrument),
     setEntryBrake: (on) => s.runtime.setEntryBrake(on),
     executeProtectiveCut: (args) => s.runtime.executeProtectiveCut(args),
     executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args)
@@ -465,6 +476,20 @@ const liveCanary = createSolanaLiveCanary({
 });
 
 const service = createMultiInstrumentOwnerService({
+  // Surfaces the raw /metrics figures in /status. equity - balance is the account's
+  // open P&L; if that gap is non-zero while combined day P&L reads $0.00, the ladder
+  // is not reading the broker and the numbers above it cannot be trusted.
+  brokerAccountLine: () => {
+    const accountStatus = accountMonitor.getSnapshot();
+    if (accountStatus?.healthy !== true) return "  broker: account data unavailable";
+    const snap = accountStatus.snapshot ?? {};
+    const eq = Number(snap.equity);
+    const bal = Number(snap.balance);
+    const gap = Number.isFinite(eq) && Number.isFinite(bal) ? eq - bal : null;
+    return `  broker /metrics: equity ${money(eq)}  balance ${money(bal)}` +
+      `  openPl ${money(Number(snap.openPl))}  dayClosedPl ${money(Number(snap.dayClosedPl ?? 0))}` +
+      (gap === null ? "" : `  (equity-balance ${money(gap)})`);
+  },
   instrumentConfigs: enabledInstruments,
   riskSupervisor,
   // Required by /re-run. Without `database` the rerun handlers degrade to
