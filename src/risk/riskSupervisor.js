@@ -50,6 +50,8 @@ export function createRiskSupervisor({
   harvestStore = null,
   getCombinedDayPnlUsd = null,
   setSafetyHalt = async () => {},
+  clearSafetyHaltIfReason = async () => false,
+  getSafetyHaltState = async () => null,
   now = () => Date.now()
 }) {
   if (!config || typeof config !== "object") throw new TypeError("risk config is required");
@@ -117,6 +119,7 @@ export function createRiskSupervisor({
   let cutsToday = 0;
   const brakedToday = new Set();
   let evaluating = false;
+  let hasSuccessfulRead = false;
   let lastError = null;
 
   function stickyBrake(instrument) {
@@ -289,7 +292,12 @@ export function createRiskSupervisor({
         await addEvent("ERROR", "RISK_SUPERVISOR_ACCOUNT_DATA_UNAVAILABLE", {
           instruments: unreadable.map((r) => r.instrument)
         });
-        if (sessionHarvestEnabled) {
+        // A worker must not create an irreversible daily harvest halt merely
+        // because its first account poll has not populated the in-memory book
+        // snapshots yet. Feeds are not allowed to act until a later successful
+        // preflight. Once fresh data has been read, any later unread result is
+        // a real fail-closed D-064 halt.
+        if (sessionHarvestEnabled && hasSuccessfulRead) {
           const reason = `D-064 harvest cannot verify fresh broker account data for ${unreadable.map((r) => r.instrument).join(", ")}`;
           const halted = await haltHarvest({
             incomingDayKey,
@@ -301,6 +309,7 @@ export function createRiskSupervisor({
         return Object.freeze({ action: "ACCOUNT_DATA_UNAVAILABLE", instruments: unreadable.map((r) => r.instrument) });
       }
       lastError = null;
+      hasSuccessfulRead = true;
 
       const suppliedCombined = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
       const combined = fixed2(Number.isFinite(suppliedCombined) ? suppliedCombined : readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
@@ -419,6 +428,42 @@ export function createRiskSupervisor({
     }
   }
 
+  async function recoverHarvest({ dayKey: incomingDayKey, booksVerified = false } = {}) {
+    if (!sessionHarvestEnabled) return Object.freeze({ action: "HARVEST_DISABLED" });
+    if (typeof incomingDayKey !== "string" || incomingDayKey === "") throw new TypeError("recoverHarvest requires a dayKey");
+    if (booksVerified !== true) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED" });
+    if (incomingDayKey !== dayKey) rollover(incomingDayKey);
+    const prior = await loadHarvest(incomingDayKey);
+    if (prior.status !== "HALTED") return Object.freeze({ action: "HARVEST_NOT_HALTED", harvest: prior });
+    // A failed flatten or any other D-064 halt is manual-review only. This path
+    // exists solely for the false initial-read halt that can occur while startup
+    // snapshots are still cold.
+    if (typeof prior.haltReason !== "string" || !prior.haltReason.startsWith("D-064 harvest cannot verify fresh broker account data for ")) {
+      return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
+    }
+    const readings = readBooks();
+    if (readings.some((reading) => reading.readFailed)) return Object.freeze({ action: "ACCOUNT_DATA_UNAVAILABLE", harvest: prior });
+    let combined;
+    try {
+      const supplied = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
+      combined = fixed2(Number.isFinite(supplied) ? supplied : readings.reduce((sum, reading) => sum + reading.dayPnlUsd, 0));
+    } catch {
+      return Object.freeze({ action: "ACCOUNT_DATA_UNAVAILABLE", harvest: prior });
+    }
+    const safety = await getSafetyHaltState();
+    if (safety?.safety_halt === true) {
+      // Compare and clear atomically: recovery cannot erase a newer, unrelated
+      // safety halt that arrived after the owner requested this confirmation.
+      if (safety.halt_reason !== prior.haltReason) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
+      const cleared = await clearSafetyHaltIfReason(prior.haltReason);
+      if (!cleared) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
+    }
+    await saveHarvest({ dayKey: incomingDayKey, status: "READY", triggerPnlUsd: null, confirmedAt: null, haltReason: null });
+    applyHarvestGates();
+    hasSuccessfulRead = true;
+    return evaluate({ dayKey: incomingDayKey });
+  }
+
   function getSnapshot() {
     const readings = readBooks();
     const suppliedCombined = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
@@ -456,5 +501,5 @@ export function createRiskSupervisor({
     });
   }
 
-  return Object.freeze({ evaluate, getSnapshot, allocateProportionalCut });
+  return Object.freeze({ evaluate, recoverHarvest, getSnapshot, allocateProportionalCut });
 }
