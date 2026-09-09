@@ -41,10 +41,11 @@ test("approved notification classes have distinct trade and safety presentation"
   const runtimeHalt = formatLiveTelegramNotification({
     kind: "SAFETY_HALT",
     eventKey: "SOL-RUNTIME-HALT:20260824-15",
-    reasonCode: "SOL_RUNTIME_ERROR"
+    reasonCode: "SOL_RUNTIME_ERROR",
+    instrument: "SOL/USD"
   });
-  assert.match(runtimeHalt.message, /^🚨 SOL SAFETY HALT — SOL_RUNTIME_ERROR/m);
-  assert.match(runtimeHalt.message, /Owner review is required/);
+  assert.match(runtimeHalt.message, /^🚨 SOL\/USD SAFETY HALT — SOL_RUNTIME_ERROR/m);
+  assert.match(runtimeHalt.message, /\/rerun/);
 
   const protective = formatLiveTelegramNotification({
     kind: "PROTECTIVE_FLATTEN_CONFIRMED",
