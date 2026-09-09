@@ -188,6 +188,7 @@ export function createMultiInstrumentOwnerService({
     },
     levelsText: (arg) => fanOut("levelsText", arg),
     ringsText: (arg) => fanOut("ringsText", arg),
+    targetsText: (arg) => fanOut("targetsText", arg),
     dxPreflightText: (arg) => fanOut("dxPreflightText", arg),
     canaryText: (arg) => fanOut("canaryText", arg),
 

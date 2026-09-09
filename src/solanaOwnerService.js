@@ -9,6 +9,7 @@ import {
   formatInstrumentLevels,
   formatInstrumentRings
 } from "./monitoring/instrumentOwnerText.js";
+import { formatInstrumentTargets } from "./format/instrumentTargets.js";
 
 /** @deprecated use brokerBookLines(accountMonitor, instrument) */
 export function brokerSnapshotLines(accountMonitor, instrument = "SOL/USD") {
@@ -125,6 +126,18 @@ export function createSolanaOwnerService(opts) {
     });
   }
 
+  async function targetsText() {
+    if (!definition) return "Exit targets are only available for ring-grid instruments.";
+    const inputs = await ringInputs();
+    if (inputs.error) return inputs.error;
+    return formatInstrumentTargets({
+      definition,
+      gridState: await loadLiveState(),
+      price: inputs.price,
+      ma: inputs.ma
+    });
+  }
+
   async function inspectForRerun() {
     await refreshBrokerSnapshot();
     const instrument = definition?.instrument ?? opts.instrument;
@@ -163,6 +176,7 @@ export function createSolanaOwnerService(opts) {
     healthText,
     levelsText,
     ringsText,
+    targetsText,
     inspectForRerun,
     trustedSignedNetFor: (instrument) => trustedSignedNetFor(opts.accountMonitor?.getSnapshot?.(), instrument)
   });
