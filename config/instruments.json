@@ -19,6 +19,8 @@
     "fullFlattenUsd": 1250,
     "flattenHoldsUntilRollover": true,
     "dailyLossLimitUsd": 1500,
-    "rolloverHourUtc": 22
+    "rolloverHourUtc": 22,
+    "sessionHarvestEnabled": false,
+    "sessionHarvestUsd": 250
   }
 }
