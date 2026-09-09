@@ -1,26 +1,11 @@
 /**
  * src/risk/riskSupervisor.js
  *
- * D-060: the account-level risk ladder.
- *
- * Three rungs, evaluated in this order:
- *
- *   1. FULL FLATTEN   combined day P&L <= -fullFlattenUsd
- *   2. PARTIAL CUT    combined day P&L <= -partialCutUsd
- *   3. ENTRY BRAKE    per instrument on that instrument's own day P&L
- *   4. SESSION HARVEST combined day P&L >= +sessionHarvestUsd (D-064, off by default)
- *
- * Harvest flattens every book once per dayKey, does not set flattenedToday,
- * does not entry-brake, and pauses tranche exits until rollover.
- *
- * An unreadable book is not a flat book. Flatten and cut still wait until every
- * book can be read. Entries are different: only the unreadable book is paused,
- * and that pause is transient. It is not recorded as "braked today". When the
- * snapshot is readable again and that book has not lost -$entryBrakeUsd, entries
- * resume. A real -$300 brake, or a flatten, still holds until rollover.
+ * D-060 account ladder plus D-064 session harvest.
+ * Harvest is enabled from config/instruments.json (sessionHarvestEnabled).
  */
 
-import { harvestReason, shouldHarvest } from "./sessionHarvest.js";
+import { harvestReason, setTrancheExitsPausedAll, shouldHarvest } from "./sessionHarvest.js";
 
 const REQUIRED_CONFIG = Object.freeze([
   "entryBrakeUsd",
@@ -141,12 +126,13 @@ export function createRiskSupervisor({
   }
 
   function applyTrancheExitPause(on) {
+    setTrancheExitsPausedAll(instruments.map((book) => book.instrument), on);
     for (const book of instruments) {
       if (typeof book.setTrancheExitsPaused !== "function") continue;
       try {
         book.setTrancheExitsPaused(on === true);
       } catch {
-        // optional gate — missing method is not a risk-ladder failure
+        // optional instance gate
       }
     }
   }
