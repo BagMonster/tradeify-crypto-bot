@@ -37,6 +37,7 @@ const HELP_TEXT = [
   "/confirmreconcile CODE INSTRUMENT - type the code; not a button",
   "/harvestrecover - request guarded recovery of the D-064 fresh-data startup halt",
   "/confirmharvestrecover CODE - type the code; every book must already reconcile",
+  "/pausehalt - defer the pending non-harvest safety halt into a fresh 25-minute warning cycle",
   "/rematch INSTRUMENT - request a keep-lots rematch code for one book",
   "/confirmrematch CODE INSTRUMENT - type the code; not a button",
   "/re-run - clear a production runtime-error halt when every book already matches",
@@ -284,6 +285,10 @@ export async function startTelegramBot({
     await sendLatched(message.chat.id, "/confirmharvestrecover", await service.confirmHarvestRecovery(match?.[1] ?? ""));
   }));
 
+  bot.onText(/^\/pausehalt(?:@\w+)?$/i, withAuthorization(async (message) => {
+    await sendLatched(message.chat.id, "/pausehalt", await service.pauseHalt());
+  }));
+
   bot.onText(/^\/rematch(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
     const result = await service.requestRematch(match?.[1]);
     await sendLatched(message.chat.id, "/rematch", result.message);
@@ -498,6 +503,7 @@ export async function startTelegramBot({
     { command: "resume", description: "Request a resume code for one book" },
     { command: "reconcile", description: "Request a virtual flatten code" },
     { command: "harvestrecover", description: "Recover a verified D-064 startup halt" },
+    { command: "pausehalt", description: "Defer a pending non-harvest halt" },
     { command: "rematch", description: "Rematch one book" },
     // Telegram command names allow only a-z, 0-9 and _, so the menu entry is "rerun".
     // The handler accepts /re-run and /rerun. confirmrerun stays OFF this list for the
