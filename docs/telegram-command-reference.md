@@ -14,7 +14,7 @@ Replies longer than 4096 characters are split into `[1/n]` pages. That is normal
 
 `/b` (`/buttons`, `/menu`) shows the same commands as tappable buttons.
 
-**Confirm commands have no buttons.** `/confirmresume`, `/confirmreconcile`, `/confirmrematch`, and `/confirmrerun` need a typed one-time code. A button may request a code. Only typing it confirms.
+**Confirm commands have no buttons.** `/confirmresume`, `/confirmreconcile`, `/confirmrematch`, `/confirmharvestrecover`, and `/confirmrerun` need a typed one-time code. A button may request a code. Only typing it confirms.
 
 ---
 
@@ -88,6 +88,14 @@ Refused while DXtrade still shows an open position on that check.
 ### `/confirmreconcile CODE INSTRUMENT`
 
 Empties virtual lots, rearms rings, writes an audit event, clears a reconciliation halt. **Does not** place a DXtrade order. **Does not** lift the operator pause. Then `/status INSTRUMENT`. If both sides are zero and you want it trading, `/resume` separately.
+
+### `/harvestrecover`
+
+Account-wide D-064 recovery for one case only: the harvest is halted because its initial fresh broker-account read was unavailable. It first reads every enabled book and refuses unless every virtual net matches a fresh DXtrade net. A failed harvest flatten, a different safety halt, unread broker data, or any mismatch remains blocked.
+
+### `/confirmharvestrecover CODE`
+
+Repeats the all-book reconciliation and fresh account-data checks, then clears only the same D-064 fresh-data halt. It does not change virtual lots, place or cancel a DXtrade order, or lift the operator pause. If fresh account-day P&L is at least the harvest threshold, normal D-064 harvesting immediately resumes.
 
 ### `/rematch INSTRUMENT`
 
