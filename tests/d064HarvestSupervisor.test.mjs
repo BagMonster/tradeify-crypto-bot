@@ -69,7 +69,8 @@ test("D-064 terminal harvest failure is durable and fail-closed", async () => {
 
 test("D-064 unread broker data becomes a durable halt that pauses normal exits", async () => {
   const sol = book("SOL/USD");
-  sol.getDayPnlUsd = () => { throw new Error("broker metrics unavailable"); };
+  let unread = false;
+  sol.getDayPnlUsd = () => { if (unread) throw new Error("broker metrics unavailable"); return 0; };
   const halts = [];
   const supervisor = createRiskSupervisor({
     config,
@@ -78,11 +79,44 @@ test("D-064 unread broker data becomes a durable halt that pauses normal exits",
     getCombinedDayPnlUsd: () => 0,
     setSafetyHalt: async (reason) => halts.push(reason)
   });
+  await supervisor.evaluate({ dayKey: "2026-09-09" });
+  unread = true;
   const result = await supervisor.evaluate({ dayKey: "2026-09-09" });
   assert.equal(result.action, "HARVEST_HALTED");
   assert.equal(supervisor.getSnapshot().harvest.status, "HALTED");
   assert.equal(supervisor.getSnapshot().trancheExitsPaused, true);
   assert.equal(halts.length, 1);
+});
+
+test("D-064 first cold read waits without creating a durable halt, then recovers on fresh data", async () => {
+  const sol = book("SOL/USD");
+  let unread = true;
+  sol.getDayPnlUsd = () => { if (unread) throw new Error("cold account snapshot"); return 0; };
+  const store = memoryHarvestStore();
+  const supervisor = createRiskSupervisor({ config, instruments: [sol], harvestStore: store, getCombinedDayPnlUsd: () => 0, clearSafetyHaltIfReason: async () => true });
+  assert.equal((await supervisor.evaluate({ dayKey: "2026-09-09" })).action, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.equal(supervisor.getSnapshot().harvest, null);
+  unread = false;
+  assert.equal((await supervisor.evaluate({ dayKey: "2026-09-09" })).action, "NONE");
+});
+
+test("D-064 recovery clears only its own fresh-data halt after a fresh read and verified books", async () => {
+  const store = memoryHarvestStore();
+  const reason = "D-064 harvest cannot verify fresh broker account data for SOL/USD";
+  await store.save({ dayKey: "2026-09-09", status: "HALTED", triggerPnlUsd: 0, confirmedAt: null, haltReason: reason });
+  const sol = book("SOL/USD");
+  const supervisor = createRiskSupervisor({ config, instruments: [sol], harvestStore: store, getCombinedDayPnlUsd: () => 0, clearSafetyHaltIfReason: async (value) => value === reason, getSafetyHaltState: async () => ({ safety_halt: true, halt_reason: reason }) });
+  const result = await supervisor.recoverHarvest({ dayKey: "2026-09-09", booksVerified: true });
+  assert.equal(result.action, "NONE");
+  assert.equal(supervisor.getSnapshot().harvest.status, "READY");
+});
+
+test("D-064 recovery cannot clear a terminal harvest halt or skip book verification", async () => {
+  const store = memoryHarvestStore();
+  await store.save({ dayKey: "2026-09-09", status: "HALTED", triggerPnlUsd: 250, confirmedAt: null, haltReason: "D-064 harvest could not confirm every book flat; owner review required" });
+  const supervisor = createRiskSupervisor({ config, instruments: [book("SOL/USD")], harvestStore: store, getCombinedDayPnlUsd: () => 0 });
+  assert.equal((await supervisor.recoverHarvest({ dayKey: "2026-09-09", booksVerified: true })).action, "HARVEST_RECOVERY_REFUSED");
+  assert.equal((await supervisor.recoverHarvest({ dayKey: "2026-09-09" })).action, "HARVEST_RECOVERY_REFUSED");
 });
 
 test("D-064 reset at 22:00 UTC re-enables normal exits for the new account day", async () => {
