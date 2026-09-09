@@ -1,3 +1,5 @@
+import { isTrancheExitsPaused } from "../risk/sessionHarvest.js";
+
 function positive(name, value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) throw new TypeError(`${name} must be positive`);
@@ -82,6 +84,10 @@ export function createRingGridInstance({
     return result;
   }
 
+  function exitsPaused() {
+    return trancheExitsPaused === true || isTrancheExitsPaused(instrument);
+  }
+
   async function process(input) {
     const trade = canonicalTrade(input, marketSymbol);
     const maState = await maProvider.getCurrent();
@@ -89,7 +95,7 @@ export function createRingGridInstance({
     let state = await load();
     const rearmed = grid.observeRearm(state, { price: trade.price, ma });
     if (rearmed.version !== state.version) state = await store.save(state.version, rearmed);
-    while (!trancheExitsPaused) {
+    while (!exitsPaused()) {
       const action = grid.nextExitAction(state, { price: trade.price, ma });
       if (!action) break;
       if (action.type === "SKIP_EXIT") { state = await store.save(state.version, grid.applySkippedExit(state, action)); continue; }
@@ -159,7 +165,7 @@ export function createRingGridInstance({
     }
     previousPrice = trade.price;
     currentState = state;
-    await addEvent("INFO", "D060_RING_INSTANCE_PROCESSED", { instrument, stateVersion: state.version, entryBrake, trancheExitsPaused });
+    await addEvent("INFO", "D060_RING_INSTANCE_PROCESSED", { instrument, stateVersion: state.version, entryBrake, trancheExitsPaused: exitsPaused() });
     return Object.freeze({ status: entryBrake ? "BRAKED" : "PROCESSED", state, ma });
   }
 
@@ -172,7 +178,7 @@ export function createRingGridInstance({
     cut,
     flatten,
     getEntryBrake: () => entryBrake,
-    getTrancheExitsPaused: () => trancheExitsPaused,
+    getTrancheExitsPaused: () => exitsPaused(),
     getState: () => currentState
   });
 }
