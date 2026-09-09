@@ -149,9 +149,12 @@ export function createMultiInstrumentOwnerService({
     }
     const harvestUsd = Number(snapshot.sessionHarvestUsd);
     if (snapshot.sessionHarvestEnabled === true && Number.isFinite(harvestUsd)) {
-      const banked = snapshot.harvestedToday === true;
+      const harvest = snapshot.harvest ?? { status: snapshot.harvestedToday === true ? "CONFIRMED" : "READY" };
       const exits = snapshot.trancheExitsPaused === true ? "OFF" : "ON";
-      lines.push(`  harvest: +${harvestUsd.toFixed(2)} · banked today ${banked ? "YES" : "NO"} · tranche exits ${exits}`);
+      lines.push(`  harvest: +${harvestUsd.toFixed(2)} · ${harvest.status} · tranche exits ${exits}`);
+      if (Number.isFinite(Number(harvest.triggerPnlUsd))) lines.push(`  harvest trigger P&L: ${money(Number(harvest.triggerPnlUsd))}`);
+      if (harvest.confirmedAt) lines.push(`  harvest confirmed: ${harvest.confirmedAt}`);
+      if (harvest.haltReason) lines.push(`  harvest halt: ${harvest.haltReason}`);
     } else {
       lines.push("  harvest: OFF");
     }
