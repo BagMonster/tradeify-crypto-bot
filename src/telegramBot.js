@@ -27,6 +27,7 @@ const HELP_TEXT = [
   "/health [INSTRUMENT] - worker, PostgreSQL, MA, execution",
   "/levels [INSTRUMENT] - ring ladder; omit for all five",
   "/rings [INSTRUMENT] - where price sits versus each book",
+  "/targets [INSTRUMENT] - exit target price for every open lot",
   "/dxpreflight - inspect order settings without placing an order",
   "/canary - inspect the lifecycle canary; only while automatic execution is OFF",
   "/kill - pause every book",
@@ -236,6 +237,10 @@ export async function startTelegramBot({
     await sendLatched(message.chat.id, "/rings", await service.ringsText(match?.[1]));
   }));
 
+  bot.onText(/^\/targets(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/targets", await service.targetsText(match?.[1]));
+  }));
+
   bot.onText(/^\/dxpreflight(?:@\w+)?$/i, withAuthorization(async (message) => {
     await bot.sendMessage(message.chat.id, "Running DXtrade validation-only preflight. No order will be placed.");
     await sendLatched(message.chat.id, "/dxpreflight", await service.dxPreflightText());
@@ -326,6 +331,7 @@ export async function startTelegramBot({
     health: (chatId, _query, symbol) => runLatched(chatId, "/health", () => service.healthText(instrumentArg(symbol))),
     levels: (chatId, _query, symbol) => runLatched(chatId, "/levels", () => service.levelsText(instrumentArg(symbol))),
     rings: (chatId, _query, symbol) => runLatched(chatId, "/rings", () => service.ringsText(instrumentArg(symbol))),
+    targets: (chatId, _query, symbol) => runLatched(chatId, "/targets", () => service.targetsText(instrumentArg(symbol))),
     flat: (chatId, _query, symbol) => runLatched(chatId, "/flat", () => service.flatInstructions(instrumentArg(symbol))),
     kill: (chatId) => runLatched(chatId, "/kill", () => service.kill()),
     resume: async (chatId, _query, symbol) => {
@@ -474,6 +480,7 @@ export async function startTelegramBot({
     { command: "health", description: "Check worker and database" },
     { command: "levels", description: "Show ring levels" },
     { command: "rings", description: "Show live position versus rings" },
+    { command: "targets", description: "Exit target price for every open lot" },
     { command: "dxpreflight", description: "Inspect instrument settings" },
     { command: "solcanary", description: "Inspect approved lifecycle canary" },
     { command: "kill", description: "Pause every book" },

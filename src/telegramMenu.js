@@ -80,6 +80,7 @@ export function buildHomeKeyboard(books = DEFAULT_BOOKS) {
     header("\u2014 Account \u2014"),
     pair(btn("All Status", "status"), btn("All Health", "health")),
     pair(btn("All Rings", "rings"), btn("All Levels", "levels")),
+    pair(btn("Exit Targets", "targets")),
     pair(btn("Pause Bot", "kill"), btn("Re-run Halt", "rerun")),
     pair(btn("Flatten Info", "flat"), btn("Help", "help")),
     header("\u2014 Open a book \u2014"),
@@ -97,6 +98,7 @@ export function buildBookKeyboard(symbol) {
     header(`\u2014 ${tag}/USD \u2014`),
     pair(btn("Status", `status:${tag}`), btn("Health", `health:${tag}`)),
     pair(btn("Rings", `rings:${tag}`), btn("Levels", `levels:${tag}`)),
+    pair(btn("Exit Targets", `targets:${tag}`)),
     pair(btn("Request Resume", `resume:${tag}`), btn("Request Reconcile", `reconcile:${tag}`)),
     pair(btn("Request Rematch", `rematch:${tag}`), btn("Flatten Info", `flat:${tag}`)),
     pair(btn("\u00ab All books", "menu"), btn("Help", "help"))
