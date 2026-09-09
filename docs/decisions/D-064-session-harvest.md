@@ -1,51 +1,28 @@
-# D-064 — Session harvest (payoff grid)
+# D-064 — $100,000 five-book sizing and session harvest
 
-**Status:** DRAFT / not authorized to deploy  
-**Branch:** `feat/d064-session-harvest`  
-**Worker:** trading worker only (`index.mjs` path). Do not deploy the companion worker for this.  
-**Main tip when opened:** `b5dca9e`  
-**Do not merge** until the owner’s independent ChatGPT audit passes.
+**Status:** Approved for this PR after owner review; live on deployment only after merge.
+**Scope:** Trading worker only. The companion worker receives no trading authority.
 
-## Intent
+## Decision
 
-Turn the live five-book ring grid into a *payout-shaped* grid for Tradeify consistency:
+- Each enabled book has a `$100,000` virtual-gross cap. There is no additional multi-book entry rejection solely because combined valid book exposure exceeds the retired single-strategy `$100,000` setting.
+- The Tradeify account day runs from **22:00 UTC to 22:00 UTC**.
+- A fresh, readable broker account-day P&L of **+$250 or more** triggers one session harvest. The value includes realized and unrealized P&L: equity minus the account-day opening balance.
+- Harvest is evaluated before ordinary grid entries or tranche exits on each live tick.
+- On trigger, the bot enters durable `PENDING`, pauses ordinary entries and exits, and closes every enabled broker book through the existing position-linked protective-close path.
+- Only fresh broker confirmation that every enabled book is flat changes the day to `CONFIRMED`.
+- While confirmed, new entries may occur only on the normal live touch-cross rule. Ordinary tranche-profit exits remain disabled until the next 22:00 UTC rollover.
+- A terminal close rejection, unread broker book, or non-flat verification changes the day to `HALTED`, preserves the pause, sets the durable safety halt, and alerts the owner.
+- Protective loss cuts and the account protective flatten always remain available.
 
-1. When **combined day P&L** (same figure `/status` already prints) reaches **+$250**, flatten **every** enabled book.
-2. After that harvest, **entries stay on**. New risk only on a live ring **touch-cross** (`entryCandidates`).
-3. **Tranche exits stay off** until the 22:00 UTC account day rolls (`accountDayKey`, UTC+2 offset).
-4. D-063 ladder is unchanged: brake **−$600**/instrument, cuts **10%/−$500**, **20%/−$750**, **50%/−$1,000** on *combined* day P&L, flatten **−$1,250**, daily **−$1,500**.
-5. Risk flatten still wins. A −$1,250 day is a risk flatten (`flattenedToday`), which **does** brake entries until rollover. Harvest is not that path.
+## Operator visibility
 
-## What this PR does *not* do
+Telegram and `/status` show harvest `READY`, `PENDING`, `CONFIRMED`, or `HALTED`. The worker sends notifications for pending, confirmed, halted, and account-day reset transitions. PostgreSQL stores the state keyed to the account-day key so a Railway restart cannot re-enable exits early or permit a second harvest.
 
-- Does **not** raise `capUsd`. Live books stay **$10,000**. 10× is a later config change (`capUsd: 100000`), not this merge.
-- Does **not** enable harvest. `sessionHarvestEnabled` is **false**. Merge + deploy is a no-op for execution.
-- Does **not** resize open lots.
-- Does **not** use `/reconcile`.
-- Does **not** change companion voice.
+## Deployment
 
-## Enablement after audit (owner only)
+The corrected sizing and harvest settings activate together in the first deployment after this PR merges. The current account day is immediately in scope: after startup, a fresh account snapshot at or above `+$250` begins the harvest path even if the bot was previously paused and manually flattened.
 
-1. Merge this PR. Deploy **trading worker only**. Confirm `/status` shows `harvest: OFF`.
-2. Set `accountRisk.sessionHarvestEnabled` to `true` in a follow-up (still `$10,000` cap). Harvest will not fire at today’s ~$28 mark.
-3. After a 22:00 UTC rollover, raise `capUsd` to `100000` if 10× new fills are still wanted. Open lots stay 1× until they die or a harvest closes them.
+## Verification
 
-## Flags
-
-| Flag | Meaning |
-|---|---|
-| `flattenedToday` | Risk flatten. Entries braked until rollover. |
-| `harvestedToday` | Quota flatten. Entries **on**, tranche exits **off** until rollover. |
-| `brakedToday` | Per-instrument entry brake at −$600 day P&L. |
-
-Harvest fires **once** per `dayKey`. If refill then goes red, there is no second harvest.
-
-## Audit checklist
-
-- Disabled config cannot flatten at +$250.
-- Enabled config flattens all books at +$250 and does **not** call `setEntryBrake(true)` for that action.
-- After harvest, `nextExitAction` is not executed; `entryCandidates` still run.
-- Combined −$1,250 still risk-flattens and brakes entries.
-- Unread book is still `ACCOUNT_DATA_UNAVAILABLE`, not a harvest.
-- Rollover at 22:00 UTC clears `harvestedToday` and turns tranche exits back on.
-- `/status` account block prints harvest state without truncating `telegramBot.js`.
+The PR must pass syntax, full tests, D-064 state/restart tests, notification tests, and a final review of `/status` before merge. It must not be merged or deployed until those checks pass.
