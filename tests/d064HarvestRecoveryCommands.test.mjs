@@ -101,3 +101,31 @@ test("D-064 command confirms only after all books match and keeps the operator p
   assert.equal(database.state.resume_code_hash, null);
   assert.equal(database.events.some((event) => event.type === "D064_HARVEST_RECOVERY_APPLIED"), true);
 });
+
+test("verified startup recovery clears only the matching, reconciled D-064 freshness halt", async () => {
+  const database = databaseStub();
+  const supervisor = supervisorStub();
+  const rows = [
+    { instrument: "SOL/USD", ok: true, match: true, virtualNet: 0, brokerNet: 0, openLots: 0 },
+    { instrument: "DOGE/USD", ok: true, match: true, virtualNet: 0, brokerNet: 0, openLots: 0 }
+  ];
+  const service = serviceFor({ database, supervisor, rows });
+  const result = await service.recoverVerifiedD064AtStartup();
+  assert.equal(result.action, "NONE");
+  assert.equal(supervisor.recovery.booksVerified, true);
+  assert.equal(database.events.some((event) => event.type === "D064_VERIFIED_STARTUP_RECOVERY"), true);
+});
+
+test("verified startup recovery refuses a different persisted safety halt", async () => {
+  const database = databaseStub();
+  database.state.halt_reason = "D-049 protective full flatten did not confirm flat";
+  const supervisor = supervisorStub();
+  const rows = [
+    { instrument: "SOL/USD", ok: true, match: true, virtualNet: 0, brokerNet: 0, openLots: 0 },
+    { instrument: "DOGE/USD", ok: true, match: true, virtualNet: 0, brokerNet: 0, openLots: 0 }
+  ];
+  const service = serviceFor({ database, supervisor, rows });
+  const result = await service.recoverVerifiedD064AtStartup();
+  assert.equal(result.action, "DIFFERENT_SAFETY_HALT");
+  assert.equal(supervisor.recovery, null);
+});
