@@ -1,16 +1,25 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { describeVirtualBook } from "./solanaReconcile.js";
-import { netsMatch, signedNetFromOpenPositions } from "../account/dxtradeSignedNet.js";
+import { netsMatch, signedNetFromOpenPositions, trustedSignedNetFor } from "../account/dxtradeSignedNet.js";
 
 export const RECONCILIATION_HALT_REASON =
   "SOL virtual-lot state does not reconcile to the DXtrade net SOL position; owner review required";
 
-export function isReconciliationHalt(reason) {
-  return reason === RECONCILIATION_HALT_REASON;
+const FIFTEEN_MINUTE_RECON_HALT =
+  /^([A-Z0-9]+\/[A-Z]+) virtual-lot state does not reconcile to the DXtrade net position after 15 minutes; owner review required$/;
+
+export function isReconciliationHalt(reason, instrument = null) {
+  // Unscoped calls retain the classifier used by status/diagnostics. Commands
+  // must pass their named book so a clean INJ rematch can never clear a SOL or
+  // AAVE reconciliation halt from the single global safety-halt row.
+  if (reason === RECONCILIATION_HALT_REASON) return instrument === null || instrument === "SOL/USD";
+  if (typeof reason !== "string") return false;
+  const match = reason.match(FIFTEEN_MINUTE_RECON_HALT);
+  return match !== null && (instrument === null || match[1] === instrument);
 }
 
-export function hasReconciliationHalt(state) {
-  return state?.safety_halt === true && isReconciliationHalt(state.halt_reason);
+export function hasReconciliationHalt(state, instrument = null) {
+  return state?.safety_halt === true && isReconciliationHalt(state.halt_reason, instrument);
 }
 
 function otherHaltMessage(reason) {
@@ -19,7 +28,7 @@ function otherHaltMessage(reason) {
     "",
     `Current halt: ${reason}`,
     "",
-    "Rematch only clears the exact false-flat reconciliation halt.",
+    "Rematch only clears a virtual-vs-broker reconciliation halt, including the 15-minute instrument halt.",
     "A runtime, D-049, or protective-order halt must be resolved on its own path."
   ].join("\n");
 }
@@ -30,7 +39,7 @@ function noReconciliationHaltMessage(state) {
     "REMATCH REFUSED — NO RECONCILIATION HALT",
     "",
     "Rematch is not an alternate /resume path.",
-    "It is allowed only while the exact reconciliation-mismatch safety halt is latched."
+    "It is allowed only while a reconciliation-mismatch safety halt is latched."
   ].join("\n");
 }
 
@@ -43,13 +52,50 @@ function safeHexEqual(left, right) {
   return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 }
 
+function resolveInstrument(opts) {
+  const fromDefinition = opts?.gridDefinition?.instrument;
+  if (typeof fromDefinition === "string" && fromDefinition.includes("/")) return fromDefinition;
+  if (typeof opts?.instrument === "string" && opts.instrument.includes("/")) return opts.instrument;
+  return "SOL/USD";
+}
+
+function instrumentLabel(instrument) {
+  return instrument === "SOL/USD" ? "SOL" : instrument;
+}
+
+function describeBook(state, grid) {
+  if (grid && typeof grid.expectedNetUnits === "function" && state?.rings) {
+    const openLots = state.rings.reduce((n, ring) => n + (Array.isArray(ring.lots) ? ring.lots.length : 0), 0);
+    const occupied = state.rings.filter((ring) => Array.isArray(ring.lots) && ring.lots.length > 0).map((ring) => ring.tag);
+    return Object.freeze({
+      version: state.version,
+      netUnits: grid.expectedNetUnits(state),
+      openLots,
+      occupiedRings: occupied
+    });
+  }
+  return describeVirtualBook(state);
+}
+
 export function createRematchHandlers({
   database,
   persistence,
   dxtradeClient = null,
   accountMonitor = null,
+  gridDefinition = null,
+  instrument = null,
+  grid = null,
+  stateStore = null,
   onBooksRematched = async () => {}
 }) {
+  const bookInstrument = resolveInstrument({ gridDefinition, instrument });
+
+  async function loadGridState() {
+    if (stateStore && typeof stateStore.load === "function") return stateStore.load();
+    if (persistence?.state && typeof persistence.state.load === "function") return persistence.state.load();
+    return null;
+  }
+
   async function readFreshBrokerNet() {
     if (dxtradeClient && typeof dxtradeClient.login === "function") {
       await dxtradeClient.login();
@@ -58,7 +104,7 @@ export function createRematchHandlers({
     let fromPositions = null;
     if (dxtradeClient && typeof dxtradeClient.getOpenPositions === "function") {
       try {
-        fromPositions = signedNetFromOpenPositions(await dxtradeClient.getOpenPositions(), "SOL/USD");
+        fromPositions = signedNetFromOpenPositions(await dxtradeClient.getOpenPositions(), bookInstrument);
       } catch (error) {
         fromPositions = Object.freeze({
           ok: false,
@@ -76,12 +122,9 @@ export function createRematchHandlers({
       }
     }
 
-    const snapshot = accountMonitor?.getSnapshot?.()?.snapshot ?? null;
-    const fromMetrics = snapshot && Number.isFinite(snapshot.signedNetUnits)
-      ? snapshot.signedNetUnits
-      : snapshot?.instrumentPosition
-        ? Number(snapshot.instrumentPosition.quantity)
-        : null;
+    const accountStatus = accountMonitor?.getSnapshot?.() ?? null;
+    const snapshot = accountStatus?.snapshot ?? null;
+    const fromTrusted = trustedSignedNetFor(accountStatus, bookInstrument);
 
     if (fromPositions?.ok) {
       return Object.freeze({
@@ -99,10 +142,18 @@ export function createRematchHandlers({
         error: fromPositions?.error ?? snapshot?.overlayError ?? "DXtrade /positions read failed; metrics flat is not trusted"
       });
     }
-    if (Number.isFinite(fromMetrics)) {
+    if (Number.isFinite(fromTrusted)) {
       return Object.freeze({
         ok: true,
-        netUnits: fromMetrics,
+        netUnits: fromTrusted,
+        source: snapshot?.positionSource ?? "metrics",
+        error: null
+      });
+    }
+    if (Number.isFinite(snapshot?.signedNetUnits) && bookInstrument === "SOL/USD") {
+      return Object.freeze({
+        ok: true,
+        netUnits: snapshot.signedNetUnits,
         source: snapshot?.positionSource ?? "metrics",
         error: null
       });
@@ -118,18 +169,18 @@ export function createRematchHandlers({
   async function requestRematch() {
     const [botState, gridState] = await Promise.all([
       database.getState(),
-      persistence.state.load()
+      loadGridState()
     ]);
-    if (!gridState) return { code: null, message: "SOL grid state is not initialized. Rematch is unavailable." };
-    if (!hasReconciliationHalt(botState)) {
+    if (!gridState) return { code: null, message: `${bookInstrument} grid state is not initialized. Rematch is unavailable.` };
+    if (!hasReconciliationHalt(botState, bookInstrument)) {
       return { code: null, message: noReconciliationHaltMessage(botState) };
     }
-    const book = describeVirtualBook(gridState);
+    const book = describeBook(gridState, grid);
     const broker = await readFreshBrokerNet();
     if (!broker.ok) {
       return {
         code: null,
-        message: `Rematch refused: could not read a fresh DXtrade SOL position (${broker.error}).`
+        message: `Rematch refused: could not read a fresh DXtrade ${instrumentLabel(bookInstrument)} position (${broker.error}).`
       };
     }
     if (!netsMatch(book.netUnits, broker.netUnits)) {
@@ -138,8 +189,8 @@ export function createRematchHandlers({
         message: [
           "REMATCH REFUSED — BOOKS STILL DISAGREE",
           "",
-          `Virtual net: ${book.netUnits.toFixed(2)} SOL`,
-          `Fresh DXtrade net: ${broker.netUnits.toFixed(2)} SOL (${broker.source})`,
+          `Virtual net: ${book.netUnits.toFixed(2)} ${bookInstrument}`,
+          `Fresh DXtrade net: ${broker.netUnits.toFixed(2)} ${bookInstrument} (${broker.source})`,
           `Open virtual lots: ${book.openLots}`,
           "",
           "This command keeps the virtual lot. It does not invent a fill and does not flatten DXtrade.",
@@ -155,27 +206,31 @@ export function createRematchHandlers({
     await database.setResumeChallenge(hash, salt, expiresAt);
     await database.addEvent("WARN", "SOL_REMATCH_REQUESTED", {
       source: "telegram",
+      instrument: bookInstrument,
       virtualNet: book.netUnits,
       brokerNet: broker.netUnits,
       brokerSource: broker.source,
       openLots: book.openLots,
       occupiedRings: book.occupiedRings,
-      stateVersion: book.version
+      stateVersion: book.version,
+      haltReason: botState.halt_reason
     });
     return {
       code,
       message: [
         "AUDITED BOOK REMATCH",
         "",
-        `Virtual net: ${book.netUnits.toFixed(2)} SOL`,
-        `Fresh DXtrade net: ${broker.netUnits.toFixed(2)} SOL (${broker.source})`,
+        `Instrument: ${bookInstrument}`,
+        `Halt: ${botState.halt_reason}`,
+        `Virtual net: ${book.netUnits.toFixed(2)}`,
+        `Fresh DXtrade net: ${broker.netUnits.toFixed(2)} (${broker.source})`,
         `Open virtual lots: ${book.openLots}`,
         `Occupied rings: ${book.occupiedRings.join(", ") || "none"}`,
         "",
-        "This will keep the current virtual lots, clear the reconciliation halt, and lift the operator pause.",
+        "This will keep the current virtual lots, clear that reconciliation halt, and lift the operator pause.",
         "It will NOT place a DXtrade order and will NOT flatten anything.",
         "",
-        `To apply, send /confirmrematch ${code} within 10 minutes.`
+        `To apply, send /confirmrematch ${code} ${bookInstrument.split("/")[0]} within 10 minutes.`
       ].join("\n")
     };
   }
@@ -183,7 +238,7 @@ export function createRematchHandlers({
   async function confirmRematch(code) {
     const [botState, gridState] = await Promise.all([
       database.getState(),
-      persistence.state.load()
+      loadGridState()
     ]);
     if (!/^\d{6}$/.test(code ?? "")) return "Use /confirmrematch followed by the 6-digit code from /rematch.";
     if (!botState.resume_code_hash || !botState.resume_code_salt || !botState.resume_code_expires_at) {
@@ -195,33 +250,42 @@ export function createRematchHandlers({
     }
     const suppliedHash = hashRematchCode(code, botState.resume_code_salt);
     if (!safeHexEqual(suppliedHash, botState.resume_code_hash)) {
-      await database.addEvent("WARN", "SOL_REMATCH_CODE_REJECTED", { source: "telegram" });
+      await database.addEvent("WARN", "SOL_REMATCH_CODE_REJECTED", { source: "telegram", instrument: bookInstrument });
       return "The rematch code is incorrect. A /resume or /reconcile code will not work here.";
     }
     if (!gridState) {
       await database.clearResumeChallenge();
-      return "Rematch aborted: SOL grid state is missing.";
+      return `Rematch aborted: ${bookInstrument} grid state is missing.`;
     }
 
-    const book = describeVirtualBook(gridState);
+    const book = describeBook(gridState, grid);
     const broker = await readFreshBrokerNet();
     if (!broker.ok || !netsMatch(book.netUnits, broker.netUnits)) {
       await database.clearResumeChallenge();
       return [
         "Rematch aborted: the books no longer agree on a fresh DXtrade read.",
-        `Virtual net: ${book.netUnits.toFixed(2)} SOL`,
-        `Fresh DXtrade net: ${broker.ok ? broker.netUnits.toFixed(2) : "unavailable"} SOL`
+        `Virtual net: ${book.netUnits.toFixed(2)} ${bookInstrument}`,
+        `Fresh DXtrade net: ${broker.ok ? broker.netUnits.toFixed(2) : "unavailable"} ${bookInstrument}`
       ].join("\n");
     }
-    if (!hasReconciliationHalt(botState)) {
+    const liveState = await database.getState();
+    if (!hasReconciliationHalt(liveState, bookInstrument)) {
       await database.clearResumeChallenge();
-      return noReconciliationHaltMessage(botState);
+      if (liveState?.safety_halt !== true) return noReconciliationHaltMessage(liveState);
+      return [
+        noReconciliationHaltMessage(liveState),
+        "",
+        "REMATCH ABORTED — RECONCILIATION HALT WAS NO LONGER LATCHED",
+        "",
+        "The stored safety halt changed after the rematch code was issued.",
+        "Rematch did not clear a different halt and did not lift the operator pause."
+      ].join("\n");
     }
     if (typeof database.clearSafetyHaltIfReason !== "function") {
       await database.clearResumeChallenge();
       return "Rematch aborted: atomic reconciliation-halt clear is unavailable.";
     }
-    const cleared = await database.clearSafetyHaltIfReason(RECONCILIATION_HALT_REASON);
+    const cleared = await database.clearSafetyHaltIfReason(liveState.halt_reason);
     if (!cleared) {
       await database.clearResumeChallenge();
       return [
@@ -233,10 +297,12 @@ export function createRematchHandlers({
     }
     if (typeof database.setOperatorKilled === "function") await database.setOperatorKilled(false);
     await database.clearResumeChallenge();
-    if (typeof onBooksRematched === "function") await onBooksRematched({ virtualNet: book.netUnits, brokerNet: broker.netUnits });
+    if (typeof onBooksRematched === "function") await onBooksRematched({ instrument: bookInstrument, virtualNet: book.netUnits, brokerNet: broker.netUnits });
     await database.addEvent("WARN", "SOL_BOOKS_REMATCHED", {
       source: "telegram",
+      instrument: bookInstrument,
       reason: "owner-audited halt clear after matching broker and virtual nets",
+      haltReason: liveState.halt_reason,
       virtualNet: book.netUnits,
       brokerNet: broker.netUnits,
       brokerSource: broker.source,
@@ -247,7 +313,8 @@ export function createRematchHandlers({
     return [
       "AUDITED BOOK REMATCH APPLIED",
       "",
-      `Matched net: ${book.netUnits.toFixed(2)} SOL`,
+      `Instrument: ${bookInstrument}`,
+      `Matched net: ${book.netUnits.toFixed(2)}`,
       `Open virtual lots: ${book.openLots}`,
       `Occupied rings: ${book.occupiedRings.join(", ") || "none"}`,
       "Virtual lots: preserved",
