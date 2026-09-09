@@ -1,10 +1,27 @@
 /**
- * D-064 session harvest predicate.
+ * D-064 session harvest predicate + process-wide tranche-exit pause.
  *
- * Separated so the quota flatten cannot be confused with D-063 risk flatten.
- * This module does not place orders. The supervisor calls executeProtectiveFlatten
- * when this returns true, without setting flattenedToday or entry brakes.
+ * The pause registry is keyed by instrument so ringGridInstance.process can
+ * honor harvest without the D-060 wrapper exposing setTrancheExitsPaused.
  */
+const pausedInstruments = new Set();
+
+export function setTrancheExitsPausedFor(instrument, on) {
+  const key = typeof instrument === "string" ? instrument : "";
+  if (!key) return;
+  if (on === true) pausedInstruments.add(key);
+  else pausedInstruments.delete(key);
+}
+
+export function setTrancheExitsPausedAll(instruments, on) {
+  if (!Array.isArray(instruments)) return;
+  for (const instrument of instruments) setTrancheExitsPausedFor(instrument, on);
+}
+
+export function isTrancheExitsPaused(instrument) {
+  return pausedInstruments.has(instrument);
+}
+
 export function shouldHarvest({
   enabled,
   thresholdUsd,
