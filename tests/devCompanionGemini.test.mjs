@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createGeminiRequester } from "../src/devCompanionGemini.js";
 
-test("maps tools to function_declarations and reads nested function_call parts", async () => {
+test("maps tools to Gemini functions and reads nested function_call parts", async () => {
   const seen = [];
   const request = createGeminiRequester({
     apiKey: "test-key",
@@ -43,7 +43,7 @@ test("maps tools to function_declarations and reads nested function_call parts",
     tools: [{ type: "function", name: "list_repo_files", description: "list", parameters: { type: "object" } }]
   });
   assert.equal(first.output[0].name, "list_repo_files");
-  assert.equal(seen[0].tools[0].function_declarations[0].name, "list_repo_files");
+  assert.equal(seen[0].tools[0].name, "list_repo_files");
   assert.equal(seen[0].store, true);
 
   const second = await request({
@@ -53,7 +53,7 @@ test("maps tools to function_declarations and reads nested function_call parts",
   });
   assert.equal(second.output_text, "Listed root.");
   assert.equal(seen[1].previous_interaction_id, "inter_abc123XYZ");
-  assert.equal(seen[1].input[0].function_response.name, "list_repo_files");
+  assert.equal(seen[1].input[0].name, "list_repo_files");
 });
 
 test("flash-lite requests send medium thinking_level", async () => {
