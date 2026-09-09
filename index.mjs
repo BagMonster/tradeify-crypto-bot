@@ -15,9 +15,9 @@ import { createDxtradeAccountMonitor } from "./src/account/dxtradeAccountMonitor
 import { trustedSignedNetFor } from "./src/account/dxtradeSignedNet.js";
 import { formatDxtradeAccountDiagnostic } from "./src/account/dxtradeDiagnostics.js";
 import { createSolanaPersistence } from "./src/state/solanaPersistence.js";
+import { createHaltWarningCycle } from "./src/state/haltWarningCycle.js";
 import { createSolanaRuntime } from "./src/runtime/solanaRuntime.js";
 import { clearLatchedBaselineMismatchHalt } from "./src/runtime/d049BaselineHaltClear.js";
-import { nextReconciliationWarning } from "./src/runtime/reconciliationWarning.js";
 import { createSolanaHeartbeat } from "./src/runtime/solanaHeartbeat.js";
 import { createLiveTelegramNotifications } from "./src/notifications/liveTelegramNotifications.js";
 import { accountDayKey } from "./src/risk/dailyRiskLadder.js";
@@ -102,16 +102,18 @@ const accountMonitor = createDxtradeAccountMonitor({
         accountLockLatched = true;
         const reasonCode = accountLockReasonCode(snapshot.invariantError);
         if (reasonCode) {
-          const day = snapshot.fetchedAt.slice(0, 10).replaceAll("-", "");
-          liveNotifications.enqueue({
-            kind: "ACCOUNT_LOCKOUT",
-            eventKey: `ACCOUNT-LOCK:${day}:${reasonCode}`,
-            reasonCode
+          await requestNonHarvestHalt({
+            key: `ACCOUNT_LOCKOUT:${reasonCode}`,
+            reasonCode: "ACCOUNT_LOCKOUT",
+            reason: snapshot.invariantError,
+            correction: "Inspect /status and DXtrade positions. Clear the unexpected broker-position condition, or send /pausehalt to defer the durable halt."
           });
         }
       }
     } else {
       accountLockLatched = false;
+      await clearNonHarvestHalt("ACCOUNT_LOCKOUT:FOREIGN_POSITION");
+      await clearNonHarvestHalt("ACCOUNT_LOCKOUT:POSITION_COUNT_MISMATCH");
     }
   },
   onError: (error) => {
@@ -279,6 +281,16 @@ function bookNetUnits(snapshot, instrument) {
   return Number.isFinite(units) ? Math.abs(units) : 0;
 }
 
+let haltWarnings = null;
+async function requestNonHarvestHalt(input) {
+  if (!haltWarnings) throw new Error("halt-warning controller is not initialized");
+  return haltWarnings.request(input);
+}
+async function clearNonHarvestHalt(key) {
+  if (!haltWarnings) return false;
+  return haltWarnings.clear(key);
+}
+
 // Broker notional when the broker supplies one; otherwise net units at this book's
 // own last traded price. Exposure is reported, never used to trigger a rung, so a
 // price that is a few seconds old is acceptable here.
@@ -334,8 +346,42 @@ const riskSupervisor = createRiskSupervisor({
   },
   setSafetyHalt: (reason) => database.setSafetyHalt(reason),
   clearSafetyHaltIfReason: (reason) => database.clearSafetyHaltIfReason(reason),
-  getSafetyHaltState: () => database.getState()
+  getSafetyHaltState: () => database.getState(),
+  requestHaltWarning: requestNonHarvestHalt
 });
+
+haltWarnings = createHaltWarningCycle({
+  store: {
+    get: () => database.getHaltWarningCycle(),
+    save: (cycle) => database.saveHaltWarningCycle(cycle),
+    clear: (key) => database.clearHaltWarningCycle(key)
+  },
+  notifications: liveNotifications,
+  addEvent: database.addEvent,
+  onDue: async (cycle) => {
+    if (cycle.reasonCode === "D060_ACCOUNT_FULL_FLATTEN") {
+      return riskSupervisor.executeDeferredFullFlatten({ dayKey: accountDayKey(Date.now()) });
+    }
+    if (cycle.reasonCode === "RUNTIME_ERROR") {
+      const stack = stackByInstrument.get(cycle.instrument);
+      if (stack) stack.runtimeErrorLatched = true;
+    }
+    await database.setSafetyHalt(cycle.reason);
+    await database.addEvent("ERROR", "OWNER_WARNING_CYCLE_SAFETY_HALT", {
+      reasonCode: cycle.reasonCode,
+      instrument: cycle.instrument,
+      reason: cycle.reason
+    });
+    liveNotifications.enqueue({
+      kind: "SAFETY_HALT",
+      eventKey: `HALT-FIRED:${cycle.key}:${cycle.haltAt.replaceAll(/[-:.TZ]/g, "")}`,
+      reasonCode: cycle.reasonCode,
+      instrument: cycle.instrument
+    });
+    return Object.freeze({ action: "HALT" });
+  }
+});
+await haltWarnings.prime();
 
 for (const stack of stacks) stack.runtime.attachRiskSupervisor(riskSupervisor);
 
@@ -352,57 +398,29 @@ async function persistD049SafetyHalt(stack, result) {
       ? `D-049 protective full flatten did not confirm flat on ${stack.cfg.instrument}; manual intervention required`
       : `D-049 persisted daily baseline does not match fresh DXtrade account data; owner review required`;
 
-  await database.setSafetyHalt(reason);
-  await database.addEvent("ERROR", "D049_SAFETY_HALT", { instrument: stack.cfg.instrument, reasonCode, status: code });
   const day = accountDayKey(Date.now()).replaceAll("-", "");
-  const eventKey = `D049-HALT:${stack.cfg.orderPrefix}:${day}:${reasonCode}`;
-  if (!stack.haltNotifications.has(eventKey)) {
-    stack.haltNotifications.add(eventKey);
-    liveNotifications.enqueue({ kind: "SAFETY_HALT", eventKey, reasonCode, instrument: stack.cfg.instrument });
-  }
+  await requestNonHarvestHalt({
+    key: `D049:${stack.cfg.orderPrefix}:${day}:${reasonCode}`,
+    reasonCode,
+    instrument: stack.cfg.instrument,
+    reason,
+    correction: "Inspect /status and DXtrade before taking the documented recovery path. Send /pausehalt to defer this safety halt for another 25-minute warning cycle."
+  });
 }
 
 async function applyReconciliationBlocked(stack, result) {
-  const decision = nextReconciliationWarning(stack.reconciliationWarning, { now: Date.now(), mismatched: true });
-  stack.reconciliationWarning = decision.state;
   const recon = result.reconciliation;
   const version = Number.isSafeInteger(result.stateVersion)
     ? result.stateVersion
     : (Number.isSafeInteger(result.state?.version) ? result.state.version : 0);
-  if (decision.action === "ALERT" && recon && Number.isFinite(recon.actual) && Number.isFinite(recon.expected)) {
-    liveNotifications.enqueue({
-      kind: "RECONCILIATION_MISMATCH",
-      eventKey: `RECON-WARN:${stack.cfg.orderPrefix}:${decision.alertNumber}:${version}`,
-      instrument: stack.cfg.instrument,
-      stage: "WARNING",
-      warningNumber: decision.alertNumber,
-      stateVersion: version,
-      expectedVirtualNetUnits: recon.expected,
-      brokerNetUnits: recon.actual
-    });
-    await database.addEvent("WARN", "RECONCILIATION_MISMATCH_WARNING", {
-      instrument: stack.cfg.instrument,
-      alertNumber: decision.alertNumber,
-      expectedVirtualNetUnits: recon.expected,
-      brokerNetUnits: recon.actual
-    });
-  }
-  if (decision.action === "HALT" && !stack.reconciliationHaltLatched) {
-    stack.reconciliationHaltLatched = true;
-    await database.setSafetyHalt(`${stack.cfg.instrument} virtual-lot state does not reconcile to the DXtrade net position after 15 minutes; owner review required`);
-    await database.addEvent("ERROR", "RECONCILIATION_SAFETY_HALT", { instrument: stack.cfg.instrument, action: "SAFETY_HALT" });
-    if (recon && Number.isFinite(recon.actual) && Number.isFinite(recon.expected)) {
-      liveNotifications.enqueue({
-        kind: "RECONCILIATION_MISMATCH",
-        eventKey: `RECON-HALT:${stack.cfg.orderPrefix}:${version}:${Number(recon.expected).toFixed(8)}:${Number(recon.actual).toFixed(8)}`,
-        instrument: stack.cfg.instrument,
-        stage: "HALT",
-        stateVersion: version,
-        expectedVirtualNetUnits: recon.expected,
-        brokerNetUnits: recon.actual
-      });
-    }
-  }
+  if (!recon || !Number.isFinite(recon.actual) || !Number.isFinite(recon.expected)) return;
+  await requestNonHarvestHalt({
+    key: `RECONCILIATION_MISMATCH:${stack.cfg.orderPrefix}`,
+    reasonCode: "RECONCILIATION_MISMATCH",
+    instrument: stack.cfg.instrument,
+    reason: `${stack.cfg.instrument} virtual net ${Number(recon.expected).toFixed(8)} does not match DXtrade net ${Number(recon.actual).toFixed(8)} at state version ${version}.`,
+    correction: `Wait for /status to show matching virtual and DXtrade nets, then use /rematch ${stack.cfg.instrument.split("/")[0]} if a reconciliation halt eventually fires. Send /pausehalt to defer it.`
+  });
 }
 
 async function processLatestTrade(stack, trade) {
@@ -415,11 +433,18 @@ async function processLatestTrade(stack, trade) {
     await applyReconciliationBlocked(stack, result);
   } else {
     stack.reconciliationWarning = null;
+    await clearNonHarvestHalt(`RECONCILIATION_MISMATCH:${stack.cfg.orderPrefix}`);
   }
   if (["D049_PARTIAL_CUT_UNCONFIRMED", "D049_FULL_FLATTEN_UNCONFIRMED", "D049_BASELINE_MISMATCH"].includes(result.status)) {
     await persistD049SafetyHalt(stack, result);
+  } else {
+    const day = accountDayKey(Date.now()).replaceAll("-", "");
+    for (const code of ["D049_PARTIAL_CUT_UNCONFIRMED", "D049_FULL_FLATTEN_UNCONFIRMED", "D049_BASELINE_MISMATCH"]) {
+      await clearNonHarvestHalt(`D049:${stack.cfg.orderPrefix}:${day}:${code}`);
+    }
   }
   await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
+  await clearNonHarvestHalt(`RUNTIME_ERROR:${stack.cfg.orderPrefix}`);
 }
 
 async function drainLatestTrades(stack) {
@@ -433,27 +458,25 @@ async function drainLatestTrades(stack) {
     }
   } catch (error) {
     if (!stack.runtimeErrorLatched) {
-      stack.runtimeErrorLatched = true;
       const detail = error instanceof Error ? error.message : String(error);
-      console.error(`${stack.cfg.instrument} runtime error; new strategy actions are being halted for that instrument.`);
+      console.error(`${stack.cfg.instrument} runtime error; owner warning cycle requested before a durable safety halt.`);
       console.error(detail);
       if (error instanceof Error && error.stack) console.error(error.stack);
       try {
-        await database.setSafetyHalt(`${stack.cfg.instrument} production runtime error; owner review required`);
+        await requestNonHarvestHalt({
+          key: `RUNTIME_ERROR:${stack.cfg.orderPrefix}`,
+          reasonCode: "RUNTIME_ERROR",
+          instrument: stack.cfg.instrument,
+          reason: `${stack.cfg.instrument} production runtime error: ${detail.slice(0, 180)}`,
+          correction: "Inspect /status and Railway logs. If the error clears, the pending warning cycle clears automatically; otherwise send /pausehalt to defer the durable halt."
+        });
         await database.addEvent("ERROR", "RUNTIME_ERROR", {
           instrument: stack.cfg.instrument,
-          action: "SAFETY_HALT",
+          action: "HALT_WARNING_PENDING",
           message: detail.slice(0, 500)
         });
-        const hour = new Date().toISOString().slice(0, 13).replaceAll("-", "").replace("T", "-");
-        liveNotifications.enqueue({
-          kind: "SAFETY_HALT",
-          eventKey: `RUNTIME-HALT:${stack.cfg.orderPrefix}:${hour}`,
-          reasonCode: "RUNTIME_ERROR",
-          instrument: stack.cfg.instrument
-        });
       } catch {
-        console.error(`Could not persist the ${stack.cfg.instrument} runtime safety halt.`);
+        console.error(`Could not persist the ${stack.cfg.instrument} runtime warning cycle.`);
       }
     }
   } finally {
@@ -538,6 +561,7 @@ const service = createMultiInstrumentOwnerService({
   },
   instrumentConfigs: enabledInstruments,
   riskSupervisor,
+  haltWarnings,
   // Required by /re-run. Without `database` the rerun handlers degrade to
   // "Re-run is not configured on this deployment." and the command does nothing.
   database,
@@ -592,6 +616,8 @@ const telegramBot = await startTelegramBot({
 await accountMonitor.start();
 const startupRisk = await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
 console.log(`D-064 startup account-day evaluation: ${startupRisk.action}.`);
+const startupRecovery = await service.recoverVerifiedD064AtStartup();
+console.log(`D-064 verified startup recovery: ${startupRecovery.action}.`);
 for (const stack of stacks) stack.feed.start();
 
 const HEARTBEAT_CHECK_MS = 60 * 60 * 1000;
@@ -607,6 +633,13 @@ const heartbeatTimer = setInterval(() => {
 }, HEARTBEAT_CHECK_MS);
 heartbeatTimer.unref?.();
 void heartbeat.checkOnce().catch(() => console.error("Initial heartbeat check failed."));
+
+const HALT_WARNING_CHECK_MS = 30 * 1000;
+const haltWarningTimer = setInterval(() => {
+  void haltWarnings.advance().catch((error) => console.error(`Owner halt-warning cycle check failed: ${error.message}`));
+}, HALT_WARNING_CHECK_MS);
+haltWarningTimer.unref?.();
+void haltWarnings.advance().catch((error) => console.error(`Initial owner halt-warning cycle check failed: ${error.message}`));
 
 const executionLive = stacks.every((s) => s.execution.isEnabled());
 const anyExecutionLive = stacks.some((s) => s.execution.isEnabled());
@@ -635,6 +668,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   console.log(`Received ${signal}; shutting down cleanly.`);
   clearInterval(heartbeatTimer);
+  clearInterval(haltWarningTimer);
   telegramBot.stopDevCompanionDelivery?.();
   for (const stack of stacks) stack.feed.stop();
   accountMonitor.stop();
