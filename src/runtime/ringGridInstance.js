@@ -41,6 +41,7 @@ export function createRingGridInstance({
   const prefix = eventPrefix(orderPrefix, instrument);
   let previousPrice = null;
   let entryBrake = false;
+  let trancheExitsPaused = false;
   let currentState = null;
 
   function enqueueNotification(event) {
@@ -58,6 +59,7 @@ export function createRingGridInstance({
     return currentState;
   }
   async function setEntryBrake(value) { entryBrake = value === true; }
+  async function setTrancheExitsPaused(value) { trancheExitsPaused = value === true; }
 
   async function cut({ fraction, reason, dayKey }) {
     const state = await load();
@@ -87,7 +89,7 @@ export function createRingGridInstance({
     let state = await load();
     const rearmed = grid.observeRearm(state, { price: trade.price, ma });
     if (rearmed.version !== state.version) state = await store.save(state.version, rearmed);
-    while (true) {
+    while (!trancheExitsPaused) {
       const action = grid.nextExitAction(state, { price: trade.price, ma });
       if (!action) break;
       if (action.type === "SKIP_EXIT") { state = await store.save(state.version, grid.applySkippedExit(state, action)); continue; }
@@ -157,7 +159,7 @@ export function createRingGridInstance({
     }
     previousPrice = trade.price;
     currentState = state;
-    await addEvent("INFO", "D060_RING_INSTANCE_PROCESSED", { instrument, stateVersion: state.version, entryBrake });
+    await addEvent("INFO", "D060_RING_INSTANCE_PROCESSED", { instrument, stateVersion: state.version, entryBrake, trancheExitsPaused });
     return Object.freeze({ status: entryBrake ? "BRAKED" : "PROCESSED", state, ma });
   }
 
@@ -166,9 +168,11 @@ export function createRingGridInstance({
     init,
     process,
     setEntryBrake,
+    setTrancheExitsPaused,
     cut,
     flatten,
     getEntryBrake: () => entryBrake,
+    getTrancheExitsPaused: () => trancheExitsPaused,
     getState: () => currentState
   });
 }
