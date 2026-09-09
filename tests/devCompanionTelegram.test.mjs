@@ -58,6 +58,8 @@ function serviceStub() {
     confirmResume: async () => "confirmed",
     requestReconcile: async () => ({ message: "reconcile pending" }),
     confirmReconcile: async () => "reconcile applied",
+    requestHarvestRecovery: async () => ({ message: "harvest recovery pending" }),
+    confirmHarvestRecovery: async () => "harvest recovery applied",
     flatInstructions: () => "flat"
   };
 }
@@ -160,9 +162,24 @@ test("development commands are registered without replacing trading commands", a
     BotClass: FakeBot
   });
   const commands = new Set(bot.commands.map((item) => item.command));
-  for (const command of ["status", "health", "kill", "resume", "reconcile", "code", "devstatus", "devreset", "devexit"]) {
+  for (const command of ["status", "health", "kill", "resume", "reconcile", "harvestrecover", "code", "devstatus", "devreset", "devexit"]) {
     assert.equal(commands.has(command), true, `missing /${command}`);
   }
+  bot.stopDevCompanionDelivery();
+});
+
+test("/harvestrecover uses a separate owner confirmation path", async () => {
+  const calls = [];
+  const service = {
+    ...serviceStub(),
+    requestHarvestRecovery: async () => { calls.push("request"); return { message: "Send /confirmharvestrecover 123456" }; },
+    confirmHarvestRecovery: async (code) => { calls.push(`confirm:${code}`); return "D-064 recovery applied"; }
+  };
+  const bot = await startTelegramBot({ environment: { telegramToken: "test-token", telegramAllowedUserId: 12345 }, service, devCompanion: companionStub(), BotClass: FakeBot });
+  await bot.emitMessage(ownerMessage("/harvestrecover"));
+  await bot.emitMessage(ownerMessage("/confirmharvestrecover 123456"));
+  assert.deepEqual(calls, ["request", "confirm:123456"]);
+  assert.match(bot.sent.at(-1).text, /D-064 recovery applied/);
   bot.stopDevCompanionDelivery();
 });
 
