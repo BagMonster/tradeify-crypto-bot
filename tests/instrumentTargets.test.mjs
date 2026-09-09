@@ -92,6 +92,31 @@ test("lotTargets marks completed tranches DONE and exactly one tranche NEXT", ()
   assert.equal(rows.filter((row) => row.status === "NEXT").length, 1);
 });
 
+test("lotTargets uses trancheDenominator when trancheWeightSum is absent", () => {
+  const rows = lotTargets({
+    lot: {
+      side: "SELL",
+      entryPrice: 6.4902,
+      done: 0,
+      remainingUnits: 34.07,
+      originalUnits: 34.07
+    },
+    ma: 4.3281,
+    definition: definition({
+      trancheWeights: [1, 2, 3, 4],
+      trancheWeightSum: undefined,
+      trancheDenominator: 10,
+      lotStep: 0.01
+    })
+  });
+  assert.equal(rows[0].units, 3.4);
+  assert.equal(rows[1].units, 6.81);
+  assert.equal(rows[2].units, 10.22);
+  assert.equal(rows[3].units, 34.07);
+  assert.ok(Number.isFinite(rows[0].estimatedUsd));
+  assert.ok(!Number.isNaN(rows[0].units));
+});
+
 test("formatInstrumentTargets with no open lots returns the empty message", () => {
   const text = formatInstrumentTargets({
     definition: definition(),

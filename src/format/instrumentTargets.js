@@ -46,18 +46,41 @@ export function trancheTarget({ entryPrice, ma, side, tranche, roundTripCostFloo
     : Math.min(raw, entryPrice * (1 - roundTripCostFloor));
 }
 
+function trancheSizing(definition) {
+  const weights = Array.isArray(definition?.trancheWeights) && definition.trancheWeights.length === 4
+    ? definition.trancheWeights
+    : (Array.isArray(definition?.tranches?.weights) && definition.tranches.weights.length === 4
+      ? definition.tranches.weights
+      : [1, 2, 3, 4]);
+  const sum = Number(
+    definition?.trancheWeightSum
+    ?? definition?.trancheDenominator
+    ?? definition?.tranches?.denominator
+    ?? 10
+  );
+  const step = Number(definition?.lotStep ?? definition?.sizing?.lotStep ?? 0.01);
+  return { weights, sum, step };
+}
+
 export function lotTargets({ lot, ma, definition }) {
   const floor = definition.roundTripCostFloor;
-  const weights = definition.trancheWeights;
-  const sum = definition.trancheWeightSum;
-  const step = definition.lotStep;
+  const { weights, sum, step } = trancheSizing(definition);
   const done = Number(lot.done ?? 0);
 
   return TRANCHES.map((tranche) => {
     const target = trancheTarget({ entryPrice: lot.entryPrice, ma, side: lot.side, tranche, roundTripCostFloor: floor });
-    const units = tranche === 4
-      ? lot.remainingUnits
-      : Math.min(lot.remainingUnits, Math.floor(((lot.originalUnits * (weights[tranche - 1] / sum)) + 1e-12) / step) * step);
+    let units;
+    if (tranche === 4) {
+      units = Number(lot.remainingUnits);
+    } else if (Number.isFinite(sum) && sum > 0 && Number.isFinite(step) && step > 0) {
+      units = Math.min(
+        Number(lot.remainingUnits),
+        Math.floor(((Number(lot.originalUnits) * (weights[tranche - 1] / sum)) + 1e-12) / step) * step
+      );
+    } else {
+      units = Number(lot.remainingUnits);
+    }
+    if (!Number.isFinite(units) || units < 0) units = 0;
     const gainPerUnit = lot.side === "BUY" ? target - lot.entryPrice : lot.entryPrice - target;
     return Object.freeze({
       tranche,
