@@ -588,6 +588,8 @@ const telegramBot = await startTelegramBot({
 });
 
 await accountMonitor.start();
+const startupRisk = await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
+console.log(`D-064 startup account-day evaluation: ${startupRisk.action}.`);
 for (const stack of stacks) stack.feed.start();
 
 const HEARTBEAT_CHECK_MS = 60 * 60 * 1000;
