@@ -178,6 +178,30 @@ export function createRiskSupervisor({
     if (harvestBlocksNormalActions()) for (const book of instruments) applyEntryBrake(book, true);
   }
 
+  async function haltHarvest({ incomingDayKey, combinedDayPnlUsd = null, reason, details = null }) {
+    const prior = await loadHarvest(incomingDayKey);
+    if (prior.status === "HALTED") {
+      applyHarvestGates();
+      return prior;
+    }
+    const halted = await saveHarvest({
+      dayKey: incomingDayKey,
+      status: "HALTED",
+      triggerPnlUsd: prior.triggerPnlUsd ?? (Number.isFinite(combinedDayPnlUsd) ? combinedDayPnlUsd : null),
+      confirmedAt: null,
+      haltReason: reason
+    });
+    applyHarvestGates();
+    await setSafetyHalt(reason);
+    await addEvent("ERROR", "D064_HARVEST_HALTED", {
+      dayKey: incomingDayKey,
+      reason,
+      ...(details ?? {})
+    });
+    notifications?.enqueue?.({ kind: "HARVEST_HALTED", eventKey: `D064-HALTED:${incomingDayKey.replaceAll("-", "")}`, reason });
+    return halted;
+  }
+
   async function runHarvest({ incomingDayKey, combined, readings }) {
     const prior = await loadHarvest(incomingDayKey);
     if (prior.status === "CONFIRMED") {
@@ -208,10 +232,12 @@ export function createRiskSupervisor({
     const pendingResults = results.filter((r) => ["PENDING", "SUBMITTED", "CLAIMED"].includes(r.result?.status));
     if (terminal.length > 0) {
       const reason = `D-064 harvest could not confirm every book flat; owner review required`;
-      const halted = await saveHarvest({ dayKey: incomingDayKey, status: "HALTED", triggerPnlUsd: pending.triggerPnlUsd, confirmedAt: null, haltReason: reason });
-      await setSafetyHalt(reason);
-      await addEvent("ERROR", "D064_HARVEST_HALTED", { dayKey: incomingDayKey, instruments: results.map((r) => ({ instrument: r.instrument, status: r.result?.status ?? "UNKNOWN" })) });
-      notifications?.enqueue?.({ kind: "HARVEST_HALTED", eventKey: `D064-HALTED:${incomingDayKey.replaceAll("-", "")}`, reason });
+      const halted = await haltHarvest({
+        incomingDayKey,
+        combinedDayPnlUsd: combined,
+        reason,
+        details: { instruments: results.map((r) => ({ instrument: r.instrument, status: r.result?.status ?? "UNKNOWN" })) }
+      });
       return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: halted });
     }
     if (pendingResults.length > 0) return Object.freeze({ action: "HARVEST_PENDING", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: pending });
@@ -263,6 +289,15 @@ export function createRiskSupervisor({
         await addEvent("ERROR", "RISK_SUPERVISOR_ACCOUNT_DATA_UNAVAILABLE", {
           instruments: unreadable.map((r) => r.instrument)
         });
+        if (sessionHarvestEnabled) {
+          const reason = `D-064 harvest cannot verify fresh broker account data for ${unreadable.map((r) => r.instrument).join(", ")}`;
+          const halted = await haltHarvest({
+            incomingDayKey,
+            reason,
+            details: { instruments: unreadable.map((r) => ({ instrument: r.instrument, status: "ACCOUNT_DATA_UNAVAILABLE" })) }
+          });
+          return Object.freeze({ action: "HARVEST_HALTED", instruments: unreadable.map((r) => r.instrument), harvest: halted });
+        }
         return Object.freeze({ action: "ACCOUNT_DATA_UNAVAILABLE", instruments: unreadable.map((r) => r.instrument) });
       }
       lastError = null;
