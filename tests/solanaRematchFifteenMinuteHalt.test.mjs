@@ -9,9 +9,15 @@ const INJ_FIFTEEN_MINUTE_HALT =
 
 test("isReconciliationHalt accepts the live 15-minute instrument sentence and rejects nearby wording", () => {
   assert.equal(isReconciliationHalt(INJ_FIFTEEN_MINUTE_HALT), true);
+  assert.equal(isReconciliationHalt(INJ_FIFTEEN_MINUTE_HALT, "INJ/USD"), true);
+  assert.equal(isReconciliationHalt(INJ_FIFTEEN_MINUTE_HALT, "SOL/USD"), false);
   assert.equal(
     isReconciliationHalt("SOL virtual-lot state does not reconcile to the DXtrade net SOL position; owner review required"),
     true
+  );
+  assert.equal(
+    isReconciliationHalt("SOL virtual-lot state does not reconcile to the DXtrade net SOL position; owner review required", "INJ/USD"),
+    false
   );
   assert.equal(
     isReconciliationHalt("Protective flatten needs reconciliation-style owner review"),
@@ -27,7 +33,7 @@ function emptyState() {
   return normalizeSolanaState(createInitialSolanaState());
 }
 
-function serviceWithHalt(haltReason, positions = []) {
+function serviceWithHalt(haltReason, positions = [], instrument = "INJ/USD") {
   let gridState = emptyState();
   const events = [];
   let challenge = { hash: null, salt: null, expiresAt: null };
@@ -59,8 +65,9 @@ function serviceWithHalt(haltReason, positions = []) {
   const service = createSolanaOwnerService({
     database,
     account: { startingBalance: 50000, maxLossOffset: 3000, dailyLossLimit: 1500 },
-    strategy: { execution: { autoExecute: true }, strategyStatus: "production-live-approved", instruments: { "SOL/USD": { enabled: true } } },
+    strategy: { execution: { autoExecute: true }, strategyStatus: "production-live-approved", instruments: { [instrument]: { enabled: true } } },
     environment: { appMode: "live", autoExecute: true },
+    instrument,
     persistence: { state: { async load() { return gridState; }, async save() { throw new Error("rematch must not rewrite virtual lots"); } } },
     maProvider: { getCurrent: async () => ({ ma: 81.3384, completedThrough: "2026-08-26" }) },
     execution: { isEnabled: () => true },
@@ -70,7 +77,7 @@ function serviceWithHalt(haltReason, positions = []) {
         return {
           snapshot: {
             signedNetUnits: 0,
-            signedNetByInstrument: { "SOL/USD": { netUnits: 0, ticketCount: 0 } },
+            signedNetByInstrument: { [instrument]: { netUnits: 0, ticketCount: 0 } },
             positionSource: "open-positions",
             positionsReadFailed: false,
             fetchedAtMs: Date.now()
@@ -111,4 +118,13 @@ test("confirmRematch clears the 15-minute halt without rewriting lots", async ()
   assert.equal(getHalt().safetyHalt, false);
   assert.equal(isPaused(), false);
   assert.equal(expectedNet(), 0);
+});
+
+test("a clean book cannot clear another instrument's 15-minute reconciliation halt", async () => {
+  const { service, getHalt, isPaused } = serviceWithHalt(INJ_FIFTEEN_MINUTE_HALT, [], "SOL/USD");
+  const result = await service.requestRematch();
+  assert.equal(result.code, null);
+  assert.match(result.message, /ACTIVE HALT IS NOT A RECONCILIATION MISMATCH/);
+  assert.equal(getHalt().safetyHalt, true);
+  assert.equal(isPaused(), true);
 });
