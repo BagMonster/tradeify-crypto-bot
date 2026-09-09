@@ -71,7 +71,7 @@ Pauses **every** instrument. Survives a Railway restart. Blocks new entries. Pro
 
 ### `/resume INSTRUMENT`
 
-Six-digit code, 10 minutes, **one instrument**. Does not resume by itself.
+Six-digit code, 10 minutes, **one instrument**.
 
 ### `/confirmresume CODE INSTRUMENT`
 
@@ -87,7 +87,7 @@ Refused while DXtrade still shows an open position on that check.
 
 ### `/confirmreconcile CODE INSTRUMENT`
 
-Empties virtual lots, rearms rings, writes an audit event, clears a reconciliation halt. **Does not** place a DXtrade order. **Does not** lift the operator pause. Then `/status INSTRUMENT`. If both sides are zero and you want it trading, `/resume` separately.
+Empties virtual lots, rearms rings, writes an audit event. **Does not** place a DXtrade order. **Does not** lift the operator pause.
 
 ### `/harvestrecover`
 
@@ -99,13 +99,16 @@ Repeats the all-book reconciliation and fresh account-data checks, then clears o
 
 ### `/rematch INSTRUMENT`
 
-Opposite of reconcile. Allowed only while the exact reconciliation-mismatch halt is latched **and** a fresh broker net already matches the virtual net.
+Allowed while a reconciliation-mismatch safety halt is latched **and** a fresh broker net already matches the virtual net. That includes:
 
-Do **not** rematch after a manual flatten. That keeps the stale lot. Use `/reconcile` instead.
+- the original SOL sentence (`SOL virtual-lot state does not reconcile to the DXtrade net SOL position; owner review required`)
+- the D-060 15-minute sentence (`INJ/USD virtual-lot state does not reconcile to the DXtrade net position after 15 minutes; owner review required`)
+
+Do **not** rematch after a manual flatten if virtual lots still exist. That keeps the stale lot. Use `/reconcile` instead. If both sides are already zero, rematch is the clear path.
 
 ### `/confirmrematch CODE INSTRUMENT`
 
-Keeps current virtual lots, clears only that halt, lifts the pause. No broker order.
+Keeps current virtual lots, clears that halt, lifts the pause. No broker order.
 
 ### `/re-run`
 
@@ -161,7 +164,8 @@ Telegram failure cannot undo a fill or delay a protective action.
 - `Not authorized` — wrong Telegram account; `/whoami`.
 - `/resume` without a name — `Specify an instrument`.
 - Reconcile refused, broker open — flatten DXtrade first.
-- Rematch refused, books disagree — if the broker is flat, that is a reconcile, not a rematch.
+- Rematch refused, books disagree — if the broker is flat and virtual lots remain, that is a reconcile, not a rematch.
+- Rematch refused on the 15-minute halt — deploy the rematch-15m-halt fix, then `/rematch` the named book.
 - `braked today: all five` with $0 combined P&L — supervisor could not read a book and fail-closed. Unread ≠ flat.
 - Safety halt still on after resume — resume only lifts the pause. A leftover runtime-error halt is `/re-run` when every book already matches.
 - Canary blocked — automatic execution is ON.
