@@ -215,7 +215,13 @@ export function createSolanaOwnerService(opts) {
 
   return Object.freeze({
     ...tradeify,
-    ...createRematchHandlers(opts),
+    ...createRematchHandlers({
+      ...opts,
+      gridDefinition: definition,
+      instrument: definition?.instrument ?? opts.instrument ?? "SOL/USD",
+      grid,
+      stateStore
+    }),
     requestReconcile,
     confirmReconcile,
     statusText,
