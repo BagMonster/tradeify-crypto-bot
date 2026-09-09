@@ -25,11 +25,11 @@ Configured in `config/instruments.json`. `baseUsd` is derived from the cap.
 
 | Instrument | Feed | Rings/side | From 200d MA | Cap |
 |---|---|---:|---|---:|
-| SOL/USD | SOLUSDT | 10 | ±10% … ±55% | $10,000 |
-| DOGE/USD | DOGEUSDT | 12 | ±9% … ±42% | $10,000 |
-| INJ/USD | INJUSDT | 12 | ±20% … ±75% | $10,000 |
-| AAVE/USD | AAVEUSDT | 12 | ±18% … ±67.5% | $10,000 |
-| AVAX/USD | AVAXUSDT | 12 | ±16% … ±60% | $10,000 |
+| SOL/USD | SOLUSDT | 10 | ±10% … ±55% | $100,000 |
+| DOGE/USD | DOGEUSDT | 12 | ±9% … ±42% | $100,000 |
+| INJ/USD | INJUSDT | 12 | ±20% … ±75% | $100,000 |
+| AAVE/USD | AAVEUSDT | 12 | ±18% … ±67.5% | $100,000 |
+| AVAX/USD | AVAXUSDT | 12 | ±16% … ±60% | $100,000 |
 
 Shared: 2 lots per ring, 0.5-band re-arm, 0.01 lot step, four-tranche exits back toward the MA.
 
@@ -51,6 +51,10 @@ Cuts are account-wide and measured on combined day P&L; the brake is measured on
 single instrument's day P&L, which is why a cut can fire before the brake. A cut
 re-fires on every evaluation while the account stays below its tier, so it trims
 repeatedly rather than once. Winners are never trimmed.
+
+## Session harvest
+
+At the first fresh account-day P&L of `+$250` or more (realized plus unrealized since 22:00 UTC), the worker pauses normal actions, flattens all enabled books, and confirms the broker is flat. Once confirmed, touch-cross entries may resume but ordinary tranche exits stay disabled until the next 22:00 UTC rollover. A failed or unread harvest halts fail-closed. See [D-064](docs/decisions/D-064-session-harvest.md).
 
 An unreadable book is not treated as flat. The supervisor then brakes every instrument.
 
