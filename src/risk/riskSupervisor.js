@@ -8,6 +8,10 @@
  *   1. FULL FLATTEN   combined day P&L <= -fullFlattenUsd
  *   2. PARTIAL CUT    combined day P&L <= -partialCutUsd
  *   3. ENTRY BRAKE    per instrument on that instrument's own day P&L
+ *   4. SESSION HARVEST combined day P&L >= +sessionHarvestUsd (D-064, off by default)
+ *
+ * Harvest flattens every book once per dayKey, does not set flattenedToday,
+ * does not entry-brake, and pauses tranche exits until rollover.
  *
  * An unreadable book is not a flat book. Flatten and cut still wait until every
  * book can be read. Entries are different: only the unreadable book is paused,
@@ -15,6 +19,8 @@
  * snapshot is readable again and that book has not lost -$entryBrakeUsd, entries
  * resume. A real -$300 brake, or a flatten, still holds until rollover.
  */
+
+import { harvestReason, shouldHarvest } from "./sessionHarvest.js";
 
 const REQUIRED_CONFIG = Object.freeze([
   "entryBrakeUsd",
@@ -77,9 +83,6 @@ export function createRiskSupervisor({
   const partialCutUsd = positiveNumber("partialCutUsd", config.partialCutUsd);
   const fullFlattenUsd = positiveNumber("fullFlattenUsd", config.fullFlattenUsd);
   const dailyLossLimitUsd = positiveNumber("dailyLossLimitUsd", config.dailyLossLimitUsd);
-  // D-063: an ordered ladder of cut tiers, deepest first. The legacy single
-  // partialCutUsd/partialCutFraction pair remains the deepest tier, so an absent
-  // cutTiers array reproduces the previous behaviour exactly.
   const cutTiers = Object.freeze(
     (Array.isArray(config.cutTiers) ? config.cutTiers : [])
       .map((tier, i) => {
@@ -107,15 +110,19 @@ export function createRiskSupervisor({
   if (cutTiers[0].thresholdUsd >= fullFlattenUsd) {
     throw new TypeError("the deepest cut tier must trigger before the full flatten");
   }
-  // No ordering is required between cut tiers and the entry brake: the brake is
-  // measured on ONE instrument's day P&L, the cut on the COMBINED account. A shallow
-  // tier firing before the brake is a valid and intended configuration.
   if (!(fullFlattenUsd < dailyLossLimitUsd)) {
     throw new TypeError("fullFlattenUsd must be smaller than dailyLossLimitUsd");
   }
 
+  const sessionHarvestEnabled = config.sessionHarvestEnabled === true;
+  const sessionHarvestUsd = sessionHarvestEnabled
+    ? positiveNumber("sessionHarvestUsd", config.sessionHarvestUsd)
+    : Number(config.sessionHarvestUsd);
+  const sessionHarvestThreshold = sessionHarvestEnabled ? sessionHarvestUsd : 0;
+
   let dayKey = null;
   let flattenedToday = false;
+  let harvestedToday = false;
   let cutsToday = 0;
   const brakedToday = new Set();
   let evaluating = false;
@@ -133,12 +140,25 @@ export function createRiskSupervisor({
     }
   }
 
+  function applyTrancheExitPause(on) {
+    for (const book of instruments) {
+      if (typeof book.setTrancheExitsPaused !== "function") continue;
+      try {
+        book.setTrancheExitsPaused(on === true);
+      } catch {
+        // optional gate — missing method is not a risk-ladder failure
+      }
+    }
+  }
+
   function rollover(nextDayKey) {
     dayKey = nextDayKey;
     flattenedToday = false;
+    harvestedToday = false;
     cutsToday = 0;
     brakedToday.clear();
     for (const book of instruments) applyEntryBrake(book, false);
+    applyTrancheExitPause(false);
   }
 
   function readBooks() {
@@ -182,6 +202,7 @@ export function createRiskSupervisor({
       lastError = null;
 
       const combined = fixed2(readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
+      applyTrancheExitPause(harvestedToday === true && flattenedToday !== true);
 
       if (combined <= -fullFlattenUsd) {
         if (flattenedToday) return Object.freeze({ action: "ALREADY_FLATTENED", combinedDayPnlUsd: combined });
@@ -285,6 +306,51 @@ export function createRiskSupervisor({
         return Object.freeze({ action: "BRAKE", instruments: Object.freeze(newlyBraked), combinedDayPnlUsd: combined });
       }
 
+      if (shouldHarvest({
+        enabled: sessionHarvestEnabled,
+        thresholdUsd: sessionHarvestThreshold,
+        flattenedToday,
+        harvestedToday,
+        combinedDayPnlUsd: combined,
+        readings
+      })) {
+        harvestedToday = true;
+        applyTrancheExitPause(true);
+        const results = [];
+        for (const reading of readings) {
+          try {
+            results.push({
+              instrument: reading.instrument,
+              result: await reading.book.executeProtectiveFlatten({
+                reason: harvestReason(combined, sessionHarvestThreshold),
+                dayKey: incomingDayKey,
+                bypassSlippageCap: true
+              })
+            });
+          } catch (error) {
+            results.push({ instrument: reading.instrument, result: { status: "THREW", reason: error?.message ?? "harvest flatten threw" } });
+          }
+        }
+        const failed = results.filter((r) => r.result?.status !== "FILLED" && r.result?.status !== "ALREADY_FLAT");
+        await addEvent(failed.length > 0 ? "ERROR" : "WARN", "RISK_SUPERVISOR_SESSION_HARVEST", {
+          combinedDayPnlUsd: combined,
+          threshold: sessionHarvestThreshold,
+          instruments: results.map((r) => ({ instrument: r.instrument, status: r.result?.status ?? "UNKNOWN" })),
+          allConfirmed: failed.length === 0
+        });
+        notifications?.enqueue?.({
+          kind: "SESSION_HARVEST",
+          eventKey: `D064-HARVEST:${incomingDayKey.replaceAll("-", "")}`,
+          reasonCode: "D064_SESSION_HARVEST"
+        });
+        return Object.freeze({
+          action: "HARVEST",
+          combinedDayPnlUsd: combined,
+          results: Object.freeze(results),
+          allConfirmed: failed.length === 0
+        });
+      }
+
       return Object.freeze({ action: "NONE", combinedDayPnlUsd: combined });
     } finally {
       evaluating = false;
@@ -309,6 +375,10 @@ export function createRiskSupervisor({
       fullFlattenUsd,
       brakedInstruments: Object.freeze([...brakedToday]),
       flattenedToday,
+      harvestedToday,
+      sessionHarvestEnabled,
+      sessionHarvestUsd: sessionHarvestEnabled ? sessionHarvestThreshold : null,
+      trancheExitsPaused: harvestedToday === true && flattenedToday !== true,
       cutsToday,
       lastError,
       perInstrument: Object.freeze(readings.map((r) => Object.freeze({
