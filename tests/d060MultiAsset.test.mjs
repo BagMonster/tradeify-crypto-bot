@@ -28,14 +28,14 @@ test("INJ/USD profile resolves to INJUSDT", () => {
   assert.equal(resolved.binanceSymbol, "INJUSDT");
 });
 
-test("INJ fitted geometry is ±20% to ±75% at $12.23 base and $6,300 gross", () => {
+test("INJ fitted geometry is ±20% to ±75% at the D-064 $100,000 cap", () => {
   const entry = raw.instruments.find((item) => item.instrument === "INJ/USD");
   const definition = buildGridDefinition(entry, 5.06);
-  assert.equal(Number(definition.baseUsd.toFixed(2)), 12.23);
+  assert.equal(Number(definition.baseUsd.toFixed(2)), 194.18);
   assert.equal(definition.levels, 12);
   assert.equal(definition.innermostDistance, 0.20);
   assert.equal(definition.outermostDistance, 0.75);
-  assert.equal(definition.grossExposureCeilingUsd, 6300);
+  assert.equal(definition.grossExposureCeilingUsd, 100000);
   assert.ok(definition.innermostRingUsd > 0.01 * 5.06);
 });
 
