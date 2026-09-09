@@ -340,6 +340,10 @@ export async function startTelegramBot({
       const result = await service.requestRematch(instrumentArg(symbol));
       await sendLatched(chatId, "/rematch", result.message);
     },
+    rerun: async (chatId) => {
+      const result = await service.requestRerun();
+      await sendLatched(chatId, "/re-run", result.message);
+    },
     dxpreflight: async (chatId) => {
       await bot.sendMessage(chatId, "Running DXtrade validation-only preflight. No order will be placed.");
       await sendLatched(chatId, "/dxpreflight", await service.dxPreflightText());
