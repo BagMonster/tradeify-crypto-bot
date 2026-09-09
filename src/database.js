@@ -211,6 +211,16 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
         payload JSONB NOT NULL DEFAULT '{}'::jsonb
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS session_harvest_state (
+        day_key TEXT PRIMARY KEY CHECK (day_key ~ '^\\d{4}-\\d{2}-\\d{2}$'),
+        status TEXT NOT NULL CHECK (status IN ('READY','PENDING','CONFIRMED','HALTED')),
+        trigger_pnl_usd NUMERIC(18,6),
+        confirmed_at TIMESTAMPTZ,
+        halt_reason TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS bars (
@@ -460,6 +470,47 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     );
   }
 
+  async function getSessionHarvestState(dayKey) {
+    const key = requiredText("session harvest day key", dayKey, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("session harvest day key is invalid");
+    const result = await pool.query(
+      "SELECT day_key, status, trigger_pnl_usd, confirmed_at, halt_reason FROM session_harvest_state WHERE day_key=$1",
+      [key]
+    );
+    if (result.rowCount === 0) return Object.freeze({ dayKey: key, status: "READY", triggerPnlUsd: null, confirmedAt: null, haltReason: null });
+    if (result.rowCount !== 1) throw new Error("session harvest state lookup returned an invalid row count");
+    const row = result.rows[0];
+    return Object.freeze({
+      dayKey: row.day_key,
+      status: requiredText("session harvest status", row.status, 16),
+      triggerPnlUsd: row.trigger_pnl_usd == null ? null : toFiniteNumber("session harvest trigger P&L", row.trigger_pnl_usd),
+      confirmedAt: row.confirmed_at == null ? null : toDate("session harvest confirmation", row.confirmed_at).toISOString(),
+      haltReason: row.halt_reason == null ? null : requiredText("session harvest halt reason", row.halt_reason, 300)
+    });
+  }
+
+  async function saveSessionHarvestState(input) {
+    const key = requiredText("session harvest day key", input?.dayKey, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("session harvest day key is invalid");
+    const status = requiredText("session harvest status", input?.status, 16);
+    if (!["READY", "PENDING", "CONFIRMED", "HALTED"].includes(status)) throw new Error("session harvest status is invalid");
+    const trigger = input?.triggerPnlUsd == null ? null : toFiniteNumber("session harvest trigger P&L", input.triggerPnlUsd);
+    const confirmedAt = input?.confirmedAt == null ? null : toDate("session harvest confirmation", input.confirmedAt).toISOString();
+    const haltReason = input?.haltReason == null ? null : requiredText("session harvest halt reason", input.haltReason, 300);
+    const result = await pool.query(
+      `INSERT INTO session_harvest_state (day_key, status, trigger_pnl_usd, confirmed_at, halt_reason)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (day_key) DO UPDATE SET
+         status=EXCLUDED.status, trigger_pnl_usd=EXCLUDED.trigger_pnl_usd,
+         confirmed_at=EXCLUDED.confirmed_at, halt_reason=EXCLUDED.halt_reason, updated_at=NOW()
+       RETURNING day_key, status, trigger_pnl_usd, confirmed_at, halt_reason`,
+      [key, status, trigger, confirmedAt, haltReason]
+    );
+    if (result.rowCount !== 1) throw new Error("session harvest state save failed");
+    const row = result.rows[0];
+    return Object.freeze({ dayKey: row.day_key, status: row.status, triggerPnlUsd: row.trigger_pnl_usd == null ? null : toFiniteNumber("session harvest trigger P&L", row.trigger_pnl_usd), confirmedAt: row.confirmed_at == null ? null : toDate("session harvest confirmation", row.confirmed_at).toISOString(), haltReason: row.halt_reason });
+  }
+
   async function writeBar(queryable, bar) {
     const result = await queryable.query(
       `INSERT INTO bars (
@@ -688,6 +739,8 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     setIndicatorsWarm,
     getDailyLedger,
     addEvent,
+    getSessionHarvestState,
+    saveSessionHarvestState,
     upsertBar,
     upsertBars,
     getBars,
