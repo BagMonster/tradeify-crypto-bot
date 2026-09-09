@@ -6,15 +6,20 @@ export const RECONCILIATION_HALT_REASON =
   "SOL virtual-lot state does not reconcile to the DXtrade net SOL position; owner review required";
 
 const FIFTEEN_MINUTE_RECON_HALT =
-  /^[A-Z0-9]+\/[A-Z]+ virtual-lot state does not reconcile to the DXtrade net position after 15 minutes; owner review required$/;
+  /^([A-Z0-9]+\/[A-Z]+) virtual-lot state does not reconcile to the DXtrade net position after 15 minutes; owner review required$/;
 
-export function isReconciliationHalt(reason) {
-  if (reason === RECONCILIATION_HALT_REASON) return true;
-  return typeof reason === "string" && FIFTEEN_MINUTE_RECON_HALT.test(reason);
+export function isReconciliationHalt(reason, instrument = null) {
+  // Unscoped calls retain the classifier used by status/diagnostics. Commands
+  // must pass their named book so a clean INJ rematch can never clear a SOL or
+  // AAVE reconciliation halt from the single global safety-halt row.
+  if (reason === RECONCILIATION_HALT_REASON) return instrument === null || instrument === "SOL/USD";
+  if (typeof reason !== "string") return false;
+  const match = reason.match(FIFTEEN_MINUTE_RECON_HALT);
+  return match !== null && (instrument === null || match[1] === instrument);
 }
 
-export function hasReconciliationHalt(state) {
-  return state?.safety_halt === true && isReconciliationHalt(state.halt_reason);
+export function hasReconciliationHalt(state, instrument = null) {
+  return state?.safety_halt === true && isReconciliationHalt(state.halt_reason, instrument);
 }
 
 function otherHaltMessage(reason) {
@@ -52,6 +57,10 @@ function resolveInstrument(opts) {
   if (typeof fromDefinition === "string" && fromDefinition.includes("/")) return fromDefinition;
   if (typeof opts?.instrument === "string" && opts.instrument.includes("/")) return opts.instrument;
   return "SOL/USD";
+}
+
+function instrumentLabel(instrument) {
+  return instrument === "SOL/USD" ? "SOL" : instrument;
 }
 
 function describeBook(state, grid) {
@@ -163,7 +172,7 @@ export function createRematchHandlers({
       loadGridState()
     ]);
     if (!gridState) return { code: null, message: `${bookInstrument} grid state is not initialized. Rematch is unavailable.` };
-    if (!hasReconciliationHalt(botState)) {
+    if (!hasReconciliationHalt(botState, bookInstrument)) {
       return { code: null, message: noReconciliationHaltMessage(botState) };
     }
     const book = describeBook(gridState, grid);
@@ -171,7 +180,7 @@ export function createRematchHandlers({
     if (!broker.ok) {
       return {
         code: null,
-        message: `Rematch refused: could not read a fresh DXtrade ${bookInstrument} position (${broker.error}).`
+        message: `Rematch refused: could not read a fresh DXtrade ${instrumentLabel(bookInstrument)} position (${broker.error}).`
       };
     }
     if (!netsMatch(book.netUnits, broker.netUnits)) {
@@ -260,9 +269,17 @@ export function createRematchHandlers({
       ].join("\n");
     }
     const liveState = await database.getState();
-    if (!hasReconciliationHalt(liveState)) {
+    if (!hasReconciliationHalt(liveState, bookInstrument)) {
       await database.clearResumeChallenge();
-      return noReconciliationHaltMessage(liveState);
+      if (liveState?.safety_halt !== true) return noReconciliationHaltMessage(liveState);
+      return [
+        noReconciliationHaltMessage(liveState),
+        "",
+        "REMATCH ABORTED — RECONCILIATION HALT WAS NO LONGER LATCHED",
+        "",
+        "The stored safety halt changed after the rematch code was issued.",
+        "Rematch did not clear a different halt and did not lift the operator pause."
+      ].join("\n");
     }
     if (typeof database.clearSafetyHaltIfReason !== "function") {
       await database.clearResumeChallenge();
