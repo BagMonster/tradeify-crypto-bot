@@ -67,6 +67,24 @@ test("D-064 terminal harvest failure is durable and fail-closed", async () => {
   assert.equal(halts.length, 1);
 });
 
+test("D-064 unread broker data becomes a durable halt that pauses normal exits", async () => {
+  const sol = book("SOL/USD");
+  sol.getDayPnlUsd = () => { throw new Error("broker metrics unavailable"); };
+  const halts = [];
+  const supervisor = createRiskSupervisor({
+    config,
+    instruments: [sol],
+    harvestStore: memoryHarvestStore(),
+    getCombinedDayPnlUsd: () => 0,
+    setSafetyHalt: async (reason) => halts.push(reason)
+  });
+  const result = await supervisor.evaluate({ dayKey: "2026-09-09" });
+  assert.equal(result.action, "HARVEST_HALTED");
+  assert.equal(supervisor.getSnapshot().harvest.status, "HALTED");
+  assert.equal(supervisor.getSnapshot().trancheExitsPaused, true);
+  assert.equal(halts.length, 1);
+});
+
 test("D-064 reset at 22:00 UTC re-enables normal exits for the new account day", async () => {
   const sol = book("SOL/USD");
   let pnl = 250;
