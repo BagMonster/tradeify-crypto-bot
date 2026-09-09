@@ -12,7 +12,9 @@ const KINDS = new Set([
   "HARVEST_PENDING",
   "HARVEST_CONFIRMED",
   "HARVEST_HALTED",
-  "HARVEST_RESET"
+  "HARVEST_FRESHNESS_GRACE",
+  "HARVEST_RESET",
+  "HALT_WARNING"
 ]);
 
 const PROTECTIVE_REASONS = new Set([
@@ -30,7 +32,11 @@ const SAFETY_HALT_REASONS = new Set([
   "SOL_RUNTIME_ERROR",
   "D049_PARTIAL_CUT_UNCONFIRMED",
   "D049_FULL_FLATTEN_UNCONFIRMED",
-  "D049_BASELINE_MISMATCH"
+  "D049_BASELINE_MISMATCH",
+  "D060_ACCOUNT_FULL_FLATTEN",
+  "RECONCILIATION_MISMATCH",
+  "RUNTIME_ERROR",
+  "ACCOUNT_LOCKOUT"
 ]);
 
 function finite(name, value) {
@@ -124,12 +130,64 @@ function formatEvent(event) {
     return { kind, eventKey, message: ["D-064 HARVEST CONFIRMED", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Threshold: +${money(event.thresholdUsd)}`, "Every enabled broker book is flat.", "New touch-cross entries may run. Ordinary tranche exits are disabled until 22:00 UTC.", `Confirmed: ${timestamp(confirmedAt)}`].join("\n") };
   }
   if (kind === "HARVEST_HALTED") {
-    const reason = safeText("harvest halt reason", event.reason, { max: 300, pattern: /^[A-Za-z0-9 .,:;'()+-]+$/ });
-    return { kind, eventKey, message: ["D-064 HARVEST SAFETY HALT", reason, "New entries and ordinary exits remain blocked until the broker position state is resolved."].join("\n") };
+    const reason = safeText("harvest halt reason", event.reason, { max: 300, pattern: /^[A-Za-z0-9 .,:;'()/+-]+$/ });
+    const freshnessFailure = reason.startsWith("D-064 harvest cannot verify fresh broker account data for ");
+    return {
+      kind,
+      eventKey,
+      message: [
+        "🚨 D-064 HARVEST SAFETY HALT",
+        reason,
+        freshnessFailure
+          ? "Correction: wait for /status to show fresh DXtrade data and matching virtual/broker nets, then send /harvestrecover and confirm its 6-digit code."
+          : "Correction: inspect /status and DXtrade positions. Do not use /resume to bypass this halt; resolve the broker flat-confirmation problem first."
+      ].join("\n")
+    };
+  }
+  if (kind === "HARVEST_FRESHNESS_GRACE") {
+    if (!Array.isArray(event.instruments) || event.instruments.length === 0) throw new TypeError("freshness grace instruments are required");
+    const instruments = event.instruments.map((value) => headingInstrument(value));
+    const graceMs = positive("graceMs", event.graceMs);
+    return {
+      kind,
+      eventKey,
+      message: [
+        "⚠️ D-064 FRESH-DATA GRACE",
+        `DXtrade account data is temporarily unreadable for: ${instruments.join(", ")}.`,
+        "Normal grid actions are blocked while broker data is stale; no durable halt has been latched yet.",
+        `Grace window: ${Math.ceil(graceMs / 60000)} minutes.`,
+        "Correction: wait for /status to show fresh DXtrade data. The gate clears automatically; do not use /resume."
+      ].join("\n")
+    };
   }
   if (kind === "HARVEST_RESET") {
     const dayKey = safeText("dayKey", event.dayKey, { max: 10, pattern: /^\d{4}-\d{2}-\d{2}$/ });
     return { kind, eventKey, message: ["D-064 ACCOUNT-DAY RESET", `New Tradeify account day: ${dayKey}`, "Harvest state cleared. Ordinary tranche exits are enabled again."].join("\n") };
+  }
+  if (kind === "HALT_WARNING") {
+    const reasonCode = safeText("halt warning reason code", event.reasonCode, { max: 64, pattern: /^[A-Z0-9_]+$/ });
+    if (!SAFETY_HALT_REASONS.has(reasonCode)) throw new TypeError("halt warning reason is unsupported");
+    const reason = safeText("halt warning reason", event.reason, { max: 300, pattern: /^[A-Za-z0-9 .,:;'()/+$-]+$/ });
+    const correction = safeText("halt warning correction", event.correction, { max: 400, pattern: /^[A-Za-z0-9 .,:;'()/+$<>-]+$/ });
+    const warningNumber = Number(event.warningNumber);
+    const warningCount = Number(event.warningCount);
+    if (!Number.isInteger(warningNumber) || !Number.isInteger(warningCount) || warningCount !== 5 || warningNumber < 1 || warningNumber > warningCount) {
+      throw new TypeError("halt warning sequence is invalid");
+    }
+    const haltAt = canonicalUtc("haltAt", event.haltAt);
+    const scope = event.instrument == null ? "TRADEIFY ACCOUNT" : headingInstrument(event.instrument);
+    return {
+      kind,
+      eventKey,
+      message: [
+        `⚠️ ${scope} HALT WARNING ${warningNumber}/${warningCount} — ${reasonCode}`,
+        `Reason: ${reason}`,
+        "Trading is still running; no safety halt has fired.",
+        `Automatic halt eligible: ${timestamp(haltAt)}.`,
+        `Correction: ${correction}`,
+        "To defer this exact halt for a new 25-minute warning cycle, send /pausehalt."
+      ].join("\n")
+    };
   }
 
   if (kind === "ENTRY_CONFIRMED") {
@@ -265,11 +323,11 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "\uD83D\uDEA8 SOL SAFETY HALT \u2014 RECONCILIATION MISMATCH",
+        `\uD83D\uDEA8 ${instrument} SAFETY HALT \u2014 RECONCILIATION MISMATCH`,
         `Virtual net: ${netLabel(expected, event.instrument)}`,
         `DXtrade net: ${netLabel(broker, event.instrument)}`,
         `State version: ${stateVersion}`,
-        "New strategy actions are blocked. Owner review is required."
+        `Correction: once /status shows these nets match, send /rematch ${quantityUnit(event.instrument)} and confirm its code.`
       ].join("\n")
     };
   }
@@ -302,14 +360,30 @@ function formatEvent(event) {
         ? "The D-049 emergency flatten did not confirm the account flat."
         : reasonCode === "D049_BASELINE_MISMATCH"
           ? "The persisted D-049 daily baseline does not match the fresh DXtrade account baseline."
-          : "The production runtime encountered an internal processing error.";
+          : reasonCode === "D060_ACCOUNT_FULL_FLATTEN"
+            ? "The account-wide daily-loss flatten threshold was reached."
+            : reasonCode === "RECONCILIATION_MISMATCH"
+              ? "The virtual-lot position does not match the DXtrade net position."
+              : reasonCode === "ACCOUNT_LOCKOUT"
+                ? "DXtrade returned an unexpected or internally inconsistent account position state."
+              : "The production runtime encountered an internal processing error.";
+    const correction = reasonCode === "SOL_RUNTIME_ERROR" || reasonCode === "RUNTIME_ERROR"
+      ? "Correction: after /status shows every virtual/broker net matches, send /rerun and confirm its code."
+      : reasonCode === "D060_ACCOUNT_FULL_FLATTEN"
+        ? "Correction: inspect /status and DXtrade fills. This protective lock holds until the next 22:00 UTC account-day reset."
+        : reasonCode === "RECONCILIATION_MISMATCH"
+          ? `Correction: after /status shows matching virtual and DXtrade nets, send /rematch ${quantityUnit(event.instrument)} and confirm its code.`
+          : reasonCode === "ACCOUNT_LOCKOUT"
+            ? "Correction: inspect /status and DXtrade positions, then correct the unexpected broker position before a durable halt fires."
+        : "Correction: inspect /status and DXtrade before taking the halt's documented recovery path. /resume cannot bypass it.";
+    const scope = event.instrument == null ? "TRADEIFY ACCOUNT" : headingInstrument(event.instrument);
     return {
       kind,
       eventKey,
       message: [
-        `\uD83D\uDEA8 SOL SAFETY HALT \u2014 ${reasonCode}`,
+        `\uD83D\uDEA8 ${scope} SAFETY HALT \u2014 ${reasonCode}`,
         detail,
-        "New strategy entries are halted. Owner review is required."
+        correction
       ].join("\n")
     };
   }

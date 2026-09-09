@@ -7,6 +7,8 @@
 
 import { harvestReason, setTrancheExitsPausedAll } from "./sessionHarvest.js";
 
+const DEFAULT_HARVEST_FRESH_DATA_GRACE_MS = 5 * 60 * 1000;
+
 const REQUIRED_CONFIG = Object.freeze([
   "entryBrakeUsd",
   "partialCutUsd",
@@ -52,6 +54,7 @@ export function createRiskSupervisor({
   setSafetyHalt = async () => {},
   clearSafetyHaltIfReason = async () => false,
   getSafetyHaltState = async () => null,
+  requestHaltWarning = null,
   now = () => Date.now()
 }) {
   if (!config || typeof config !== "object") throw new TypeError("risk config is required");
@@ -109,6 +112,10 @@ export function createRiskSupervisor({
     ? positiveNumber("sessionHarvestUsd", config.sessionHarvestUsd)
     : Number(config.sessionHarvestUsd);
   const sessionHarvestThreshold = sessionHarvestEnabled ? sessionHarvestUsd : 0;
+  const configuredFreshDataGrace = Number(config.sessionHarvestFreshDataGraceMs);
+  const sessionHarvestFreshDataGraceMs = sessionHarvestEnabled && Number.isFinite(configuredFreshDataGrace)
+    ? positiveNumber("sessionHarvestFreshDataGraceMs", configuredFreshDataGrace)
+    : DEFAULT_HARVEST_FRESH_DATA_GRACE_MS;
   if (sessionHarvestEnabled && (!harvestStore || typeof harvestStore.get !== "function" || typeof harvestStore.save !== "function")) {
     throw new TypeError("enabled session harvest requires a durable harvestStore");
   }
@@ -121,6 +128,7 @@ export function createRiskSupervisor({
   let evaluating = false;
   let hasSuccessfulRead = false;
   let lastError = null;
+  let unreadSinceMs = null;
 
   function stickyBrake(instrument) {
     return flattenedToday === true || brakedToday.has(instrument);
@@ -154,6 +162,7 @@ export function createRiskSupervisor({
     harvestState = null;
     cutsToday = 0;
     brakedToday.clear();
+    unreadSinceMs = null;
     for (const book of instruments) applyEntryBrake(book, false);
     applyTrancheExitPause(false);
   }
@@ -252,6 +261,41 @@ export function createRiskSupervisor({
     return Object.freeze({ action: "HARVEST_CONFIRMED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: confirmed });
   }
 
+  async function executeFullFlatten({ incomingDayKey, combined, readings }) {
+    if (flattenedToday) return Object.freeze({ action: "ALREADY_FLATTENED", combinedDayPnlUsd: combined });
+    flattenedToday = true;
+    const results = [];
+    for (const reading of readings) {
+      applyEntryBrake(reading.book, true);
+      brakedToday.add(reading.instrument);
+      try {
+        results.push({
+          instrument: reading.instrument,
+          result: await reading.book.executeProtectiveFlatten({
+            reason: `D-060 account full flatten at ${combined.toFixed(2)}`,
+            dayKey: incomingDayKey,
+            bypassSlippageCap: true
+          })
+        });
+      } catch (error) {
+        results.push({ instrument: reading.instrument, result: { status: "THREW", reason: error?.message ?? "flatten threw" } });
+      }
+    }
+    const failed = results.filter((r) => r.result?.status !== "FILLED" && r.result?.status !== "ALREADY_FLAT");
+    await addEvent(failed.length > 0 ? "ERROR" : "WARN", "RISK_SUPERVISOR_FULL_FLATTEN", {
+      combinedDayPnlUsd: combined,
+      threshold: -fullFlattenUsd,
+      instruments: results.map((r) => ({ instrument: r.instrument, status: r.result?.status ?? "UNKNOWN" })),
+      allConfirmed: failed.length === 0
+    });
+    notifications?.enqueue?.({
+      kind: "SAFETY_HALT",
+      eventKey: `D060-FLATTEN:${incomingDayKey.replaceAll("-", "")}`,
+      reasonCode: "D060_ACCOUNT_FULL_FLATTEN"
+    });
+    return Object.freeze({ action: "FLATTEN", combinedDayPnlUsd: combined, results: Object.freeze(results), allConfirmed: failed.length === 0 });
+  }
+
   function readBooks() {
     return instruments.map((book) => {
       let unrealisedUsd = 0;
@@ -285,19 +329,41 @@ export function createRiskSupervisor({
       const readings = readBooks();
       const unreadable = readings.filter((r) => r.readFailed);
       if (unreadable.length > 0) {
+        const nowMs = now();
+        if (unreadSinceMs === null) {
+          unreadSinceMs = nowMs;
+          if (sessionHarvestEnabled && hasSuccessfulRead) {
+            await addEvent("WARN", "D064_FRESH_DATA_GRACE_STARTED", {
+              dayKey: incomingDayKey,
+              instruments: unreadable.map((r) => r.instrument),
+              graceMs: sessionHarvestFreshDataGraceMs
+            });
+            notifications?.enqueue?.({
+              kind: "HARVEST_FRESHNESS_GRACE",
+              eventKey: `D064-FRESH-GRACE:${incomingDayKey.replaceAll("-", "")}:${nowMs}`,
+              instruments: unreadable.map((r) => r.instrument),
+              graceMs: sessionHarvestFreshDataGraceMs
+            });
+          }
+        }
         for (const reading of readings) {
-          applyEntryBrake(reading.book, stickyBrake(reading.instrument) || reading.readFailed);
+          applyEntryBrake(
+            reading.book,
+            sessionHarvestEnabled ? true : (stickyBrake(reading.instrument) || reading.readFailed)
+          );
         }
         lastError = `Cannot read ${unreadable.map((r) => r.instrument).join(", ")}`;
         await addEvent("ERROR", "RISK_SUPERVISOR_ACCOUNT_DATA_UNAVAILABLE", {
           instruments: unreadable.map((r) => r.instrument)
         });
-        // A worker must not create an irreversible daily harvest halt merely
-        // because its first account poll has not populated the in-memory book
-        // snapshots yet. Feeds are not allowed to act until a later successful
-        // preflight. Once fresh data has been read, any later unread result is
-        // a real fail-closed D-064 halt.
-        if (sessionHarvestEnabled && hasSuccessfulRead) {
+        // Keep ordinary strategy actions fail-closed while broker data is
+        // unreadable, but do not turn a one-poll delay into a durable,
+        // account-wide D-064 halt.  A fresh read inside the configured grace
+        // window clears this automatically.  An initial cold worker remains
+        // blocked without creating an irreversible halt until it has ever read
+        // a usable snapshot.
+        const graceExpired = nowMs - unreadSinceMs >= sessionHarvestFreshDataGraceMs;
+        if (sessionHarvestEnabled && hasSuccessfulRead && graceExpired) {
           const reason = `D-064 harvest cannot verify fresh broker account data for ${unreadable.map((r) => r.instrument).join(", ")}`;
           const halted = await haltHarvest({
             incomingDayKey,
@@ -306,10 +372,15 @@ export function createRiskSupervisor({
           });
           return Object.freeze({ action: "HARVEST_HALTED", instruments: unreadable.map((r) => r.instrument), harvest: halted });
         }
-        return Object.freeze({ action: "ACCOUNT_DATA_UNAVAILABLE", instruments: unreadable.map((r) => r.instrument) });
+        return Object.freeze({
+          action: "ACCOUNT_DATA_UNAVAILABLE",
+          instruments: unreadable.map((r) => r.instrument),
+          graceRemainingMs: Math.max(0, sessionHarvestFreshDataGraceMs - (nowMs - unreadSinceMs))
+        });
       }
       lastError = null;
       hasSuccessfulRead = true;
+      unreadSinceMs = null;
 
       const suppliedCombined = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
       const combined = fixed2(Number.isFinite(suppliedCombined) ? suppliedCombined : readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
@@ -318,42 +389,16 @@ export function createRiskSupervisor({
 
       if (combined <= -fullFlattenUsd) {
         if (flattenedToday) return Object.freeze({ action: "ALREADY_FLATTENED", combinedDayPnlUsd: combined });
-        flattenedToday = true;
-        const results = [];
-        for (const reading of readings) {
-          applyEntryBrake(reading.book, true);
-          brakedToday.add(reading.instrument);
-          try {
-            results.push({
-              instrument: reading.instrument,
-              result: await reading.book.executeProtectiveFlatten({
-                reason: `D-060 account full flatten at ${combined.toFixed(2)}`,
-                dayKey: incomingDayKey,
-                bypassSlippageCap: true
-              })
-            });
-          } catch (error) {
-            results.push({ instrument: reading.instrument, result: { status: "THREW", reason: error?.message ?? "flatten threw" } });
-          }
+        if (typeof requestHaltWarning === "function") {
+          const warning = await requestHaltWarning({
+            key: `D060_ACCOUNT_FULL_FLATTEN:${incomingDayKey}`,
+            reasonCode: "D060_ACCOUNT_FULL_FLATTEN",
+            reason: `Account-day P&L is ${combined.toFixed(2)}, at or below the -${fullFlattenUsd.toFixed(2)} full-flatten threshold.`,
+            correction: "Inspect /status and DXtrade. Send /pausehalt to defer the account flatten for another 25-minute warning cycle."
+          });
+          return Object.freeze({ action: "HALT_WARNING_PENDING", combinedDayPnlUsd: combined, warning });
         }
-        const failed = results.filter((r) => r.result?.status !== "FILLED" && r.result?.status !== "ALREADY_FLAT");
-        await addEvent(failed.length > 0 ? "ERROR" : "WARN", "RISK_SUPERVISOR_FULL_FLATTEN", {
-          combinedDayPnlUsd: combined,
-          threshold: -fullFlattenUsd,
-          instruments: results.map((r) => ({ instrument: r.instrument, status: r.result?.status ?? "UNKNOWN" })),
-          allConfirmed: failed.length === 0
-        });
-        notifications?.enqueue?.({
-          kind: "SAFETY_HALT",
-          eventKey: `D060-FLATTEN:${incomingDayKey.replaceAll("-", "")}`,
-          reasonCode: "D060_ACCOUNT_FULL_FLATTEN"
-        });
-        return Object.freeze({
-          action: "FLATTEN",
-          combinedDayPnlUsd: combined,
-          results: Object.freeze(results),
-          allConfirmed: failed.length === 0
-        });
+        return executeFullFlatten({ incomingDayKey, combined, readings });
       }
 
       if (harvestBlocksNormalActions()) return runHarvest({ incomingDayKey, combined, readings });
@@ -464,6 +509,17 @@ export function createRiskSupervisor({
     return evaluate({ dayKey: incomingDayKey });
   }
 
+  async function executeDeferredFullFlatten({ dayKey: incomingDayKey } = {}) {
+    if (typeof incomingDayKey !== "string" || incomingDayKey === "") throw new TypeError("executeDeferredFullFlatten requires a dayKey");
+    if (incomingDayKey !== dayKey) rollover(incomingDayKey);
+    const readings = readBooks();
+    if (readings.some((reading) => reading.readFailed)) return Object.freeze({ action: "NO_LONGER_REQUIRED" });
+    const supplied = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
+    const combined = fixed2(Number.isFinite(supplied) ? supplied : readings.reduce((sum, reading) => sum + reading.dayPnlUsd, 0));
+    if (combined > -fullFlattenUsd) return Object.freeze({ action: "NO_LONGER_REQUIRED", combinedDayPnlUsd: combined });
+    return executeFullFlatten({ incomingDayKey, combined, readings });
+  }
+
   function getSnapshot() {
     const readings = readBooks();
     const suppliedCombined = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
@@ -486,6 +542,13 @@ export function createRiskSupervisor({
       harvest: harvestState,
       sessionHarvestEnabled,
       sessionHarvestUsd: sessionHarvestEnabled ? sessionHarvestThreshold : null,
+      sessionHarvestFreshDataGraceMs: sessionHarvestEnabled ? sessionHarvestFreshDataGraceMs : null,
+      freshDataGrace: unreadSinceMs === null
+        ? null
+        : Object.freeze({
+          sinceMs: unreadSinceMs,
+          remainingMs: Math.max(0, sessionHarvestFreshDataGraceMs - (now() - unreadSinceMs))
+        }),
       harvestedToday: harvestState?.status === "CONFIRMED",
       trancheExitsPaused: ["PENDING", "CONFIRMED", "HALTED"].includes(harvestState?.status),
       cutsToday,
@@ -501,5 +564,5 @@ export function createRiskSupervisor({
     });
   }
 
-  return Object.freeze({ evaluate, recoverHarvest, getSnapshot, allocateProportionalCut });
+  return Object.freeze({ evaluate, recoverHarvest, executeDeferredFullFlatten, getSnapshot, allocateProportionalCut });
 }

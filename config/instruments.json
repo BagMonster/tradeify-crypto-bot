@@ -21,6 +21,7 @@
     "dailyLossLimitUsd": 1500,
     "rolloverHourUtc": 22,
     "sessionHarvestEnabled": true,
-    "sessionHarvestUsd": 250
+    "sessionHarvestUsd": 250,
+    "sessionHarvestFreshDataGraceMs": 300000
   }
 }

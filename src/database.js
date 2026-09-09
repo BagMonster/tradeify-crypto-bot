@@ -221,6 +221,22 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS halt_warning_cycle (
+        id SMALLINT PRIMARY KEY CHECK (id = 1),
+        cycle_key TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        instrument TEXT,
+        correction TEXT NOT NULL,
+        warning_number SMALLINT NOT NULL CHECK (warning_number BETWEEN 1 AND 5),
+        started_at TIMESTAMPTZ NOT NULL,
+        next_warning_at TIMESTAMPTZ NOT NULL,
+        halt_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (halt_at > started_at)
+      )
+    `);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS bars (
@@ -298,10 +314,6 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
       "account snapshot openPositionsCount",
       snapshot.openPositionsCount
     );
-    const invariantError = snapshot.invariantError == null
-      ? null
-      : requiredText("account snapshot invariantError", snapshot.invariantError, 300);
-
     const current = await getState();
     const highWater = Math.max(current.high_water, peakClosedBalance, balance);
     const mllFloor = current.payout_taken
@@ -318,12 +330,6 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
               daily_realized_pnl = $6,
               daily_unrealized_pnl = $7,
               has_open_position = $8,
-              safety_halt = CASE WHEN $9::text IS NULL THEN safety_halt ELSE TRUE END,
-              halt_reason = CASE
-                WHEN $9::text IS NULL THEN halt_reason
-                WHEN safety_halt AND halt_reason IS NOT NULL THEN halt_reason
-                ELSE $9::text
-              END,
               updated_at = NOW()
         WHERE id = 1
         RETURNING *`,
@@ -335,8 +341,7 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
         mllFloor,
         dayClosedPl,
         openPl,
-        openPositionsCount > 0,
-        invariantError
+        openPositionsCount > 0
       ]
     );
     if (result.rowCount !== 1) throw new Error("bot_state row is missing");
@@ -403,6 +408,69 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
         RETURNING safety_halt`,
       [normalizedReason]
     );
+    return result.rowCount === 1;
+  }
+
+  function normalizeHaltWarningCycle(row) {
+    if (!row) return null;
+    return Object.freeze({
+      key: requiredText("halt warning cycle key", row.cycle_key, 160),
+      reasonCode: requiredText("halt warning cycle reason", row.reason_code, 64),
+      reason: requiredText("halt warning cycle message", row.reason, 300),
+      instrument: row.instrument == null ? null : requiredText("halt warning cycle instrument", row.instrument, 32),
+      correction: requiredText("halt warning cycle correction", row.correction, 400),
+      warningNumber: toNonNegativeInteger("halt warning number", row.warning_number),
+      startedAt: toDate("halt warning started_at", row.started_at).toISOString(),
+      nextWarningAt: toDate("halt warning next_warning_at", row.next_warning_at).toISOString(),
+      haltAt: toDate("halt warning halt_at", row.halt_at).toISOString()
+    });
+  }
+
+  async function getHaltWarningCycle() {
+    const result = await pool.query("SELECT * FROM halt_warning_cycle WHERE id = 1");
+    if (result.rowCount === 0) return null;
+    if (result.rowCount !== 1) throw new Error("halt_warning_cycle is not singular");
+    return normalizeHaltWarningCycle(result.rows[0]);
+  }
+
+  async function saveHaltWarningCycle(cycle) {
+    const key = requiredText("halt warning cycle key", cycle?.key, 160);
+    const reasonCode = requiredText("halt warning cycle reason", cycle?.reasonCode, 64);
+    const reason = requiredText("halt warning cycle message", cycle?.reason, 300);
+    const instrument = cycle?.instrument == null ? null : requiredText("halt warning cycle instrument", cycle.instrument, 32);
+    const correction = requiredText("halt warning cycle correction", cycle?.correction, 400);
+    const warningNumber = toNonNegativeInteger("halt warning number", cycle?.warningNumber);
+    if (warningNumber < 1 || warningNumber > 5) throw new Error("halt warning number must be between 1 and 5");
+    const startedAt = toDate("halt warning startedAt", cycle?.startedAt);
+    const nextWarningAt = toDate("halt warning nextWarningAt", cycle?.nextWarningAt);
+    const haltAt = toDate("halt warning haltAt", cycle?.haltAt);
+    const result = await pool.query(
+      `INSERT INTO halt_warning_cycle (
+         id, cycle_key, reason_code, reason, instrument, correction,
+         warning_number, started_at, next_warning_at, halt_at
+       ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (id) DO UPDATE SET
+         cycle_key = EXCLUDED.cycle_key,
+         reason_code = EXCLUDED.reason_code,
+         reason = EXCLUDED.reason,
+         instrument = EXCLUDED.instrument,
+         correction = EXCLUDED.correction,
+         warning_number = EXCLUDED.warning_number,
+         started_at = EXCLUDED.started_at,
+         next_warning_at = EXCLUDED.next_warning_at,
+         halt_at = EXCLUDED.halt_at,
+         updated_at = NOW()
+       RETURNING *`,
+      [key, reasonCode, reason, instrument, correction, warningNumber, startedAt, nextWarningAt, haltAt]
+    );
+    if (result.rowCount !== 1) throw new Error("halt warning cycle was not saved");
+    return normalizeHaltWarningCycle(result.rows[0]);
+  }
+
+  async function clearHaltWarningCycle(key = null) {
+    const result = key == null
+      ? await pool.query("DELETE FROM halt_warning_cycle WHERE id = 1 RETURNING cycle_key")
+      : await pool.query("DELETE FROM halt_warning_cycle WHERE id = 1 AND cycle_key = $1 RETURNING cycle_key", [requiredText("halt warning cycle key", key, 160)]);
     return result.rowCount === 1;
   }
 
@@ -733,6 +801,9 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     setSafetyHalt,
     clearSafetyHalt,
     clearSafetyHaltIfReason,
+    getHaltWarningCycle,
+    saveHaltWarningCycle,
+    clearHaltWarningCycle,
     setOperatorKilled,
     setResumeChallenge,
     clearResumeChallenge,

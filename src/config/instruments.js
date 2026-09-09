@@ -111,7 +111,10 @@ function validateAccountRisk(input) {
   const sessionHarvestUsd = sessionHarvestEnabled
     ? positive("accountRisk.sessionHarvestUsd", risk.sessionHarvestUsd)
     : (risk.sessionHarvestUsd == null ? null : positive("accountRisk.sessionHarvestUsd", risk.sessionHarvestUsd));
-  return Object.freeze({ entryBrakeUsd, entryBrakeScope: risk.entryBrakeScope, partialCutUsd, partialCutFraction, partialCutAllocation: risk.partialCutAllocation, fullFlattenUsd, flattenHoldsUntilRollover: true, dailyLossLimitUsd, rolloverHourUtc, sessionHarvestEnabled, sessionHarvestUsd });
+  const sessionHarvestFreshDataGraceMs = risk.sessionHarvestFreshDataGraceMs == null
+    ? 300_000
+    : integer("accountRisk.sessionHarvestFreshDataGraceMs", risk.sessionHarvestFreshDataGraceMs, 1_000);
+  return Object.freeze({ entryBrakeUsd, entryBrakeScope: risk.entryBrakeScope, partialCutUsd, partialCutFraction, partialCutAllocation: risk.partialCutAllocation, fullFlattenUsd, flattenHoldsUntilRollover: true, dailyLossLimitUsd, rolloverHourUtc, sessionHarvestEnabled, sessionHarvestUsd, sessionHarvestFreshDataGraceMs });
 }
 
 export function loadInstrumentConfigObject(input) {

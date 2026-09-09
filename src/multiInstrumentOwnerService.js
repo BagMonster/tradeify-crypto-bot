@@ -43,6 +43,7 @@ export function createMultiInstrumentOwnerService({
   riskSupervisor = null,
   sharedPause = null,
   database = null,
+  haltWarnings = null,
   onRuntimeHaltCleared = async () => {}
 }) {
   if (!Array.isArray(instrumentConfigs) || instrumentConfigs.length === 0) {
@@ -156,6 +157,13 @@ export function createMultiInstrumentOwnerService({
       if (raw) lines.push(raw);
     }
     if (snapshot.lastError) lines.push(`  supervisor note: ${snapshot.lastError}`);
+    if (snapshot.freshDataGrace) {
+      lines.push(`  D-064 fresh-data grace: normal grid actions blocked; ${Math.ceil(snapshot.freshDataGrace.remainingMs / 1000)}s before durable halt`);
+    }
+    const pendingHalt = haltWarnings?.snapshot ? haltWarnings.snapshot() : null;
+    if (pendingHalt && typeof pendingHalt.then !== "function") {
+      lines.push(`  pending owner-warning halt: ${pendingHalt.reasonCode} · warning ${pendingHalt.warningNumber}/5 · eligible ${pendingHalt.haltAt}`);
+    }
     if (snapshot.flattenedToday === true) {
       lines.push("  *** ACCOUNT FLATTENED TODAY - all entries blocked until 22:00 UTC rollover ***");
     }
@@ -268,6 +276,30 @@ export function createMultiInstrumentOwnerService({
       await database.addEvent("WARN", "D064_HARVEST_RECOVERY_REQUESTED", { source: "telegram", dayKey: snapshot.dayKey, haltReason: snapshot.harvest.haltReason, books: rows });
       return { code, message: ["D-064 HARVEST RECOVERY", "", rowsText(rows), "", "This rechecks fresh account data and clears only the matching false fresh-data halt.", "It will not change virtual lots, place a DXtrade order, or lift an operator pause.", "", `To apply, send /confirmharvestrecover ${code} within 10 minutes.`].join("\n") };
     },
+    // This is deliberately narrower than the owner-command recovery above.  It
+    // runs once during a deploy only to retire the known false D-064
+    // fresh-account-data halt after the account monitor has obtained a fresh
+    // snapshot.  It cannot clear an operator pause, a different safety halt,
+    // or a D-064 halt caused by an unconfirmed flatten.
+    async recoverVerifiedD064AtStartup() {
+      if (!riskSupervisor || !database) return Object.freeze({ action: "NOT_CONFIGURED" });
+      const snapshot = riskSupervisor.getSnapshot();
+      if (!recoverableD064(snapshot.harvest)) return Object.freeze({ action: "NOT_D064_FRESHNESS_HALT" });
+      const [botState, rows] = await Promise.all([database.getState(), inspectBooks()]);
+      if (botState.safety_halt !== true || botState.halt_reason !== snapshot.harvest.haltReason) {
+        return Object.freeze({ action: "DIFFERENT_SAFETY_HALT", rows: Object.freeze(rows) });
+      }
+      if (rows.some((row) => row.ok !== true) || rows.some((row) => row.match !== true)) {
+        return Object.freeze({ action: "BOOKS_NOT_RECONCILED", rows: Object.freeze(rows) });
+      }
+      const result = await riskSupervisor.recoverHarvest({ dayKey: accountDayKey(Date.now()), booksVerified: true });
+      await database.addEvent("WARN", "D064_VERIFIED_STARTUP_RECOVERY", {
+        dayKey: accountDayKey(Date.now()),
+        action: result.action,
+        books: rows
+      });
+      return Object.freeze({ ...result, rows: Object.freeze(rows) });
+    },
     async confirmHarvestRecovery(code) {
       if (!riskSupervisor || !database) return "D-064 recovery is not configured on this deployment.";
       const botState = await database.getState();
@@ -293,6 +325,19 @@ export function createMultiInstrumentOwnerService({
       if (result.action === "HARVEST_RECOVERY_REFUSED" || result.action === "ACCOUNT_DATA_UNAVAILABLE") return "D-064 recovery refused because fresh broker account data could not be verified. No halt was cleared.";
       await database.addEvent("WARN", "D064_HARVEST_RECOVERY_APPLIED", { source: "telegram", dayKey: accountDayKey(Date.now()), action: result.action, books: rows });
       return `D-064 recovery applied: ${result.action}. The account-day harvest gate is now ${riskSupervisor.getSnapshot().harvest?.status ?? "unavailable"}. Operator pause is unchanged.`;
+    },
+    async pauseHalt() {
+      if (!haltWarnings || typeof haltWarnings.defer !== "function") return "Owner halt-warning deferral is not configured on this deployment.";
+      const result = await haltWarnings.defer();
+      if (result.action === "NO_PENDING_HALT") return "There is no pending owner-warning halt to defer.";
+      const cycle = result.cycle;
+      return [
+        "PENDING HALT DEFERRED",
+        `${cycle.reasonCode}${cycle.instrument ? ` · ${cycle.instrument}` : ""}`,
+        "Warning cycle restarted at 1/5. Trading remains running.",
+        `The halt is now eligible no earlier than ${cycle.haltAt}.`,
+        "You will receive the next warning in 5 minutes."
+      ].join("\n");
     },
     requestRerun: () => rerun.requestRerun(),
     confirmRerun: (code) => rerun.confirmRerun(code)

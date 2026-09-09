@@ -4,6 +4,22 @@ This log records approved and proposed changes to the production bot.
 
 > **Current production:** Five ring grids from `config/instruments.json` under **D-060** + **D-062** (INJ in place of ZEC). One-sided per instrument with position-linked exits under **D-059**. Live continuity: `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`. **D-063 (DRAFT)** adds shallow cut tiers, a $10,000 cap, and a −$600 brake.
 
+## D-066 — Owner-controlled non-harvest safety-halt countdown
+
+**Status:** Implemented locally; awaiting owner review and explicit merge approval.
+
+All non-harvest durable safety halts use one persisted owner-warning cycle: warning 1 immediately, warnings 2–5 five minutes apart, and a hard stop only after the full 25-minute cycle. `/pausehalt` restarts the same cycle at warning 1 for another 25 minutes. The automatic exceptions are D-064 harvest safety halts and the per-book −$600 entry brake.
+
+Full decision: `docs/decisions/D-066-owner-controlled-non-harvest-halts.md`.
+
+## D-065 — D-064 fresh-data grace and halt explanations
+
+**Status:** APPROVED for implementation; awaiting separate owner merge confirmation.
+
+D-064 retains fail-closed blocking when fresh DXtrade account data is unavailable, but a transient stale monitor read receives a five-minute grace period before it becomes a durable account-wide halt. During that period normal grid actions remain blocked and the owner receives an alert. A fresh read clears the temporary block automatically. Every current production safety-halt origin sends an owner Telegram alert that names the halt and its safe correction path; the D-064 fresh-data halt specifically directs the guarded `/harvestrecover` flow.
+
+Full decision: `docs/decisions/D-065-d064-freshness-grace-and-halt-alerts.md`.
+
 ## D-064 — $100,000 five-book sizing and session harvest
 
 **Status:** APPROVED for PR #81; activates only when the revised PR is merged and the trading worker deploys.
