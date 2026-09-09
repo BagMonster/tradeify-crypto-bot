@@ -67,20 +67,34 @@ test("D-064 terminal harvest failure is durable and fail-closed", async () => {
   assert.equal(halts.length, 1);
 });
 
-test("D-064 unread broker data becomes a durable halt that pauses normal exits", async () => {
+test("D-064 gives a fresh-data read five minutes before it becomes a durable halt", async () => {
   const sol = book("SOL/USD");
   let unread = false;
+  let nowMs = Date.parse("2026-09-09T12:00:00.000Z");
   sol.getDayPnlUsd = () => { if (unread) throw new Error("broker metrics unavailable"); return 0; };
   const halts = [];
+  const notifications = [];
   const supervisor = createRiskSupervisor({
     config,
     instruments: [sol],
     harvestStore: memoryHarvestStore(),
     getCombinedDayPnlUsd: () => 0,
-    setSafetyHalt: async (reason) => halts.push(reason)
+    setSafetyHalt: async (reason) => halts.push(reason),
+    notifications: { enqueue: (event) => notifications.push(event) },
+    now: () => nowMs
   });
   await supervisor.evaluate({ dayKey: "2026-09-09" });
   unread = true;
+  const first = await supervisor.evaluate({ dayKey: "2026-09-09" });
+  assert.equal(first.action, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.equal(first.graceRemainingMs, 300000);
+  assert.equal(supervisor.getSnapshot().freshDataGrace.remainingMs, 300000);
+  assert.equal(halts.length, 0);
+  assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_GRACE").length, 1);
+  nowMs += 299999;
+  assert.equal((await supervisor.evaluate({ dayKey: "2026-09-09" })).action, "ACCOUNT_DATA_UNAVAILABLE");
+  assert.equal(halts.length, 0);
+  nowMs += 1;
   const result = await supervisor.evaluate({ dayKey: "2026-09-09" });
   assert.equal(result.action, "HARVEST_HALTED");
   assert.equal(supervisor.getSnapshot().harvest.status, "HALTED");
