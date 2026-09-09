@@ -1,5 +1,7 @@
 import { createSolanaOwnerService } from "./solanaOwnerService.js";
 import { createRuntimeHaltRerunHandlers } from "./state/runtimeHaltRerun.js";
+import { accountDayKey } from "./risk/dailyRiskLadder.js";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 
 const SEPARATOR = "\u2014".repeat(28);
 
@@ -57,29 +59,39 @@ export function createMultiInstrumentOwnerService({
   }));
   const byInstrument = new Map(books.map((b) => [b.instrument, b]));
 
+  async function inspectBooks() {
+    const rows = [];
+    for (const book of books) {
+      if (typeof book.service.inspectForRerun !== "function") {
+        rows.push(Object.freeze({ instrument: book.instrument, ok: false, match: false, virtualNet: null, brokerNet: null, openLots: 0, error: "inspectForRerun is not available" }));
+        continue;
+      }
+      rows.push(await book.service.inspectForRerun());
+    }
+    return rows;
+  }
+
+  function harvestRecoveryHash(code, salt) {
+    return createHash("sha256").update(`${salt}:d064-harvest-recovery:${code}`).digest("hex");
+  }
+
+  function sameHex(left, right) {
+    return Boolean(left && right && left.length === right.length && timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex")));
+  }
+
+  function rowsText(rows) {
+    return rows.map((row) => `  ${row.instrument}: virtual ${Number.isFinite(row.virtualNet) ? row.virtualNet.toFixed(8) : "unavailable"}  broker ${Number.isFinite(row.brokerNet) ? row.brokerNet.toFixed(8) : "unavailable"}  lots ${row.openLots}  ${row.match === true ? "MATCH" : "MISMATCH"}`).join("\n");
+  }
+
+  function recoverableD064(harvest) {
+    return harvest?.status === "HALTED" && typeof harvest.haltReason === "string" && harvest.haltReason.startsWith("D-064 harvest cannot verify fresh broker account data for ");
+  }
+
   const rerun = database
     ? createRuntimeHaltRerunHandlers({
       database,
       onRuntimeHaltCleared,
-      inspectBooks: async () => {
-        const rows = [];
-        for (const book of books) {
-          if (typeof book.service.inspectForRerun !== "function") {
-            rows.push(Object.freeze({
-              instrument: book.instrument,
-              ok: false,
-              match: false,
-              virtualNet: null,
-              brokerNet: null,
-              openLots: 0,
-              error: "inspectForRerun is not available"
-            }));
-            continue;
-          }
-          rows.push(await book.service.inspectForRerun());
-        }
-        return rows;
-      }
+      inspectBooks
     })
     : {
       requestRerun: async () => ({ message: "Re-run is not configured on this deployment." }),
@@ -238,6 +250,49 @@ export function createMultiInstrumentOwnerService({
       if (target.error) return Promise.resolve(target.error);
       if (target.all) return Promise.resolve("Specify an instrument: /confirmrematch CODE <INSTRUMENT>");
       return target.books[0].service.confirmRematch(code);
+    },
+    async requestHarvestRecovery() {
+      if (!riskSupervisor || !database) return { code: null, message: "D-064 recovery is not configured on this deployment." };
+      const snapshot = riskSupervisor.getSnapshot();
+      if (!recoverableD064(snapshot.harvest)) return { code: null, message: "D-064 recovery is refused: the current harvest halt is not the recoverable fresh-data startup halt." };
+      const [botState, rows] = await Promise.all([database.getState(), inspectBooks()]);
+      if (botState.safety_halt === true && botState.halt_reason !== snapshot.harvest.haltReason) {
+        return { code: null, message: "D-064 recovery is refused: a different safety halt is active. It was not changed." };
+      }
+      if (rows.some((row) => row.ok !== true) || rows.some((row) => row.match !== true)) {
+        return { code: null, message: ["D-064 RECOVERY REFUSED — BOOKS NOT RECONCILED", "", rowsText(rows), "", "Reconcile every broker-flat book first. Recovery will not alter virtual lots or place a DXtrade order."].join("\n") };
+      }
+      const code = String(randomInt(100000, 1000000));
+      const salt = randomBytes(16).toString("hex");
+      await database.setResumeChallenge(harvestRecoveryHash(code, salt), salt, new Date(Date.now() + 10 * 60 * 1000));
+      await database.addEvent("WARN", "D064_HARVEST_RECOVERY_REQUESTED", { source: "telegram", dayKey: snapshot.dayKey, haltReason: snapshot.harvest.haltReason, books: rows });
+      return { code, message: ["D-064 HARVEST RECOVERY", "", rowsText(rows), "", "This rechecks fresh account data and clears only the matching false fresh-data halt.", "It will not change virtual lots, place a DXtrade order, or lift an operator pause.", "", `To apply, send /confirmharvestrecover ${code} within 10 minutes.`].join("\n") };
+    },
+    async confirmHarvestRecovery(code) {
+      if (!riskSupervisor || !database) return "D-064 recovery is not configured on this deployment.";
+      const botState = await database.getState();
+      if (!/^\d{6}$/.test(code ?? "")) return "Use /confirmharvestrecover followed by the 6-digit code from /harvestrecover.";
+      if (!botState.resume_code_hash || !botState.resume_code_salt || !botState.resume_code_expires_at) return "No D-064 recovery request is pending. Send /harvestrecover first.";
+      if (new Date(botState.resume_code_expires_at).getTime() < Date.now()) {
+        await database.clearResumeChallenge();
+        return "That D-064 recovery code expired. Send /harvestrecover for a new code.";
+      }
+      if (!sameHex(harvestRecoveryHash(code, botState.resume_code_salt), botState.resume_code_hash)) return "The D-064 recovery code is incorrect. A resume, reconcile, rematch, or re-run code will not work here.";
+      const snapshot = riskSupervisor.getSnapshot();
+      const rows = await inspectBooks();
+      if (!recoverableD064(snapshot.harvest) || (botState.safety_halt === true && botState.halt_reason !== snapshot.harvest.haltReason)) {
+        await database.clearResumeChallenge();
+        return "D-064 recovery aborted: the harvest or safety-halt state changed. No halt was cleared.";
+      }
+      if (rows.some((row) => row.ok !== true) || rows.some((row) => row.match !== true)) {
+        await database.clearResumeChallenge();
+        return ["D-064 RECOVERY ABORTED — BOOKS NOT RECONCILED", "", rowsText(rows), "", "No halt was cleared."].join("\n");
+      }
+      const result = await riskSupervisor.recoverHarvest({ dayKey: accountDayKey(Date.now()), booksVerified: true });
+      await database.clearResumeChallenge();
+      if (result.action === "HARVEST_RECOVERY_REFUSED" || result.action === "ACCOUNT_DATA_UNAVAILABLE") return "D-064 recovery refused because fresh broker account data could not be verified. No halt was cleared.";
+      await database.addEvent("WARN", "D064_HARVEST_RECOVERY_APPLIED", { source: "telegram", dayKey: accountDayKey(Date.now()), action: result.action, books: rows });
+      return `D-064 recovery applied: ${result.action}. The account-day harvest gate is now ${riskSupervisor.getSnapshot().harvest?.status ?? "unavailable"}. Operator pause is unchanged.`;
     },
     requestRerun: () => rerun.requestRerun(),
     confirmRerun: (code) => rerun.confirmRerun(code)
