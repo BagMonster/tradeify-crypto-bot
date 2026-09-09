@@ -95,12 +95,13 @@ Per-instrument `execution.autoExecute` defaults on. Even LIVE, pause, safety hal
 /kill
 /resume INSTRUMENT       /confirmresume CODE INSTRUMENT
 /reconcile INSTRUMENT    /confirmreconcile CODE INSTRUMENT
+/harvestrecover          /confirmharvestrecover CODE
 /rematch INSTRUMENT      /confirmrematch CODE INSTRUMENT
 /flat [INSTRUMENT]       /whoami
 /b                       /help
 ```
 
-`/kill` is global. Resume / reconcile / rematch need the instrument name (`SOL`, `DOGE`, …). Confirm commands have no buttons. Long replies split into `[1/n]` pages.
+`/kill` is global. Resume / reconcile / rematch need the instrument name (`SOL`, `DOGE`, …). `/harvestrecover` is account-wide and only clears the recoverable D-064 fresh-data startup halt after all books reconcile. Confirm commands have no buttons. Long replies split into `[1/n]` pages.
 
 Operator guide: [Telegram command reference](docs/telegram-command-reference.md)
 

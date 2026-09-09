@@ -10,6 +10,7 @@ import {
   formatInstrumentRings
 } from "./monitoring/instrumentOwnerText.js";
 import { formatInstrumentTargets } from "./format/instrumentTargets.js";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 
 /** @deprecated use brokerBookLines(accountMonitor, instrument) */
 export function brokerSnapshotLines(accountMonitor, instrument = "SOL/USD") {
@@ -48,6 +49,49 @@ export function createSolanaOwnerService(opts) {
     const snapshot = opts.riskSupervisor?.getSnapshot?.();
     if (!snapshot || !instrument) return null;
     return snapshot.perInstrument?.find((row) => row.instrument === instrument) ?? null;
+  }
+
+  function reconcileHash(code, salt) {
+    return createHash("sha256").update(`${salt}:ring-reconcile:${definition.instrument}:${code}`).digest("hex");
+  }
+
+  function sameHex(left, right) {
+    return Boolean(left && right && left.length === right.length && timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex")));
+  }
+
+  async function freshBrokerNet() {
+    await opts.accountMonitor?.pollOnce?.();
+    const net = trustedSignedNetFor(opts.accountMonitor?.getSnapshot?.(), definition.instrument);
+    if (!Number.isFinite(net)) throw new Error(`fresh DXtrade ${definition.instrument} net is unavailable`);
+    return net;
+  }
+
+  async function requestReconcile() {
+    const state = await stateStore.load();
+    const brokerNet = await freshBrokerNet();
+    if (Math.abs(brokerNet) > 1e-8) return { code: null, message: `Reconcile refused: DXtrade ${definition.instrument} is not flat (${brokerNet.toFixed(8)}).` };
+    const virtualNet = grid.expectedNetUnits(state);
+    const openLots = state.rings.reduce((sum, ring) => sum + ring.lots.length, 0);
+    if (Math.abs(virtualNet) <= 1e-8 && openLots === 0) return { code: null, message: `${definition.instrument} is already reconciled.` };
+    const code = String(randomInt(100000, 1000000));
+    const salt = randomBytes(16).toString("hex");
+    await opts.database.setResumeChallenge(reconcileHash(code, salt), salt, new Date(Date.now() + 10 * 60 * 1000));
+    return { code, message: `AUDITED ${definition.instrument} RECONCILE\nBroker net: 0.00\nVirtual net: ${virtualNet.toFixed(8)}\nOpen lots: ${openLots}\nNo DXtrade order will be placed.\nSend /confirmreconcile ${code} ${definition.instrument.split("/")[0]} within 10 minutes.` };
+  }
+
+  async function confirmReconcile(code) {
+    const state = await stateStore.load();
+    const bot = await opts.database.getState();
+    if (!/^\d{6}$/.test(code ?? "") || !bot.resume_code_hash || !bot.resume_code_salt || !bot.resume_code_expires_at) return "No reconcile request is pending. Send /reconcile INSTRUMENT first.";
+    if (new Date(bot.resume_code_expires_at).getTime() < Date.now() || !sameHex(reconcileHash(code, bot.resume_code_salt), bot.resume_code_hash)) return "Reconcile code is invalid or expired. Send /reconcile INSTRUMENT again.";
+    const brokerNet = await freshBrokerNet();
+    if (Math.abs(brokerNet) > 1e-8) return `Reconcile aborted: DXtrade ${definition.instrument} is no longer flat.`;
+    const empty = grid.createInitialState();
+    const next = grid.normalizeState({ ...empty, version: state.version + 1 });
+    await stateStore.save(state.version, next);
+    await opts.database.clearResumeChallenge();
+    await opts.database.addEvent("WARN", "RING_VIRTUAL_RECONCILE_APPLIED", { instrument: definition.instrument, priorVirtualNet: grid.expectedNetUnits(state), priorLots: state.rings.reduce((sum, ring) => sum + ring.lots.length, 0), brokerNet });
+    return `${definition.instrument} virtual inventory cleared and rearmed. No DXtrade order was placed. Global safety/harvest gates remain until every book is verified.`;
   }
 
   async function statusText() {
@@ -172,6 +216,8 @@ export function createSolanaOwnerService(opts) {
   return Object.freeze({
     ...tradeify,
     ...createRematchHandlers(opts),
+    requestReconcile,
+    confirmReconcile,
     statusText,
     healthText,
     levelsText,

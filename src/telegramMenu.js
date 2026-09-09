@@ -11,6 +11,7 @@ export const CONFIRM_ONLY_COMMANDS = Object.freeze([
   "confirmresume",
   "confirmreconcile",
   "confirmrematch",
+  "confirmharvestrecover",
   "confirmrerun"
 ]);
 
