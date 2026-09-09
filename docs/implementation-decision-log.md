@@ -4,6 +4,14 @@ This log records approved and proposed changes to the production bot.
 
 > **Current production:** Five ring grids from `config/instruments.json` under **D-060** + **D-062** (INJ in place of ZEC). One-sided per instrument with position-linked exits under **D-059**. Live continuity: `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`. **D-063 (DRAFT)** adds shallow cut tiers, a $10,000 cap, and a −$600 brake.
 
+## D-064 — $100,000 five-book sizing and session harvest
+
+**Status:** APPROVED for PR #81; activates only when the revised PR is merged and the trading worker deploys.
+
+Every enabled book moves to a `$100,000` virtual-gross cap. A fresh account-day P&L of `+$250` or above, including realized and unrealized P&L since the 22:00 UTC rollover, starts one durable harvest: flatten every book, confirm broker flat, then permit touch-cross entries while ordinary tranche exits remain paused until rollover. Pending, unread, rejected, or non-flat harvests block normal activity and halt fail-closed.
+
+Full decision: `docs/decisions/D-064-session-harvest.md`.
+
 ## D-063 — Tiered cut ladder, $10,000 cap, −$600 brake
 
 **Status:** DRAFT — awaiting owner approval. Owner authorized merge and trading-worker deploy of this draft.

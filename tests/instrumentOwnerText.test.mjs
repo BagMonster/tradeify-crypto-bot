@@ -20,7 +20,7 @@ function book(symbol) {
   return { definition, grid, state: grid.createInitialState() };
 }
 
-test("SOL status uses the live identity and $10,000 cap, not the SOL-only template", () => {
+test("SOL status uses the live identity and $100,000 cap, not the SOL-only template", () => {
   const { definition, grid, state } = book("SOL/USD");
   const text = formatInstrumentStatus({
     definition,
@@ -48,7 +48,7 @@ test("SOL status uses the live identity and $10,000 cap, not the SOL-only templa
   assert.match(text, /Binance SOLUSDT/);
   assert.doesNotMatch(text, /sol-outer-heavy-v1/);
   assert.doesNotMatch(text, /OUTER-HEAVY/);
-  assert.match(text, /\$10,000\.00/);
+  assert.match(text, /\$100,000\.00/);
   assert.doesNotMatch(text, /\$6,600\.00/);
   assert.match(text, /Occupied rings: 0\/20/);
   assert.match(text, /DXtrade broker net: 0\.00/);

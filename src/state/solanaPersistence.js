@@ -54,7 +54,11 @@ CHECK (kind IN (
   'SAFETY_HALT',
   'PROTECTIVE_FLATTEN_CONFIRMED',
   'D049_PARTIAL_CUT',
-  'D049_FULL_FLATTEN'
+  'D049_FULL_FLATTEN',
+  'HARVEST_PENDING',
+  'HARVEST_CONFIRMED',
+  'HARVEST_HALTED',
+  'HARVEST_RESET'
 ))
 `;
 
@@ -340,7 +344,11 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
       "SAFETY_HALT",
       "PROTECTIVE_FLATTEN_CONFIRMED",
       "D049_PARTIAL_CUT",
-      "D049_FULL_FLATTEN"
+      "D049_FULL_FLATTEN",
+      "HARVEST_PENDING",
+      "HARVEST_CONFIRMED",
+      "HARVEST_HALTED",
+      "HARVEST_RESET"
     ];
     if (!allowed.includes(kind)) throw new TypeError("notification kind is invalid");
 

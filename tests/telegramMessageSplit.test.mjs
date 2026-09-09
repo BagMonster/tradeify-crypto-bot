@@ -13,7 +13,7 @@ test("empty input yields one empty chunk so sendMessage still fires", () => {
 
 test("five-instrument fan-out splits on the D-060 separator and stays under the cap", () => {
   const rule = "\u2014".repeat(28);
-  const block = (name) => `${rule}\n${name}\n${rule}\n${"line\n".repeat(80)}${name} footer`;
+  const block = (name) => `${rule}\n${name}\n${rule}\n${"line\n".repeat(900)}${name} footer`;
   const text = [
     "ACCOUNT RISK\n  instruments enabled: 5",
     block("SOL/USD"),

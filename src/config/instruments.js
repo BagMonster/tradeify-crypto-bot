@@ -104,7 +104,14 @@ function validateAccountRisk(input) {
   const dailyLossLimitUsd = positive("accountRisk.dailyLossLimitUsd", risk.dailyLossLimitUsd);
   const rolloverHourUtc = integer("accountRisk.rolloverHourUtc", risk.rolloverHourUtc, 0);
   if (rolloverHourUtc > 23) throw new Error("accountRisk.rolloverHourUtc must be from 0 to 23");
-  return Object.freeze({ entryBrakeUsd, entryBrakeScope: risk.entryBrakeScope, partialCutUsd, partialCutFraction, partialCutAllocation: risk.partialCutAllocation, fullFlattenUsd, flattenHoldsUntilRollover: true, dailyLossLimitUsd, rolloverHourUtc });
+  if ("sessionHarvestEnabled" in risk && typeof risk.sessionHarvestEnabled !== "boolean") {
+    throw new Error("accountRisk.sessionHarvestEnabled must be boolean");
+  }
+  const sessionHarvestEnabled = risk.sessionHarvestEnabled === true;
+  const sessionHarvestUsd = sessionHarvestEnabled
+    ? positive("accountRisk.sessionHarvestUsd", risk.sessionHarvestUsd)
+    : (risk.sessionHarvestUsd == null ? null : positive("accountRisk.sessionHarvestUsd", risk.sessionHarvestUsd));
+  return Object.freeze({ entryBrakeUsd, entryBrakeScope: risk.entryBrakeScope, partialCutUsd, partialCutFraction, partialCutAllocation: risk.partialCutAllocation, fullFlattenUsd, flattenHoldsUntilRollover: true, dailyLossLimitUsd, rolloverHourUtc, sessionHarvestEnabled, sessionHarvestUsd });
 }
 
 export function loadInstrumentConfigObject(input) {
@@ -127,10 +134,6 @@ export function derivedBaseUsd({ capUsd, activeLevelsPerSide, growth }) {
   return positive("capUsd", capUsd) / unitGross(integer("activeLevelsPerSide", activeLevelsPerSide), positive("growth", growth));
 }
 
-// The minimum-lot check intentionally accepts the current public price as an
-// input. It is never inferred from Binance lot filters: Tradeify's lot step is
-// the governing value, while the price merely converts that verified step into a
-// notional for the current inner ring.
 export function assertInnermostRingSupportsMinimumLot(instrument, currentPriceUsd) {
   if (!instrument || typeof instrument !== "object") throw new TypeError("instrument configuration is required");
   const price = positive(`${instrument.instrument ?? "instrument"} current price`, currentPriceUsd);

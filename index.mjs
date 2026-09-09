@@ -318,11 +318,21 @@ const riskSupervisor = createRiskSupervisor({
     getDayPnlUsd: () => instrumentPl(s.cfg.instrument, "dayClosedPl") + instrumentPl(s.cfg.instrument, "openPl"),
     getExposureUsd: () => bookExposure(accountMetrics().snapshot, s.cfg.instrument),
     setEntryBrake: (on) => s.runtime.setEntryBrake(on),
+    setTrancheExitsPaused: (on) => s.runtime.setTrancheExitsPaused(on),
     executeProtectiveCut: (args) => s.runtime.executeProtectiveCut(args),
     executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args)
   })),
   addEvent: database.addEvent,
-  notifications: liveNotifications
+  notifications: liveNotifications,
+  harvestStore: Object.freeze({
+    get: (dayKey) => database.getSessionHarvestState(dayKey),
+    save: (state) => database.saveSessionHarvestState(state)
+  }),
+  getCombinedDayPnlUsd: () => {
+    const { openPl, dayClosedPl } = accountMetrics();
+    return openPl + dayClosedPl;
+  },
+  setSafetyHalt: (reason) => database.setSafetyHalt(reason)
 });
 
 for (const stack of stacks) stack.runtime.attachRiskSupervisor(riskSupervisor);
@@ -394,6 +404,10 @@ async function applyReconciliationBlocked(stack, result) {
 }
 
 async function processLatestTrade(stack, trade) {
+  const preflight = await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
+  if (["FLATTEN", "CUT", "HARVEST_PENDING", "HARVEST_CONFIRMED", "HARVEST_HALTED", "ACCOUNT_DATA_UNAVAILABLE"].includes(preflight.action)) {
+    return preflight;
+  }
   const result = await stack.runtime.processTrade(trade);
   if (result.status === "RECONCILIATION_BLOCKED") {
     await applyReconciliationBlocked(stack, result);

@@ -1,21 +1,6 @@
 import { createSolanaOwnerService } from "./solanaOwnerService.js";
 import { createRuntimeHaltRerunHandlers } from "./state/runtimeHaltRerun.js";
 
-/**
- * src/multiInstrumentOwnerService.js
- *
- * Fans one Telegram command out across every enabled instrument.
- *
- * telegramBot.js calls service.statusText(), service.levelsText() and so on. It
- * does not know how many instruments exist. This wrapper keeps that contract:
- * it holds one per-instrument owner service each, composes their text, and
- * prepends an account-level summary from the risk supervisor.
- *
- * Read commands accept an optional instrument argument and default to all.
- * Control commands that change state are deliberately NOT fanned out silently —
- * see the safety notes on each.
- */
-
 const SEPARATOR = "\u2014".repeat(28);
 
 function normaliseInstrument(raw) {
@@ -144,10 +129,6 @@ export function createMultiInstrumentOwnerService({
     const braked = Array.isArray(snapshot.brakedInstruments) ? snapshot.brakedInstruments : [];
     lines.push(`  braked today: ${braked.length === 0 ? "none" : braked.join(", ")}`);
 
-    // Diagnostic. A combined figure of $0.00 has two very different causes: the books
-    // are genuinely flat, or every per-book read threw and defaulted to zero. Without
-    // these lines the two are indistinguishable, and lastError is only ever set inside
-    // evaluate(), so it is guaranteed empty in exactly the case you need it.
     const per = Array.isArray(snapshot.perInstrument) ? snapshot.perInstrument : [];
     const unread = per.filter((entry) => entry.readFailed === true).map((entry) => entry.instrument);
     if (unread.length > 0) {
@@ -158,9 +139,6 @@ export function createMultiInstrumentOwnerService({
     }
     lines.push(`  supervisor day: ${snapshot.dayKey ?? "not yet evaluated (no price tick processed since start)"}`);
 
-    // Raw broker figures, so a $0.00 combined line can be traced to its source rather
-    // than inferred. equity minus balance IS the account's open P&L; if that gap is
-    // non-zero while combined day P&L reads $0.00, the ladder is not seeing the broker.
     if (typeof brokerAccountLine === "function") {
       const raw = brokerAccountLine();
       if (raw) lines.push(raw);
@@ -168,6 +146,17 @@ export function createMultiInstrumentOwnerService({
     if (snapshot.lastError) lines.push(`  supervisor note: ${snapshot.lastError}`);
     if (snapshot.flattenedToday === true) {
       lines.push("  *** ACCOUNT FLATTENED TODAY - all entries blocked until 22:00 UTC rollover ***");
+    }
+    const harvestUsd = Number(snapshot.sessionHarvestUsd);
+    if (snapshot.sessionHarvestEnabled === true && Number.isFinite(harvestUsd)) {
+      const harvest = snapshot.harvest ?? { status: snapshot.harvestedToday === true ? "CONFIRMED" : "READY" };
+      const exits = snapshot.trancheExitsPaused === true ? "OFF" : "ON";
+      lines.push(`  harvest: +${harvestUsd.toFixed(2)} · ${harvest.status} · tranche exits ${exits}`);
+      if (Number.isFinite(Number(harvest.triggerPnlUsd))) lines.push(`  harvest trigger P&L: ${money(Number(harvest.triggerPnlUsd))}`);
+      if (harvest.confirmedAt) lines.push(`  harvest confirmed: ${harvest.confirmedAt}`);
+      if (harvest.haltReason) lines.push(`  harvest halt: ${harvest.haltReason}`);
+    } else {
+      lines.push("  harvest: OFF");
     }
     if (Number.isFinite(snapshot.cutsToday) && snapshot.cutsToday > 0) {
       lines.push(`  partial cuts today: ${snapshot.cutsToday}`);

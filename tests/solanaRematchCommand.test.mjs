@@ -264,9 +264,9 @@ test("statusText reports broker net, source, and freshness from the account moni
     brokerPositions: { positions: [{ symbol: "SOL/USD", quantity: 0.44, side: "SELL" }] }
   });
   const text = await service.statusText();
-  assert.match(text, /DXtrade broker net SOL: -0.44/);
-  assert.match(text, /DXtrade net source: open-positions/);
-  assert.match(text, /DXtrade account data fresh: YES/);
+  assert.match(text, /Virtual net SOL: -0.44/);
+  assert.match(text, /Account source: DXtrade SOL\/USD/);
+  assert.doesNotMatch(text, /DXtrade broker net SOL:/);
 });
 
 test("confirmRematch does not clear a different halt that arrives after the broker read starts", async () => {

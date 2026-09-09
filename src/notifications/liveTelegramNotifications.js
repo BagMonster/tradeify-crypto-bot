@@ -8,7 +8,11 @@ const KINDS = new Set([
   "SAFETY_HALT",
   "PROTECTIVE_FLATTEN_CONFIRMED",
   "D049_PARTIAL_CUT",
-  "D049_FULL_FLATTEN"
+  "D049_FULL_FLATTEN",
+  "HARVEST_PENDING",
+  "HARVEST_CONFIRMED",
+  "HARVEST_HALTED",
+  "HARVEST_RESET"
 ]);
 
 const PROTECTIVE_REASONS = new Set([
@@ -111,6 +115,22 @@ function formatEvent(event) {
   if (!KINDS.has(kind)) throw new TypeError("notification kind is unsupported");
   const eventKey = safeText("eventKey", event.eventKey, { max: 160, pattern: /^[A-Za-z0-9_.:-]+$/ });
   const instrument = headingInstrument(event.instrument);
+
+  if (kind === "HARVEST_PENDING") {
+    return { kind, eventKey, message: ["D-064 HARVEST PENDING", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Threshold: +${money(event.thresholdUsd)}`, "Flattening every enabled book. New entries and ordinary exits are paused until confirmation."].join("\n") };
+  }
+  if (kind === "HARVEST_CONFIRMED") {
+    const confirmedAt = canonicalUtc("confirmedAt", event.confirmedAt);
+    return { kind, eventKey, message: ["D-064 HARVEST CONFIRMED", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Threshold: +${money(event.thresholdUsd)}`, "Every enabled broker book is flat.", "New touch-cross entries may run. Ordinary tranche exits are disabled until 22:00 UTC.", `Confirmed: ${timestamp(confirmedAt)}`].join("\n") };
+  }
+  if (kind === "HARVEST_HALTED") {
+    const reason = safeText("harvest halt reason", event.reason, { max: 300, pattern: /^[A-Za-z0-9 .,:;'()+-]+$/ });
+    return { kind, eventKey, message: ["D-064 HARVEST SAFETY HALT", reason, "New entries and ordinary exits remain blocked until the broker position state is resolved."].join("\n") };
+  }
+  if (kind === "HARVEST_RESET") {
+    const dayKey = safeText("dayKey", event.dayKey, { max: 10, pattern: /^\d{4}-\d{2}-\d{2}$/ });
+    return { kind, eventKey, message: ["D-064 ACCOUNT-DAY RESET", `New Tradeify account day: ${dayKey}`, "Harvest state cleared. Ordinary tranche exits are enabled again."].join("\n") };
+  }
 
   if (kind === "ENTRY_CONFIRMED") {
     const side = safeText("side", event.side, { max: 4, pattern: /^(BUY|SELL)$/ });
