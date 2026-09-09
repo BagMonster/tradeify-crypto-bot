@@ -5,7 +5,7 @@
  * Harvest is enabled from config/instruments.json (sessionHarvestEnabled).
  */
 
-import { harvestReason, setTrancheExitsPausedAll, shouldHarvest } from "./sessionHarvest.js";
+import { harvestReason, setTrancheExitsPausedAll } from "./sessionHarvest.js";
 
 const REQUIRED_CONFIG = Object.freeze([
   "entryBrakeUsd",
@@ -47,6 +47,9 @@ export function createRiskSupervisor({
   instruments,
   addEvent = async () => {},
   notifications = null,
+  harvestStore = null,
+  getCombinedDayPnlUsd = null,
+  setSafetyHalt = async () => {},
   now = () => Date.now()
 }) {
   if (!config || typeof config !== "object") throw new TypeError("risk config is required");
@@ -104,10 +107,13 @@ export function createRiskSupervisor({
     ? positiveNumber("sessionHarvestUsd", config.sessionHarvestUsd)
     : Number(config.sessionHarvestUsd);
   const sessionHarvestThreshold = sessionHarvestEnabled ? sessionHarvestUsd : 0;
+  if (sessionHarvestEnabled && (!harvestStore || typeof harvestStore.get !== "function" || typeof harvestStore.save !== "function")) {
+    throw new TypeError("enabled session harvest requires a durable harvestStore");
+  }
 
   let dayKey = null;
   let flattenedToday = false;
-  let harvestedToday = false;
+  let harvestState = null;
   let cutsToday = 0;
   const brakedToday = new Set();
   let evaluating = false;
@@ -140,11 +146,81 @@ export function createRiskSupervisor({
   function rollover(nextDayKey) {
     dayKey = nextDayKey;
     flattenedToday = false;
-    harvestedToday = false;
+    // Force the first evaluation of the new account day to read PostgreSQL.
+    // This preserves an already-confirmed/pending harvest across a Railway restart.
+    harvestState = null;
     cutsToday = 0;
     brakedToday.clear();
     for (const book of instruments) applyEntryBrake(book, false);
     applyTrancheExitPause(false);
+  }
+
+  async function loadHarvest(nextDayKey) {
+    if (!sessionHarvestEnabled) return Object.freeze({ dayKey: nextDayKey, status: "READY", triggerPnlUsd: null, confirmedAt: null, haltReason: null });
+    if (harvestState?.dayKey !== nextDayKey) harvestState = await harvestStore.get(nextDayKey);
+    return harvestState;
+  }
+
+  async function saveHarvest(input) {
+    harvestState = sessionHarvestEnabled
+      ? await harvestStore.save(input)
+      : Object.freeze(input);
+    return harvestState;
+  }
+
+  function harvestBlocksNormalActions() {
+    return harvestState?.status === "PENDING" || harvestState?.status === "HALTED";
+  }
+
+  function applyHarvestGates() {
+    const pause = harvestState?.status === "PENDING" || harvestState?.status === "CONFIRMED" || harvestState?.status === "HALTED";
+    applyTrancheExitPause(pause);
+    if (harvestBlocksNormalActions()) for (const book of instruments) applyEntryBrake(book, true);
+  }
+
+  async function runHarvest({ incomingDayKey, combined, readings }) {
+    const prior = await loadHarvest(incomingDayKey);
+    if (prior.status === "CONFIRMED") {
+      applyHarvestGates();
+      return Object.freeze({ action: "NONE", combinedDayPnlUsd: combined, harvest: prior });
+    }
+    if (prior.status === "HALTED") {
+      applyHarvestGates();
+      return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, harvest: prior });
+    }
+    const pending = prior.status === "PENDING"
+      ? prior
+      : await saveHarvest({ dayKey: incomingDayKey, status: "PENDING", triggerPnlUsd: combined, confirmedAt: null, haltReason: null });
+    applyHarvestGates();
+    if (prior.status !== "PENDING") {
+      await addEvent("WARN", "D064_HARVEST_PENDING", { dayKey: incomingDayKey, combinedDayPnlUsd: combined, threshold: sessionHarvestThreshold });
+      notifications?.enqueue?.({ kind: "HARVEST_PENDING", eventKey: `D064-PENDING:${incomingDayKey.replaceAll("-", "")}`, combinedDayPnlUsd: combined, thresholdUsd: sessionHarvestThreshold });
+    }
+    const results = [];
+    for (const reading of readings) {
+      try {
+        results.push({ instrument: reading.instrument, result: await reading.book.executeProtectiveFlatten({ reason: harvestReason(combined, sessionHarvestThreshold), dayKey: incomingDayKey, bypassSlippageCap: true }) });
+      } catch (error) {
+        results.push({ instrument: reading.instrument, result: { status: "THREW", reason: error?.message ?? "harvest flatten threw" } });
+      }
+    }
+    const terminal = results.filter((r) => !["FILLED", "ALREADY_FLAT", "PENDING", "SUBMITTED", "CLAIMED"].includes(r.result?.status));
+    const pendingResults = results.filter((r) => ["PENDING", "SUBMITTED", "CLAIMED"].includes(r.result?.status));
+    if (terminal.length > 0) {
+      const reason = `D-064 harvest could not confirm every book flat; owner review required`;
+      const halted = await saveHarvest({ dayKey: incomingDayKey, status: "HALTED", triggerPnlUsd: pending.triggerPnlUsd, confirmedAt: null, haltReason: reason });
+      await setSafetyHalt(reason);
+      await addEvent("ERROR", "D064_HARVEST_HALTED", { dayKey: incomingDayKey, instruments: results.map((r) => ({ instrument: r.instrument, status: r.result?.status ?? "UNKNOWN" })) });
+      notifications?.enqueue?.({ kind: "HARVEST_HALTED", eventKey: `D064-HALTED:${incomingDayKey.replaceAll("-", "")}`, reason });
+      return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: halted });
+    }
+    if (pendingResults.length > 0) return Object.freeze({ action: "HARVEST_PENDING", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: pending });
+    const confirmed = await saveHarvest({ dayKey: incomingDayKey, status: "CONFIRMED", triggerPnlUsd: pending.triggerPnlUsd, confirmedAt: new Date(now()).toISOString(), haltReason: null });
+    applyHarvestGates();
+    for (const book of instruments) if (!stickyBrake(book.instrument)) applyEntryBrake(book, false);
+    await addEvent("WARN", "D064_HARVEST_CONFIRMED", { dayKey: incomingDayKey, combinedDayPnlUsd: combined, threshold: sessionHarvestThreshold });
+    notifications?.enqueue?.({ kind: "HARVEST_CONFIRMED", eventKey: `D064-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`, combinedDayPnlUsd: combined, thresholdUsd: sessionHarvestThreshold, confirmedAt: confirmed.confirmedAt });
+    return Object.freeze({ action: "HARVEST_CONFIRMED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: confirmed });
   }
 
   function readBooks() {
@@ -171,7 +247,11 @@ export function createRiskSupervisor({
     if (evaluating) return Object.freeze({ action: "BUSY" });
     evaluating = true;
     try {
-      if (incomingDayKey !== dayKey) rollover(incomingDayKey);
+      if (incomingDayKey !== dayKey) {
+        const priorKey = dayKey;
+        rollover(incomingDayKey);
+        if (sessionHarvestEnabled && priorKey !== null) notifications?.enqueue?.({ kind: "HARVEST_RESET", eventKey: `D064-RESET:${incomingDayKey.replaceAll("-", "")}`, dayKey: incomingDayKey });
+      }
 
       const readings = readBooks();
       const unreadable = readings.filter((r) => r.readFailed);
@@ -187,8 +267,10 @@ export function createRiskSupervisor({
       }
       lastError = null;
 
-      const combined = fixed2(readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
-      applyTrancheExitPause(harvestedToday === true && flattenedToday !== true);
+      const suppliedCombined = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
+      const combined = fixed2(Number.isFinite(suppliedCombined) ? suppliedCombined : readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
+      await loadHarvest(incomingDayKey);
+      applyHarvestGates();
 
       if (combined <= -fullFlattenUsd) {
         if (flattenedToday) return Object.freeze({ action: "ALREADY_FLATTENED", combinedDayPnlUsd: combined });
@@ -229,6 +311,8 @@ export function createRiskSupervisor({
           allConfirmed: failed.length === 0
         });
       }
+
+      if (harvestBlocksNormalActions()) return runHarvest({ incomingDayKey, combined, readings });
 
       const activeTier = cutTiers.find((tier) => combined <= -tier.thresholdUsd) ?? null;
       if (activeTier) {
@@ -292,50 +376,7 @@ export function createRiskSupervisor({
         return Object.freeze({ action: "BRAKE", instruments: Object.freeze(newlyBraked), combinedDayPnlUsd: combined });
       }
 
-      if (shouldHarvest({
-        enabled: sessionHarvestEnabled,
-        thresholdUsd: sessionHarvestThreshold,
-        flattenedToday,
-        harvestedToday,
-        combinedDayPnlUsd: combined,
-        readings
-      })) {
-        harvestedToday = true;
-        applyTrancheExitPause(true);
-        const results = [];
-        for (const reading of readings) {
-          try {
-            results.push({
-              instrument: reading.instrument,
-              result: await reading.book.executeProtectiveFlatten({
-                reason: harvestReason(combined, sessionHarvestThreshold),
-                dayKey: incomingDayKey,
-                bypassSlippageCap: true
-              })
-            });
-          } catch (error) {
-            results.push({ instrument: reading.instrument, result: { status: "THREW", reason: error?.message ?? "harvest flatten threw" } });
-          }
-        }
-        const failed = results.filter((r) => r.result?.status !== "FILLED" && r.result?.status !== "ALREADY_FLAT");
-        await addEvent(failed.length > 0 ? "ERROR" : "WARN", "RISK_SUPERVISOR_SESSION_HARVEST", {
-          combinedDayPnlUsd: combined,
-          threshold: sessionHarvestThreshold,
-          instruments: results.map((r) => ({ instrument: r.instrument, status: r.result?.status ?? "UNKNOWN" })),
-          allConfirmed: failed.length === 0
-        });
-        notifications?.enqueue?.({
-          kind: "SESSION_HARVEST",
-          eventKey: `D064-HARVEST:${incomingDayKey.replaceAll("-", "")}`,
-          reasonCode: "D064_SESSION_HARVEST"
-        });
-        return Object.freeze({
-          action: "HARVEST",
-          combinedDayPnlUsd: combined,
-          results: Object.freeze(results),
-          allConfirmed: failed.length === 0
-        });
-      }
+      if (sessionHarvestEnabled && combined >= sessionHarvestThreshold) return runHarvest({ incomingDayKey, combined, readings });
 
       return Object.freeze({ action: "NONE", combinedDayPnlUsd: combined });
     } finally {
@@ -345,7 +386,8 @@ export function createRiskSupervisor({
 
   function getSnapshot() {
     const readings = readBooks();
-    const dayPnlUsd = fixed2(readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
+    const suppliedCombined = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
+    const dayPnlUsd = fixed2(Number.isFinite(suppliedCombined) ? suppliedCombined : readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
     const exposureUsd = fixed2(readings.reduce((sum, r) => sum + r.exposureUsd, 0));
     return Object.freeze({
       dayKey,
@@ -361,10 +403,11 @@ export function createRiskSupervisor({
       fullFlattenUsd,
       brakedInstruments: Object.freeze([...brakedToday]),
       flattenedToday,
-      harvestedToday,
+      harvest: harvestState,
       sessionHarvestEnabled,
       sessionHarvestUsd: sessionHarvestEnabled ? sessionHarvestThreshold : null,
-      trancheExitsPaused: harvestedToday === true && flattenedToday !== true,
+      harvestedToday: harvestState?.status === "CONFIRMED",
+      trancheExitsPaused: ["PENDING", "CONFIRMED", "HALTED"].includes(harvestState?.status),
       cutsToday,
       lastError,
       perInstrument: Object.freeze(readings.map((r) => Object.freeze({
