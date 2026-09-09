@@ -332,7 +332,9 @@ const riskSupervisor = createRiskSupervisor({
     const { openPl, dayClosedPl } = accountMetrics();
     return openPl + dayClosedPl;
   },
-  setSafetyHalt: (reason) => database.setSafetyHalt(reason)
+  setSafetyHalt: (reason) => database.setSafetyHalt(reason),
+  clearSafetyHaltIfReason: (reason) => database.clearSafetyHaltIfReason(reason),
+  getSafetyHaltState: () => database.getState()
 });
 
 for (const stack of stacks) stack.runtime.attachRiskSupervisor(riskSupervisor);
