@@ -1,6 +1,6 @@
 # Telegram command reference
 
-**Live books:** SOL/USD, DOGE/USD, ZEC/USD, AAVE/USD, AVAX/USD  
+**Live books:** SOL/USD, DOGE/USD, INJ/USD, AAVE/USD, AVAX/USD
 **Operator:** owner Telegram user only  
 **Execution:** ON only when `APP_MODE=live` and Railway `AUTO_EXECUTE=true`
 
@@ -20,7 +20,7 @@ Replies longer than 4096 characters are split into `[1/n]` pages. That is normal
 
 ## Read commands
 
-Omit the instrument to see every enabled book. Add `SOL`, `DOGE`, `ZEC`, `AAVE`, or `AVAX` (or the full `SOL/USD` form) to see one.
+Omit the instrument to see every enabled book. Add `SOL`, `DOGE`, `INJ`, `AAVE`, or `AVAX` (or the full `SOL/USD` form) to see one.
 
 ### `/status [INSTRUMENT]`
 
@@ -29,6 +29,7 @@ Account-risk header first (combined day P&L, exposure, ladder, who is braked), t
 - strategy id (`sol-ring-grid-v1`, `doge-ring-grid-v1`, …)
 - feed and DXtrade instrument
 - execution locks and pause/halt
+- D-064 harvest state (`READY`, `PENDING`, `CONFIRMED`, or `HALTED`) and whether ordinary tranche exits are enabled
 - geometry and cap
 - 200-day MA
 - virtual net, virtual exposure, open lots, occupied/armed rings, state version
