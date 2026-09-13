@@ -29,6 +29,7 @@ const HELP_TEXT = [
   "/rings [INSTRUMENT] - where price sits versus each book",
   "/targets [INSTRUMENT] - exit target price for every open lot",
   "/dxpreflight - inspect order settings without placing an order",
+  "/rawhistory [N] - raw DXtrade order history, read only",
   "/canary - inspect the lifecycle canary; only while automatic execution is OFF",
   "/kill - pause every book",
   "/resume INSTRUMENT - request a 6-digit resume code for one book",
@@ -247,6 +248,10 @@ export async function startTelegramBot({
   bot.onText(/^\/dxpreflight(?:@\w+)?$/i, withAuthorization(async (message) => {
     await bot.sendMessage(message.chat.id, "Running DXtrade validation-only preflight. No order will be placed.");
     await sendLatched(message.chat.id, "/dxpreflight", await service.dxPreflightText());
+  }));
+
+  bot.onText(/^\/rawhistory(?:@\w+)?(?:\s+(\d{1,2}))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/rawhistory", await service.rawHistoryText(match?.[1]));
   }));
 
   bot.onText(/^\/solcanary(?:@\w+)?$/i, withAuthorization(async (message) => {
