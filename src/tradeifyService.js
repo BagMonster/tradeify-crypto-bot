@@ -193,6 +193,72 @@ export function createTradeifyService({
     ].join("\n");
   }
 
+  const RAW_HISTORY_REDACT_KEYS = new Set([
+    "account",
+    "accountcode",
+    "accountid",
+    "clientid",
+    "login",
+    "user",
+    "username"
+  ]);
+
+  function redactIdentifiers(node, depth = 0) {
+    if (depth > 8 || node === null || typeof node !== "object") return node;
+    if (Array.isArray(node)) return node.map((item) => redactIdentifiers(item, depth + 1));
+    const out = {};
+    for (const [key, value] of Object.entries(node)) {
+      out[key] = RAW_HISTORY_REDACT_KEYS.has(key.toLowerCase())
+        ? "[redacted]"
+        : redactIdentifiers(value, depth + 1);
+    }
+    return out;
+  }
+
+  async function rawHistoryText(arg) {
+    if (!dxtradeClient) return "Raw order history is unavailable in this worker.";
+    if (typeof dxtradeClient.getRecentOrderHistory !== "function") {
+      return "This worker predates /rawhistory. Deploy the dxtradeExecutionClient update first.";
+    }
+
+    const parsed = Number.parseInt(typeof arg === "string" ? arg.trim() : "", 10);
+    const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(10, parsed)) : 3;
+
+    let payload;
+    try {
+      payload = await dxtradeClient.getRecentOrderHistory(limit);
+    } catch (error) {
+      return [
+        "RAW ORDER HISTORY FAILED",
+        "",
+        "READ-ONLY request. No order was placed.",
+        String(error?.message ?? error).slice(0, 600)
+      ].join("\n");
+    }
+
+    await database.addEvent("INFO", "DXTRADE_RAW_ORDER_HISTORY", {
+      source: "telegram",
+      limit,
+      readOnly: true
+    });
+
+    let text;
+    try {
+      text = JSON.stringify(redactIdentifiers(payload), null, 1);
+    } catch {
+      return "DXtrade returned a payload that could not be serialised for display.";
+    }
+    if (typeof text !== "string") return "DXtrade returned an empty order-history payload.";
+
+    return [
+      `RAW ORDER HISTORY (limit ${limit})`,
+      "",
+      "READ-ONLY — no order was placed. Account identifiers redacted.",
+      "",
+      text.length > 7000 ? `${text.slice(0, 7000)}\n...TRUNCATED...` : text
+    ].join("\n");
+  }
+
   async function dxPreflightText() {
     if (!dxtradeClient) return "DXtrade preflight is unavailable in this worker.";
 
@@ -255,6 +321,7 @@ export function createTradeifyService({
     confirmResume,
     flatInstructions,
     healthText,
-    dxPreflightText
+    dxPreflightText,
+    rawHistoryText
   };
 }
