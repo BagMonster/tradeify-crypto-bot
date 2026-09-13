@@ -343,6 +343,15 @@ export class DxtradeExecutionClient {
     });
   }
 
+  async getRecentOrderHistory(limit = 3) {
+    const capped = Math.max(1, Math.min(10, Number(limit) || 3));
+    return this.#requestJson({
+      method: "GET",
+      path: `/accounts/${encoded(this.#accountCode, "DXtrade account code")}/orders/history`,
+      query: { limit: capped }
+    });
+  }
+
   async reconcileMarketCashOrder({ clientOrderId, requestedCashQuantity }) {
     return reconcileCashOrderHistory(await this.getOrderHistory(clientOrderId), {
       clientOrderId,
