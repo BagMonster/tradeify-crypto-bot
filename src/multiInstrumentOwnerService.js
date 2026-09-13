@@ -199,6 +199,13 @@ export function createMultiInstrumentOwnerService({
     ringsText: (arg) => fanOut("ringsText", arg),
     targetsText: (arg) => fanOut("targetsText", arg),
     dxPreflightText: (arg) => fanOut("dxPreflightText", arg),
+    rawHistoryText: async (arg) => {
+      const book = books[0];
+      if (typeof book?.service?.rawHistoryText !== "function") {
+        return "Raw order history is unavailable in this worker.";
+      }
+      return book.service.rawHistoryText(arg);
+    },
     canaryText: (arg) => fanOut("canaryText", arg),
 
     flatText: (arg) => fanOut("flatText", arg),
