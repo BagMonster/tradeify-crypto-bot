@@ -64,7 +64,7 @@ export async function absorbBook(decision, book) {
   // adopt without one is deliberate: a wrong MA silently produces wrong exit
   // prices on a real position.
   const needsMa = decision.fills.some((fill) => fill.effect === "OPEN");
-  const ma = needsMa ? finite(typeof book.movingAverage === "function" ? book.movingAverage() : book.movingAverage) : null;
+  const ma = needsMa ? finite(await (typeof book.movingAverage === "function" ? book.movingAverage() : book.movingAverage)) : null;
   if (needsMa && ma === null) {
     return Object.freeze({
       instrument,
