@@ -90,7 +90,17 @@ export function createRingGrid(config) {
     const originalUnits = positive("lot.originalUnits", lot.originalUnits);
     const remainingUnits = positive("lot.remainingUnits", lot.remainingUnits);
     if (remainingUnits > originalUnits + 1e-8) throw new TypeError("lot remaining units exceed original units");
-    return { id: String(lot.id), side: lot.side, ringTag: lot.ringTag, entryPrice: positive("lot.entryPrice", lot.entryPrice), originalUnits, remainingUnits, done: integer("lot.done", lot.done), openedAt: timestamp("lot.openedAt", lot.openedAt) };
+    return { id: String(lot.id), side: lot.side, ringTag: lot.ringTag, entryPrice: positive("lot.entryPrice", lot.entryPrice), originalUnits, remainingUnits, done: integer("lot.done", lot.done), openedAt: timestamp("lot.openedAt", lot.openedAt), positionCode: lot.positionCode == null || String(lot.positionCode).trim() === "" ? null : String(lot.positionCode) };
+  }
+
+  function cloneAdoptedLot(lot) {
+    if (!lot || typeof lot !== "object" || !["BUY", "SELL"].includes(lot.side)) throw new TypeError("adopted lot side is invalid");
+    const originalUnits = positive("adopted.originalUnits", lot.originalUnits);
+    const remainingUnits = positive("adopted.remainingUnits", lot.remainingUnits);
+    if (remainingUnits > originalUnits + 1e-8) throw new TypeError("adopted lot remaining units exceed original units");
+    const positionCode = lot.positionCode == null || String(lot.positionCode).trim() === "" ? null : String(lot.positionCode);
+    if (positionCode === null) throw new TypeError("adopted lot requires a broker positionCode");
+    return { id: String(lot.id), side: lot.side, ringTag: null, adopted: true, positionCode, entryPrice: positive("adopted.entryPrice", lot.entryPrice), originalUnits, remainingUnits, done: integer("adopted.done", lot.done), openedAt: timestamp("adopted.openedAt", lot.openedAt), ma: positive("adopted.ma", lot.ma) };
   }
 
   function buildRings() {
@@ -123,12 +133,15 @@ export function createRingGrid(config) {
     const lastFillSide = hasFill ? String(input.lastFillSide) : null;
     const lastFillPrice = hasFill ? positive("state.lastFillPrice", input.lastFillPrice) : null;
     if (hasFill && !["BUY", "SELL", "PROTECTIVE_FLAT", "PROTECTIVE_CUT"].includes(lastFillSide)) throw new TypeError("state.lastFillSide is invalid");
-    return Object.freeze({ version, strategyId: def.strategyId, instrument: def.instrument, rings: Object.freeze(rings.map((ring) => Object.freeze({ ...ring, lots: Object.freeze(ring.lots.map(Object.freeze)) }))), lastFillAt, lastFillSide, lastFillPrice });
+    const adopted = Array.isArray(input.adopted) ? input.adopted.map(cloneAdoptedLot) : [];
+    const adoptedIds = new Set(adopted.map((lot) => lot.positionCode));
+    if (adoptedIds.size !== adopted.length) throw new TypeError("adopted lots must have unique positionCodes");
+    return Object.freeze({ version, strategyId: def.strategyId, instrument: def.instrument, rings: Object.freeze(rings.map((ring) => Object.freeze({ ...ring, lots: Object.freeze(ring.lots.map(Object.freeze)) }))), adopted: Object.freeze(adopted.map(Object.freeze)), lastFillAt, lastFillSide, lastFillPrice });
   }
 
   function mutable(state) {
     const normalized = normalizeState(state);
-    return { ...normalized, rings: normalized.rings.map((ring) => ({ ...ring, lots: ring.lots.map((lot) => ({ ...lot })) })) };
+    return { ...normalized, rings: normalized.rings.map((ring) => ({ ...ring, lots: ring.lots.map((lot) => ({ ...lot })) })), adopted: normalized.adopted.map((lot) => ({ ...lot })) };
   }
   function increment(state) { state.version += 1; return normalizeState(state); }
   function validatedFill(fill, quantity) {
@@ -136,12 +149,14 @@ export function createRingGrid(config) {
     const filledAt = timestamp("fill.filledAt", fill?.filledAt);
     const filledQuantity = positive("fill.filledQuantity", fill?.filledQuantity ?? quantity);
     if (Math.abs(filledQuantity - quantity) > Math.max(1e-8, quantity * 1e-6)) throw new Error("confirmed fill quantity does not match request");
-    return { fillPrice, filledAt, filledQuantity: fixed8(filledQuantity) };
+    const positionCode = fill?.positionCode == null || String(fill.positionCode).trim() === "" ? null : String(fill.positionCode);
+    return { fillPrice, filledAt, filledQuantity: fixed8(filledQuantity), positionCode };
   }
 
-  function createInitialState() { return normalizeState({ version: 0, strategyId: def.strategyId, instrument: def.instrument, rings: buildRings(), lastFillAt: null, lastFillSide: null, lastFillPrice: null }); }
-  function expectedNetUnits(state) { return fixed8(normalizeState(state).rings.reduce((sum, ring) => sum + ring.lots.reduce((total, lot) => total + (lot.side === "BUY" ? lot.remainingUnits : -lot.remainingUnits), 0), 0)); }
-  function grossVirtualExposureUsd(state, markPrice) { const px = positive("markPrice", markPrice); return normalizeState(state).rings.reduce((sum, ring) => sum + ring.lots.reduce((total, lot) => total + lot.remainingUnits * px, 0), 0); }
+  function createInitialState() { return normalizeState({ version: 0, strategyId: def.strategyId, instrument: def.instrument, rings: buildRings(), adopted: [], lastFillAt: null, lastFillSide: null, lastFillPrice: null }); }
+  function expectedNetUnits(state) { const normalized = normalizeState(state); const ringUnits = normalized.rings.reduce((sum, ring) => sum + ring.lots.reduce((total, lot) => total + (lot.side === "BUY" ? lot.remainingUnits : -lot.remainingUnits), 0), 0); const adoptedUnits = normalized.adopted.reduce((total, lot) => total + (lot.side === "BUY" ? lot.remainingUnits : -lot.remainingUnits), 0); return fixed8(ringUnits + adoptedUnits); }
+  function grossVirtualExposureUsd(state, markPrice) { const px = positive("markPrice", markPrice); const normalized = normalizeState(state); const ringUsd = normalized.rings.reduce((sum, ring) => sum + ring.lots.reduce((total, lot) => total + lot.remainingUnits * px, 0), 0); const adoptedUsd = normalized.adopted.reduce((total, lot) => total + lot.remainingUnits * px, 0); return ringUsd + adoptedUsd; }
+  function adoptedExposureUsd(state, markPrice) { const px = positive("markPrice", markPrice); return normalizeState(state).adopted.reduce((total, lot) => total + lot.remainingUnits * px, 0); }
   function observeRearm(state, { price, ma }) {
     const next = mutable(state); const px = positive("price", price); const away = positive("ma", ma) * def.band * def.rearmBands; let changed = false;
     for (const ring of next.rings) if (!ring.armed && ring.lots.length < def.perRing && Math.abs(px - ringPrice(ma, ring)) + 1e-12 >= away) { ring.armed = true; changed = true; }
@@ -170,7 +185,7 @@ export function createRingGrid(config) {
     return Object.freeze(out);
   }
   function applyConfirmedEntry(state, intent, fill) {
-    if (intent?.type !== "ENTRY") throw new TypeError("intent must be ENTRY"); const next = mutable(state); if (intent.stateVersion !== next.version) throw new Error("entry intent state version is stale"); const ring = next.rings.find((candidate) => candidate.tag === intent.ringTag); if (!ring || !ring.armed || ring.lots.length >= def.perRing) throw new Error("entry ring is unavailable"); const confirmed = validatedFill(fill, intent.quantity); ring.lots.push({ id: intent.lotId, side: ring.side, ringTag: ring.tag, entryPrice: confirmed.fillPrice, originalUnits: confirmed.filledQuantity, remainingUnits: confirmed.filledQuantity, done: 0, openedAt: confirmed.filledAt }); ring.armed = false; next.lastFillAt = confirmed.filledAt; next.lastFillSide = intent.side; next.lastFillPrice = confirmed.fillPrice; return increment(next);
+    if (intent?.type !== "ENTRY") throw new TypeError("intent must be ENTRY"); const next = mutable(state); if (intent.stateVersion !== next.version) throw new Error("entry intent state version is stale"); const ring = next.rings.find((candidate) => candidate.tag === intent.ringTag); if (!ring || !ring.armed || ring.lots.length >= def.perRing) throw new Error("entry ring is unavailable"); const confirmed = validatedFill(fill, intent.quantity); ring.lots.push({ id: intent.lotId, side: ring.side, ringTag: ring.tag, entryPrice: confirmed.fillPrice, originalUnits: confirmed.filledQuantity, remainingUnits: confirmed.filledQuantity, done: 0, openedAt: confirmed.filledAt, positionCode: confirmed.positionCode ?? null }); ring.armed = false; next.lastFillAt = confirmed.filledAt; next.lastFillSide = intent.side; next.lastFillPrice = confirmed.fillPrice; return increment(next);
   }
   function applyConfirmedExit(state, intent, fill) {
     if (intent?.type !== "EXIT") throw new TypeError("intent must be EXIT"); const next = mutable(state); if (intent.stateVersion !== next.version) throw new Error("exit intent state version is stale"); const ring = next.rings.find((candidate) => candidate.tag === intent.ringTag); const index = ring?.lots.findIndex((candidate) => candidate.id === intent.lotId) ?? -1; if (!ring || index < 0) throw new Error("exit lot does not exist"); const lot = ring.lots[index]; if (lot.done + 1 !== intent.tranche) throw new Error("exit tranche does not match"); const confirmed = validatedFill(fill, intent.quantity); lot.remainingUnits = fixed8(lot.remainingUnits - confirmed.filledQuantity); lot.done = intent.tranche; if (lot.remainingUnits <= 1e-8) ring.lots.splice(index, 1); if (ring.lots.length === 0) ring.armed = true; next.lastFillAt = confirmed.filledAt; next.lastFillSide = intent.side; next.lastFillPrice = confirmed.fillPrice; return increment(next);
@@ -178,12 +193,57 @@ export function createRingGrid(config) {
   function buildProtectiveCutPlan(state, fraction) {
     const normalized = normalizeState(state); const cutFraction = positive("fraction", fraction); if (cutFraction >= 1) throw new TypeError("fraction must be less than one"); const legs = []; let virtualSide = null;
     for (const ring of normalized.rings) for (const lot of ring.lots) { if (virtualSide !== null && virtualSide !== lot.side) throw new Error("protective partial cut requires all virtual lots to share one side"); virtualSide = lot.side; const quantity = floorLotOrZero(lot.remainingUnits * cutFraction); if (quantity >= def.lotStep - 1e-12) legs.push(Object.freeze({ lotId: lot.id, ringTag: ring.tag, side: lot.side, quantity })); }
+    for (const lot of normalized.adopted) { if (virtualSide !== null && virtualSide !== lot.side) throw new Error("protective partial cut requires all virtual lots to share one side"); virtualSide = lot.side; const quantity = floorLotOrZero(lot.remainingUnits * cutFraction); if (quantity >= def.lotStep - 1e-12) legs.push(Object.freeze({ lotId: lot.id, ringTag: null, adopted: true, positionCode: lot.positionCode, side: lot.side, quantity })); }
     const quantity = fixed8(legs.reduce((sum, leg) => sum + leg.quantity, 0)); return Object.freeze({ type: "PROTECTIVE_CUT", strategyId: def.strategyId, instrument: def.instrument, stateVersion: normalized.version, fraction: cutFraction, virtualSide, side: virtualSide === "BUY" ? "SELL" : virtualSide === "SELL" ? "BUY" : null, quantity, legs: Object.freeze(legs) });
   }
   function applyConfirmedProtectiveCut(state, plan, fill) {
-    if (plan?.type !== "PROTECTIVE_CUT") throw new TypeError("plan must be PROTECTIVE_CUT"); const next = mutable(state); if (plan.stateVersion !== next.version || !plan.legs?.length || plan.quantity < def.lotStep) throw new Error("protective cut plan is invalid or stale"); const confirmed = validatedFill(fill, plan.quantity); for (const leg of plan.legs) { const ring = next.rings.find((candidate) => candidate.tag === leg.ringTag); const index = ring?.lots.findIndex((candidate) => candidate.id === leg.lotId) ?? -1; if (!ring || index < 0) throw new Error("protective cut lot does not exist"); const lot = ring.lots[index]; if (leg.quantity > lot.remainingUnits + 1e-8) throw new Error("protective cut quantity exceeds virtual lot"); lot.remainingUnits = fixed8(lot.remainingUnits - leg.quantity); lot.originalUnits = fixed8(lot.originalUnits - leg.quantity); if (lot.remainingUnits <= 1e-8) ring.lots.splice(index, 1); if (ring.lots.length === 0) ring.armed = true; } next.lastFillAt = confirmed.filledAt; next.lastFillSide = "PROTECTIVE_CUT"; next.lastFillPrice = confirmed.fillPrice; return increment(next);
+    if (plan?.type !== "PROTECTIVE_CUT") throw new TypeError("plan must be PROTECTIVE_CUT"); const next = mutable(state); if (plan.stateVersion !== next.version || !plan.legs?.length || plan.quantity < def.lotStep) throw new Error("protective cut plan is invalid or stale"); const confirmed = validatedFill(fill, plan.quantity); for (const leg of plan.legs) { if (leg.adopted === true) { const index = next.adopted.findIndex((candidate) => candidate.id === leg.lotId); if (index < 0) throw new Error("protective cut adopted lot does not exist"); const lot = next.adopted[index]; if (leg.quantity > lot.remainingUnits + 1e-8) throw new Error("protective cut quantity exceeds adopted lot"); lot.remainingUnits = fixed8(lot.remainingUnits - leg.quantity); lot.originalUnits = fixed8(lot.originalUnits - leg.quantity); if (lot.remainingUnits <= 1e-8) next.adopted.splice(index, 1); continue; } const ring = next.rings.find((candidate) => candidate.tag === leg.ringTag); const index = ring?.lots.findIndex((candidate) => candidate.id === leg.lotId) ?? -1; if (!ring || index < 0) throw new Error("protective cut lot does not exist"); const lot = ring.lots[index]; if (leg.quantity > lot.remainingUnits + 1e-8) throw new Error("protective cut quantity exceeds virtual lot"); lot.remainingUnits = fixed8(lot.remainingUnits - leg.quantity); lot.originalUnits = fixed8(lot.originalUnits - leg.quantity); if (lot.remainingUnits <= 1e-8) ring.lots.splice(index, 1); if (ring.lots.length === 0) ring.armed = true; } next.lastFillAt = confirmed.filledAt; next.lastFillSide = "PROTECTIVE_CUT"; next.lastFillPrice = confirmed.fillPrice; return increment(next);
   }
-  function resetAfterProtectiveFlatten(state, fill) { const next = mutable(state); for (const ring of next.rings) { ring.lots = []; ring.armed = true; } next.lastFillAt = timestamp("fill.filledAt", fill?.filledAt); next.lastFillSide = "PROTECTIVE_FLAT"; next.lastFillPrice = positive("fill.fillPrice", fill?.fillPrice); return increment(next); }
+  function resetAfterProtectiveFlatten(state, fill) { const next = mutable(state); for (const ring of next.rings) { ring.lots = []; ring.armed = true; } next.adopted = []; next.lastFillAt = timestamp("fill.filledAt", fill?.filledAt); next.lastFillSide = "PROTECTIVE_FLAT"; next.lastFillPrice = positive("fill.fillPrice", fill?.fillPrice); return increment(next); }
 
-  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, observeRearm, nextExitAction, applySkippedExit, entryCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten });
+  function adoptPosition(state, record) {
+    const next = mutable(state);
+    const candidate = cloneAdoptedLot({ ...record, id: record?.id ?? `ADOPT-${record?.positionCode}`, done: record?.done ?? 0 });
+    if (next.adopted.some((lot) => lot.positionCode === candidate.positionCode)) throw new Error("position is already adopted");
+    if (next.rings.some((ring) => ring.lots.some((lot) => lot.positionCode === candidate.positionCode))) throw new Error("position already belongs to a ring lot");
+    next.adopted.push(candidate);
+    next.lastFillAt = candidate.openedAt;
+    next.lastFillSide = candidate.side;
+    next.lastFillPrice = candidate.entryPrice;
+    return increment(next);
+  }
+
+  function findLotByPositionCode(state, code) {
+    const normalized = normalizeState(state);
+    const wanted = String(code);
+    for (const ring of normalized.rings) for (const lot of ring.lots) if (lot.positionCode === wanted) return Object.freeze({ scope: "RING", ringTag: ring.tag, lot });
+    for (const lot of normalized.adopted) if (lot.positionCode === wanted) return Object.freeze({ scope: "ADOPTED", ringTag: null, lot });
+    return null;
+  }
+
+  function reduceLotByPositionCode(state, code, units) {
+    const next = mutable(state);
+    const wanted = String(code);
+    const reduction = positive("units", units);
+    const adoptedIndex = next.adopted.findIndex((lot) => lot.positionCode === wanted);
+    if (adoptedIndex >= 0) {
+      const lot = next.adopted[adoptedIndex];
+      if (reduction > lot.remainingUnits + 1e-8) throw new Error("reduction exceeds adopted lot remaining units");
+      lot.remainingUnits = fixed8(lot.remainingUnits - reduction);
+      if (lot.remainingUnits <= 1e-8) next.adopted.splice(adoptedIndex, 1);
+      return increment(next);
+    }
+    for (const ring of next.rings) {
+      const index = ring.lots.findIndex((lot) => lot.positionCode === wanted);
+      if (index < 0) continue;
+      const lot = ring.lots[index];
+      if (reduction > lot.remainingUnits + 1e-8) throw new Error("reduction exceeds virtual lot remaining units");
+      lot.remainingUnits = fixed8(lot.remainingUnits - reduction);
+      if (lot.remainingUnits <= 1e-8) { ring.lots.splice(index, 1); ring.armed = true; }
+      return increment(next);
+    }
+    throw new Error("no virtual or adopted lot carries that positionCode");
+  }
+
+  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, adoptedExposureUsd, observeRearm, nextExitAction, applySkippedExit, entryCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten, adoptPosition, findLotByPositionCode, reduceLotByPositionCode });
 }
