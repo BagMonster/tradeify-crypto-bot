@@ -26,6 +26,7 @@ import { buildGridDefinition } from "./src/strategies/ringGridDefinition.js";
 import { createRingGrid } from "./src/strategies/ringGrid.js";
 import { createSolanaOwnerService } from "./src/solanaOwnerService.js";
 import { createMultiInstrumentOwnerService } from "./src/multiInstrumentOwnerService.js";
+import { runReconciliationPass } from "./src/runtime/hybridAbsorber.js";
 import { startTelegramBot } from "./src/telegramBot.js";
 
 const money = (v) => (Number.isFinite(v) ? `${v < 0 ? "-$" : "$"}${Math.abs(v).toFixed(2)}` : "unavailable");
@@ -640,6 +641,63 @@ const haltWarningTimer = setInterval(() => {
 }, HALT_WARNING_CHECK_MS);
 haltWarningTimer.unref?.();
 void haltWarnings.advance().catch((error) => console.error(`Initial owner halt-warning cycle check failed: ${error.message}`));
+
+const HYBRID_RECONCILE_MS = 60 * 1000;
+
+async function runHybridReconcileOnce() {
+  const books = typeof service.hybridBooks === "function" ? service.hybridBooks() : {};
+  if (Object.keys(books).length === 0) return;
+
+  const report = await runReconciliationPass({
+    inspectBooks: () => service.inspectBooks(),
+    recentOrders: () => service.recentOrderHistory(10),
+    // The execution ledger has no bulk listing, so the ledger signal is a no-op
+    // here and origin is decided by the order-code prefix and the audit
+    // user-agent. Both were present on every bot order observed on this
+    // account; an order missing either is UNKNOWN and escalates.
+    knownClientOrderIds: async () => new Set(),
+    loadWatermarks: () => database.getHybridWatermarks(),
+    saveWatermark: (w) => database.saveHybridWatermark(w),
+    books,
+    absorbEnabled: true
+  });
+
+  for (const outcome of report.absorbed) {
+    if (outcome.result !== "APPLIED") continue;
+    await database.addEvent("WARN", "HYBRID_MANUAL_ACTIVITY_ABSORBED", {
+      instrument: outcome.instrument,
+      applied: outcome.applied,
+      watermark: outcome.watermark
+    });
+  }
+
+  if (report.escalations.length === 0) {
+    await clearNonHarvestHalt("hybrid-reconciliation");
+    return;
+  }
+
+  const first = report.escalations[0];
+  const names = report.escalations.map((e) => e.instrument).join(", ");
+  await database.addEvent("ERROR", "HYBRID_UNEXPLAINED_NET", {
+    escalations: report.escalations,
+    accountWide: report.accountWide
+  });
+  await requestNonHarvestHalt({
+    key: "hybrid-reconciliation",
+    reasonCode: "HYBRID_UNEXPLAINED_NET",
+    reason: report.accountWide
+      ? `${names} diverged from the DXtrade book at the same time and no manual fill explains it`
+      : `${first.instrument} diverged from the DXtrade book and no manual fill explains it: ${first.reason}`,
+    instrument: report.accountWide ? null : first.instrument,
+    correction: "Inspect /status and /rawhistory, then reconcile in DXtrade. /pausehalt defers this for a fresh 25-minute warning cycle."
+  });
+}
+
+const hybridTimer = setInterval(() => {
+  void runHybridReconcileOnce().catch((error) => console.error(`Hybrid reconciliation pass failed: ${error.message}`));
+}, HYBRID_RECONCILE_MS);
+hybridTimer.unref?.();
+void runHybridReconcileOnce().catch((error) => console.error(`Initial hybrid reconciliation pass failed: ${error.message}`));
 
 const executionLive = stacks.every((s) => s.execution.isEnabled());
 const anyExecutionLive = stacks.some((s) => s.execution.isEnabled());
