@@ -260,7 +260,26 @@ export function createRingExecutionGuard({
       });
     }
     const all = read.legs;
-    const legs = all.filter((leg) => leg.direction === wantedDirection);
+    const excluded = new Set((intent.excludePositionCodes ?? []).map((value) => String(value)));
+    const legs = intent.adopted === true
+      ? all.filter((leg) => leg.direction === wantedDirection && String(leg.positionCode) === String(intent.positionCode))
+      : all.filter((leg) => leg.direction === wantedDirection && !excluded.has(String(leg.positionCode)));
+
+    if (legs.length === 0 && intent.adopted === true) {
+      await addEvent("ERROR", "RING_EXIT_BLOCKED_ADOPTED_POSITION_MISSING", {
+        orderCode: code,
+        lotId: intent.lotId,
+        positionCode: intent.positionCode ?? null,
+        tranche: intent.tranche,
+        wantedDirection,
+        openLegs: all.length
+      });
+      return Object.freeze({
+        status: "BLOCKED",
+        orderCode: code,
+        reason: `Adopted ${INSTRUMENT} position ${intent.positionCode} is no longer open at the broker`
+      });
+    }
 
     if (legs.length === 0) {
       await addEvent("ERROR", "RING_EXIT_BLOCKED_NO_MATCHING_POSITION", {
