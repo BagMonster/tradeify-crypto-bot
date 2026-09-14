@@ -186,6 +186,7 @@ export function createMultiInstrumentOwnerService({
 
   return Object.freeze({
     instruments: Object.freeze(books.map((b) => b.instrument)),
+    inspectBooks,
 
     async statusText(arg) {
       const per = await fanOut("statusText", arg);
@@ -199,6 +200,20 @@ export function createMultiInstrumentOwnerService({
     ringsText: (arg) => fanOut("ringsText", arg),
     targetsText: (arg) => fanOut("targetsText", arg),
     dxPreflightText: (arg) => fanOut("dxPreflightText", arg),
+    hybridBooks: () => {
+      const out = {};
+      for (const book of books) {
+        if (typeof book.service.hybridBook !== "function") continue;
+        out[book.instrument] = book.service.hybridBook();
+      }
+      return out;
+    },
+    recentOrderHistory: async (limit = 10) => {
+      const client = books[0]?.service;
+      if (typeof client?.rawOrderHistory !== "function") return [];
+      const payload = await client.rawOrderHistory(limit);
+      return Array.isArray(payload?.orders) ? payload.orders : [];
+    },
     rawHistoryText: async (arg) => {
       const book = books[0];
       if (typeof book?.service?.rawHistoryText !== "function") {
