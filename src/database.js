@@ -239,6 +239,15 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS hybrid_watermark (
+        instrument TEXT PRIMARY KEY,
+        absorbed_through TIMESTAMPTZ NOT NULL,
+        last_position_code TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS bars (
         source TEXT NOT NULL CHECK (LENGTH(BTRIM(source)) BETWEEN 1 AND 64),
         symbol TEXT NOT NULL CHECK (LENGTH(BTRIM(symbol)) BETWEEN 1 AND 64),
@@ -472,6 +481,42 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
       ? await pool.query("DELETE FROM halt_warning_cycle WHERE id = 1 RETURNING cycle_key")
       : await pool.query("DELETE FROM halt_warning_cycle WHERE id = 1 AND cycle_key = $1 RETURNING cycle_key", [requiredText("halt warning cycle key", key, 160)]);
     return result.rowCount === 1;
+  }
+
+  async function getHybridWatermarks() {
+    const result = await pool.query("SELECT instrument, absorbed_through, last_position_code FROM hybrid_watermark");
+    const out = {};
+    for (const row of result.rows) {
+      out[String(row.instrument)] = Object.freeze({
+        instrument: String(row.instrument),
+        absorbedThrough: toDate("hybrid watermark absorbed_through", row.absorbed_through).toISOString(),
+        lastPositionCode: row.last_position_code == null ? null : String(row.last_position_code)
+      });
+    }
+    return Object.freeze(out);
+  }
+
+  async function saveHybridWatermark({ instrument, absorbedThrough, lastPositionCode = null }) {
+    const symbol = requiredText("hybrid watermark instrument", instrument, 32);
+    const stamp = toDate("hybrid watermark absorbedThrough", absorbedThrough);
+    const code = lastPositionCode == null ? null : requiredText("hybrid watermark positionCode", lastPositionCode, 128);
+    const result = await pool.query(
+      `INSERT INTO hybrid_watermark (instrument, absorbed_through, last_position_code)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (instrument) DO UPDATE SET
+         absorbed_through = GREATEST(hybrid_watermark.absorbed_through, EXCLUDED.absorbed_through),
+         last_position_code = EXCLUDED.last_position_code,
+         updated_at = NOW()
+       RETURNING instrument, absorbed_through, last_position_code`,
+      [symbol, stamp, code]
+    );
+    if (result.rowCount !== 1) throw new Error("hybrid watermark was not saved");
+    const row = result.rows[0];
+    return Object.freeze({
+      instrument: String(row.instrument),
+      absorbedThrough: toDate("hybrid watermark absorbed_through", row.absorbed_through).toISOString(),
+      lastPositionCode: row.last_position_code == null ? null : String(row.last_position_code)
+    });
   }
 
   async function setOperatorKilled(killed) {
@@ -804,6 +849,8 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     getHaltWarningCycle,
     saveHaltWarningCycle,
     clearHaltWarningCycle,
+    getHybridWatermarks,
+    saveHybridWatermark,
     setOperatorKilled,
     setResumeChallenge,
     clearResumeChallenge,
