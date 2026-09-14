@@ -123,6 +123,14 @@ function orderHistoryParts(payload, clientOrderId) {
   return Object.freeze({ code, missing: false, order, currentStatus, isFinal, leg, execution, fillPrice, filledAt });
 }
 
+function confirmedPositionCode(parts) {
+  const fromLeg = parts?.leg?.positionCode;
+  if (fromLeg !== null && fromLeg !== undefined && String(fromLeg).trim() !== "") return String(fromLeg);
+  const fromOrder = parts?.order?.orderId;
+  if (fromOrder !== null && fromOrder !== undefined && String(fromOrder).trim() !== "") return String(fromOrder);
+  return null;
+}
+
 function confirmedFillResult(parts, extra = {}) {
   if (parts.fillPrice === null || typeof parts.filledAt !== "string" || !Number.isFinite(Date.parse(parts.filledAt))) {
     throw new Error("DXtrade completed order lacks reliable fill price or time");
@@ -131,6 +139,7 @@ function confirmedFillResult(parts, extra = {}) {
     status: "FILLED",
     clientOrderId: parts.code,
     brokerOrderId: parts.order.orderId == null ? null : String(parts.order.orderId),
+    positionCode: confirmedPositionCode(parts),
     fillPrice: parts.fillPrice,
     filledAt: new Date(Date.parse(parts.filledAt)).toISOString(),
     ...extra
