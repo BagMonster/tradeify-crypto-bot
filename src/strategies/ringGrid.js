@@ -164,6 +164,7 @@ export function createRingGrid(config) {
   }
   function nextExitAction(state, { price, ma }) {
     const normalized = normalizeState(state); const px = positive("price", price); const movingAverage = positive("ma", ma);
+    const adoptedCodes = Object.freeze(normalized.adopted.map((lot) => lot.positionCode));
     for (const ring of normalized.rings) for (const lot of ring.lots) {
       const tranche = lot.done + 1; if (tranche > 4) continue;
       let target = lot.entryPrice + ((movingAverage - lot.entryPrice) * (tranche / 4));
@@ -171,12 +172,23 @@ export function createRingGrid(config) {
       if (!(lot.side === "BUY" ? px >= target : px <= target)) continue;
       const quantity = tranche === 4 ? lot.remainingUnits : Math.min(lot.remainingUnits, floorLot(lot.originalUnits * (def.trancheWeights[tranche - 1] / def.trancheWeightSum)));
       if (tranche < 4 && quantity < def.lotStep - 1e-12) return Object.freeze({ type: "SKIP_EXIT", ringTag: ring.tag, lotId: lot.id, tranche, target });
-      return Object.freeze({ type: "EXIT", strategyId: def.strategyId, instrument: def.instrument, source: "binance", symbol: def.marketSymbol, tag: ring.tag, ringTag: ring.tag, lotId: lot.id, tranche, side: lot.side === "BUY" ? "SELL" : "BUY", virtualSide: lot.side, quantity: fixed8(quantity), observedPrice: px, target, ma: movingAverage, stateVersion: normalized.version });
+      return Object.freeze({ type: "EXIT", strategyId: def.strategyId, instrument: def.instrument, source: "binance", symbol: def.marketSymbol, tag: ring.tag, ringTag: ring.tag, lotId: lot.id, tranche, side: lot.side === "BUY" ? "SELL" : "BUY", virtualSide: lot.side, quantity: fixed8(quantity), observedPrice: px, target, ma: movingAverage, stateVersion: normalized.version, adopted: false, positionCode: lot.positionCode ?? null, excludePositionCodes: adoptedCodes });
+    }
+    for (const lot of normalized.adopted) {
+      const tranche = lot.done + 1; if (tranche > 4) continue;
+      let target = lot.entryPrice + ((lot.ma - lot.entryPrice) * (tranche / 4));
+      target = lot.side === "BUY" ? Math.max(target, lot.entryPrice * (1 + def.roundTripCostFloor)) : Math.min(target, lot.entryPrice * (1 - def.roundTripCostFloor));
+      if (!(lot.side === "BUY" ? px >= target : px <= target)) continue;
+      const quantity = tranche === 4 ? lot.remainingUnits : Math.min(lot.remainingUnits, floorLot(lot.originalUnits * (def.trancheWeights[tranche - 1] / def.trancheWeightSum)));
+      if (tranche < 4 && quantity < def.lotStep - 1e-12) return Object.freeze({ type: "SKIP_EXIT", ringTag: null, adopted: true, lotId: lot.id, tranche, target });
+      return Object.freeze({ type: "EXIT", strategyId: def.strategyId, instrument: def.instrument, source: "binance", symbol: def.marketSymbol, tag: "ADOPTED", ringTag: null, lotId: lot.id, tranche, side: lot.side === "BUY" ? "SELL" : "BUY", virtualSide: lot.side, quantity: fixed8(quantity), observedPrice: px, target, ma: lot.ma, stateVersion: normalized.version, adopted: true, positionCode: lot.positionCode, excludePositionCodes: Object.freeze([]) });
     }
     return null;
   }
   function applySkippedExit(state, action) {
-    if (action?.type !== "SKIP_EXIT") throw new TypeError("action must be SKIP_EXIT"); const next = mutable(state); const ring = next.rings.find((candidate) => candidate.tag === action.ringTag); const lot = ring?.lots.find((candidate) => candidate.id === action.lotId);
+    if (action?.type !== "SKIP_EXIT") throw new TypeError("action must be SKIP_EXIT"); const next = mutable(state);
+    if (action.adopted === true) { const lot = next.adopted.find((candidate) => candidate.id === action.lotId); if (!lot || lot.done + 1 !== action.tranche || action.tranche >= 4) throw new Error("skipped exit no longer matches state"); lot.done = action.tranche; return increment(next); }
+    const ring = next.rings.find((candidate) => candidate.tag === action.ringTag); const lot = ring?.lots.find((candidate) => candidate.id === action.lotId);
     if (!lot || lot.done + 1 !== action.tranche || action.tranche >= 4) throw new Error("skipped exit no longer matches state"); lot.done = action.tranche; return increment(next);
   }
   function entryCandidates(state, { previousPrice, price, ma }) {
@@ -188,7 +200,9 @@ export function createRingGrid(config) {
     if (intent?.type !== "ENTRY") throw new TypeError("intent must be ENTRY"); const next = mutable(state); if (intent.stateVersion !== next.version) throw new Error("entry intent state version is stale"); const ring = next.rings.find((candidate) => candidate.tag === intent.ringTag); if (!ring || !ring.armed || ring.lots.length >= def.perRing) throw new Error("entry ring is unavailable"); const confirmed = validatedFill(fill, intent.quantity); ring.lots.push({ id: intent.lotId, side: ring.side, ringTag: ring.tag, entryPrice: confirmed.fillPrice, originalUnits: confirmed.filledQuantity, remainingUnits: confirmed.filledQuantity, done: 0, openedAt: confirmed.filledAt, positionCode: confirmed.positionCode ?? null }); ring.armed = false; next.lastFillAt = confirmed.filledAt; next.lastFillSide = intent.side; next.lastFillPrice = confirmed.fillPrice; return increment(next);
   }
   function applyConfirmedExit(state, intent, fill) {
-    if (intent?.type !== "EXIT") throw new TypeError("intent must be EXIT"); const next = mutable(state); if (intent.stateVersion !== next.version) throw new Error("exit intent state version is stale"); const ring = next.rings.find((candidate) => candidate.tag === intent.ringTag); const index = ring?.lots.findIndex((candidate) => candidate.id === intent.lotId) ?? -1; if (!ring || index < 0) throw new Error("exit lot does not exist"); const lot = ring.lots[index]; if (lot.done + 1 !== intent.tranche) throw new Error("exit tranche does not match"); const confirmed = validatedFill(fill, intent.quantity); lot.remainingUnits = fixed8(lot.remainingUnits - confirmed.filledQuantity); lot.done = intent.tranche; if (lot.remainingUnits <= 1e-8) ring.lots.splice(index, 1); if (ring.lots.length === 0) ring.armed = true; next.lastFillAt = confirmed.filledAt; next.lastFillSide = intent.side; next.lastFillPrice = confirmed.fillPrice; return increment(next);
+    if (intent?.type !== "EXIT") throw new TypeError("intent must be EXIT"); const next = mutable(state); if (intent.stateVersion !== next.version) throw new Error("exit intent state version is stale");
+    if (intent.adopted === true) { const index = next.adopted.findIndex((candidate) => candidate.id === intent.lotId); if (index < 0) throw new Error("exit lot does not exist"); const lot = next.adopted[index]; if (lot.done + 1 !== intent.tranche) throw new Error("exit tranche does not match"); const confirmed = validatedFill(fill, intent.quantity); lot.remainingUnits = fixed8(lot.remainingUnits - confirmed.filledQuantity); lot.done = intent.tranche; if (lot.remainingUnits <= 1e-8) next.adopted.splice(index, 1); next.lastFillAt = confirmed.filledAt; next.lastFillSide = intent.side; next.lastFillPrice = confirmed.fillPrice; return increment(next); }
+    const ring = next.rings.find((candidate) => candidate.tag === intent.ringTag); const index = ring?.lots.findIndex((candidate) => candidate.id === intent.lotId) ?? -1; if (!ring || index < 0) throw new Error("exit lot does not exist"); const lot = ring.lots[index]; if (lot.done + 1 !== intent.tranche) throw new Error("exit tranche does not match"); const confirmed = validatedFill(fill, intent.quantity); lot.remainingUnits = fixed8(lot.remainingUnits - confirmed.filledQuantity); lot.done = intent.tranche; if (lot.remainingUnits <= 1e-8) ring.lots.splice(index, 1); if (ring.lots.length === 0) ring.armed = true; next.lastFillAt = confirmed.filledAt; next.lastFillSide = intent.side; next.lastFillPrice = confirmed.fillPrice; return increment(next);
   }
   function buildProtectiveCutPlan(state, fraction) {
     const normalized = normalizeState(state); const cutFraction = positive("fraction", fraction); if (cutFraction >= 1) throw new TypeError("fraction must be less than one"); const legs = []; let virtualSide = null;
