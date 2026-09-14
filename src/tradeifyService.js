@@ -215,6 +215,11 @@ export function createTradeifyService({
     return out;
   }
 
+  async function rawOrderHistory(limit = 10) {
+    if (!dxtradeClient || typeof dxtradeClient.getRecentOrderHistory !== "function") return null;
+    return dxtradeClient.getRecentOrderHistory(limit);
+  }
+
   async function rawHistoryText(arg) {
     if (!dxtradeClient) return "Raw order history is unavailable in this worker.";
     if (typeof dxtradeClient.getRecentOrderHistory !== "function") {
@@ -322,6 +327,7 @@ export function createTradeifyService({
     flatInstructions,
     healthText,
     dxPreflightText,
-    rawHistoryText
+    rawHistoryText,
+    rawOrderHistory
   };
 }
