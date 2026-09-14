@@ -230,6 +230,22 @@ export function createSolanaOwnerService(opts) {
     ringsText,
     targetsText,
     inspectForRerun,
+    hybridBook: () => Object.freeze({
+      instrument: definition?.instrument ?? opts.instrument ?? null,
+      grid,
+      stateStore,
+      // Returns null when the completed-day MA is not trustworthy. The absorber
+      // refuses to adopt on a null rather than guessing a target price.
+      movingAverage: async () => {
+        try {
+          const maState = await opts.maProvider?.getCurrent?.();
+          const value = Number(maState?.ma);
+          return Number.isFinite(value) && value > 0 ? value : null;
+        } catch {
+          return null;
+        }
+      }
+    }),
     trustedSignedNetFor: (instrument) => trustedSignedNetFor(opts.accountMonitor?.getSnapshot?.(), instrument)
   });
 }
