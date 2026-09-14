@@ -112,7 +112,8 @@ export function createDxtradeOrderAdapter({
           orderCode: request.orderCode,
           fillPrice: result.fillPrice,
           filledAt: result.filledAt,
-          brokerOrderId: result.brokerOrderId ?? null
+          brokerOrderId: result.brokerOrderId ?? null,
+          positionCode: result.positionCode ?? result.brokerOrderId ?? null
         });
       }
 
@@ -177,7 +178,8 @@ export function createDxtradeOrderAdapter({
         orderCode: row.clientOrderId,
         fillPrice: row.fillPrice,
         filledAt: row.filledAt,
-        brokerOrderId: row.brokerOrderId
+        brokerOrderId: row.brokerOrderId,
+        positionCode: row.brokerOrderId == null ? null : String(row.brokerOrderId)
       });
     }
     if (FINAL_NONFILL.has(row.status)) {
