@@ -15,7 +15,7 @@
 //  * The watermark advances only after the state write succeeds. An absorption
 //    that half-applies is therefore repeated, not skipped.
 
-import { classifyBooks, summarize, VERDICT } from "./hybridReconciler.js";
+import { classifyBooks, describeFill, summarize, VERDICT } from "./hybridReconciler.js";
 
 export const ABSORB_RESULT = Object.freeze({
   APPLIED: "APPLIED",
@@ -160,6 +160,33 @@ export async function runReconciliationPass(deps) {
   const absorbed = [];
   const escalations = decisions.filter((d) => d.verdict === VERDICT.UNEXPLAINED || d.verdict === VERDICT.UNREAD)
     .map((d) => Object.freeze({ instrument: d.instrument, verdict: d.verdict, reason: d.reason, delta: d.delta }));
+
+  // A book that agrees with the broker is proof that every fill up to now is
+  // already accounted for. Baselining the watermark there stops the next
+  // divergence from re-reading old history, where a truncated window can split
+  // a matched open/close pair and leave an orphan that no longer nets to zero.
+  for (const decision of decisions) {
+    if (decision.verdict !== VERDICT.MATCH) continue;
+    let newest = null;
+    for (const order of orders) {
+      if (String(order?.instrument ?? "") !== decision.instrument) continue;
+      const fill = describeFill(order);
+      if (fill === null) continue;
+      if (newest === null || fill.transactionTime > newest.transactionTime) newest = fill;
+    }
+    if (newest === null) continue;
+    const held = stored?.[decision.instrument]?.absorbedThrough ?? null;
+    if (held !== null && Date.parse(held) >= newest.transactionTime) continue;
+    try {
+      await deps.saveWatermark({
+        instrument: decision.instrument,
+        absorbedThrough: newest.filledAt,
+        lastPositionCode: newest.positionCode
+      });
+    } catch {
+      // A failed baseline write is not fatal; the next matched pass retries.
+    }
+  }
 
   if (deps.absorbEnabled !== false) {
     for (const decision of decisions) {
