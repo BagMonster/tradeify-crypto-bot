@@ -78,7 +78,11 @@ export async function absorbBook(decision, book) {
   try {
     for (const fill of decision.fills) {
       if (fill.effect === "CLOSE") {
-        next = grid.reduceLotByPositionCode(next, fill.positionCode, fill.units);
+        // A CLOSE trades the opposite side to the lot it closes, so a BUY close
+        // retires a SELL lot. The side is only used to pick among legacy lots
+        // that predate positionCode.
+        const lotSide = fill.side === "BUY" ? "SELL" : "BUY";
+        next = grid.reduceLotByPositionCode(next, fill.positionCode, fill.units, lotSide);
         applied.push({ effect: "CLOSE", positionCode: fill.positionCode, units: fill.units });
         continue;
       }
