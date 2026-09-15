@@ -105,8 +105,14 @@ export async function absorbBook(decision, book) {
     return Object.freeze({ instrument, result: ABSORB_RESULT.SKIPPED, reason: "nothing to apply" });
   }
 
+  // The strategy increments the state version once per mutation, but the store
+  // accepts exactly expectedVersion + 1. A pass that absorbs several fills at
+  // once (common on first run, when no watermark exists yet) would otherwise be
+  // rejected as a lost race. Collapse to a single increment before saving.
+  const collapsed = grid.normalizeState({ ...grid.normalizeState(next), version: expectedVersion + 1 });
+
   try {
-    await store.save(expectedVersion, next);
+    await store.save(expectedVersion, collapsed);
   } catch (error) {
     // A version conflict means the trading tick wrote first. The divergence is
     // still there and will be classified again on the next pass.
