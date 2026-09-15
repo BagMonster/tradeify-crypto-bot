@@ -131,6 +131,7 @@ export function createDxtradeOrderAdapter({
 
       await orders.markStatus(request.orderCode, "PENDING");
       if (Date.now() >= deadline) {
+        console.warn(`ORDER ${request.orderCode}: still PENDING after ${confirmationTimeoutMs}ms of history polling; left for reconciliation, not retried`);
         return Object.freeze({
           confirmed: false,
           orderCode: request.orderCode,
@@ -214,6 +215,10 @@ export function createDxtradeOrderAdapter({
           });
         }
         await orders.markStatus(request.orderCode, "PENDING", { lastError: safeFailureText(error) });
+        // Not a definite rejection: the order may already be live at the broker.
+        // reconcileUntilTerminal now polls orders/history for this exact
+        // clientOrderId rather than re-sending, which would risk a double fill.
+        console.warn(`ORDER ${request.orderCode}: submit did not confirm (${safeFailureText(error)}); resolving via order history, no re-send`);
       }
     }
 
