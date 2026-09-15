@@ -235,7 +235,7 @@ export function createRingGrid(config) {
     return null;
   }
 
-  function reduceLotByPositionCode(state, code, units) {
+  function reduceLotByPositionCode(state, code, units, fallbackSide = null) {
     const next = mutable(state);
     const wanted = String(code);
     const reduction = positive("units", units);
@@ -255,6 +255,32 @@ export function createRingGrid(config) {
       lot.remainingUnits = fixed8(lot.remainingUnits - reduction);
       if (lot.remainingUnits <= 1e-8) { ring.lots.splice(index, 1); ring.armed = true; }
       return increment(next);
+    }
+    // Lots opened before positionCode was recorded carry null and cannot be
+    // matched by broker id. Reduce those oldest-first on the named side rather
+    // than stranding the book until every legacy lot has cycled out.
+    if (fallbackSide === "BUY" || fallbackSide === "SELL") {
+      const legacy = [];
+      for (const ring of next.rings) for (const lot of ring.lots) {
+        if (lot.side === fallbackSide && (lot.positionCode === null || lot.positionCode === undefined)) legacy.push({ ring, lot });
+      }
+      legacy.sort((a, b) => Date.parse(a.lot.openedAt) - Date.parse(b.lot.openedAt));
+      const available = legacy.reduce((sum, entry) => sum + entry.lot.remainingUnits, 0);
+      if (available + 1e-8 >= reduction) {
+        let outstanding = reduction;
+        for (const entry of legacy) {
+          if (outstanding <= 1e-8) break;
+          const take = Math.min(entry.lot.remainingUnits, outstanding);
+          entry.lot.remainingUnits = fixed8(entry.lot.remainingUnits - take);
+          outstanding = fixed8(outstanding - take);
+          if (entry.lot.remainingUnits <= 1e-8) {
+            const index = entry.ring.lots.indexOf(entry.lot);
+            if (index >= 0) entry.ring.lots.splice(index, 1);
+            if (entry.ring.lots.length === 0) entry.ring.armed = true;
+          }
+        }
+        return increment(next);
+      }
     }
     throw new Error("no virtual or adopted lot carries that positionCode");
   }
