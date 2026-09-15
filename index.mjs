@@ -410,17 +410,23 @@ async function persistD049SafetyHalt(stack, result) {
 }
 
 async function applyReconciliationBlocked(stack, result) {
+  // Hybrid mode owns this decision now. The hybrid reconciliation pass compares
+  // every book against the broker each minute, identifies manual fills from the
+  // order history and absorbs them; only a divergence it cannot explain opens a
+  // halt-warning cycle (HYBRID_UNEXPLAINED_NET). The old behaviour here warned
+  // and halted on ANY mismatch, which fired on every deliberate manual trade
+  // because it had no way to tell an owner fill from a broker-side problem.
   const recon = result.reconciliation;
+  if (!recon || !Number.isFinite(recon.actual) || !Number.isFinite(recon.expected)) return;
   const version = Number.isSafeInteger(result.stateVersion)
     ? result.stateVersion
     : (Number.isSafeInteger(result.state?.version) ? result.state.version : 0);
-  if (!recon || !Number.isFinite(recon.actual) || !Number.isFinite(recon.expected)) return;
-  await requestNonHarvestHalt({
-    key: `RECONCILIATION_MISMATCH:${stack.cfg.orderPrefix}`,
-    reasonCode: "RECONCILIATION_MISMATCH",
+  await database.addEvent("WARN", "RECONCILIATION_MISMATCH_OBSERVED", {
     instrument: stack.cfg.instrument,
-    reason: `${stack.cfg.instrument} virtual net ${Number(recon.expected).toFixed(8)} does not match DXtrade net ${Number(recon.actual).toFixed(8)} at state version ${version}.`,
-    correction: `Wait for /status to show matching virtual and DXtrade nets, then use /rematch ${stack.cfg.instrument.split("/")[0]} if a reconciliation halt eventually fires. Send /pausehalt to defer it.`
+    expected: Number(recon.expected),
+    actual: Number(recon.actual),
+    stateVersion: version,
+    note: "recorded only; the hybrid reconciliation pass decides whether this needs owner attention"
   });
 }
 
@@ -655,7 +661,7 @@ async function runHybridReconcileOnce() {
   const report = await runReconciliationPass({
     inspectBooks: () => service.inspectBooks(),
     recentOrders: async () => {
-      const orders = await service.recentOrderHistory(10);
+      const orders = await service.recentOrderHistory(50);
       orderCount = Array.isArray(orders) ? orders.length : -1;
       return orders;
     },
