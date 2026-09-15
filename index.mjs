@@ -646,11 +646,19 @@ const HYBRID_RECONCILE_MS = 60 * 1000;
 
 async function runHybridReconcileOnce() {
   const books = typeof service.hybridBooks === "function" ? service.hybridBooks() : {};
-  if (Object.keys(books).length === 0) return;
+  if (Object.keys(books).length === 0) {
+    console.log("HYBRID: no books expose a hybrid surface; pass skipped.");
+    return;
+  }
 
+  let orderCount = -1;
   const report = await runReconciliationPass({
     inspectBooks: () => service.inspectBooks(),
-    recentOrders: () => service.recentOrderHistory(10),
+    recentOrders: async () => {
+      const orders = await service.recentOrderHistory(10);
+      orderCount = Array.isArray(orders) ? orders.length : -1;
+      return orders;
+    },
     // The execution ledger has no bulk listing, so the ledger signal is a no-op
     // here and origin is decided by the order-code prefix and the audit
     // user-agent. Both were present on every bot order observed on this
@@ -661,6 +669,17 @@ async function runHybridReconcileOnce() {
     books,
     absorbEnabled: true
   });
+
+  const verdicts = report.decisions
+    .map((d) => `${d.instrument}=${d.verdict}${d.delta ? `(${d.delta})` : ""}`)
+    .join(" ");
+  console.log(`HYBRID: books=${Object.keys(books).length} orders=${orderCount} ${verdicts} severity=${report.severity}`);
+  for (const d of report.decisions) {
+    if (d.reason) console.log(`HYBRID:   ${d.instrument} ${d.verdict}: ${d.reason}`);
+  }
+  for (const outcome of report.absorbed) {
+    console.log(`HYBRID:   ${outcome.instrument} absorb ${outcome.result}${outcome.reason ? `: ${outcome.reason}` : ""}`);
+  }
 
   for (const outcome of report.absorbed) {
     if (outcome.result !== "APPLIED") continue;
