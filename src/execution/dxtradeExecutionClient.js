@@ -404,6 +404,33 @@ export class DxtradeExecutionClient {
   }
 
   async #requestJson({ method, path, query = null, authenticated = true, body = undefined }) {
+    // A GET changes nothing, so a timeout can be retried safely. Placement and
+    // close are POSTs and are never retried here: a timed-out POST may already
+    // have filled, and re-sending it would double the position. Those paths
+    // resolve by polling orders/history for the same clientOrderId instead.
+    const idempotent = method === "GET";
+    const attempts = idempotent ? 3 : 1;
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await this.#attemptJson({ method, path, query, authenticated, body });
+      } catch (error) {
+        lastError = error;
+        const timedOut = error instanceof DxtradeExecutionError &&
+          typeof error.message === "string" && error.message.includes("timed out");
+        if (!idempotent || !timedOut || attempt === attempts) throw error;
+        const backoffMs = attempt * 1000;
+        console.warn(`DXtrade GET ${path} timed out (attempt ${attempt}/${attempts}); retrying in ${backoffMs}ms`);
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, backoffMs);
+          timer.unref?.();
+        });
+      }
+    }
+    throw lastError;
+  }
+
+  async #attemptJson({ method, path, query = null, authenticated = true, body = undefined }) {
     if (authenticated) this.#requireSession();
     const url = new URL(`${this.#restBaseUrl.pathname}${path}`, this.#restBaseUrl.origin);
     if (url.hostname !== REQUIRED_HOSTNAME || url.protocol !== "https:" || url.port !== "" ||
