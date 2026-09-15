@@ -634,7 +634,25 @@ export function createRingExecutionGuard({
     // A flatten is only a flatten if the account is actually flat afterwards. Every
     // leg reporting FILLED is not sufficient evidence on its own.
     if (aggregate.status === "FILLED") {
-      const verify = await readAllSolPositions();
+      // A single failed read used to send the whole harvest to HALTED. The read
+      // is idempotent, so give the broker a few chances before concluding the
+      // flatten cannot be verified. Each attempt is logged so a failure here
+      // explains itself in the Railway stream.
+      let verify = null;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        verify = await readAllSolPositions();
+        if (verify.ok) {
+          if (attempt > 1) console.log(`FLATTEN VERIFY: succeeded on attempt ${attempt}/3`);
+          break;
+        }
+        console.warn(`FLATTEN VERIFY: attempt ${attempt}/3 failed: ${verify.reason ?? "unknown reason"}`);
+        if (attempt < 3) {
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, attempt * 2000);
+            timer.unref?.();
+          });
+        }
+      }
       if (!verify.ok) {
         await addEvent("ERROR", "RING_PROTECTIVE_FLATTEN_NOT_VERIFIED", { reason: verify.reason });
         aggregate = Object.freeze({ ...aggregate, status: "NOT_VERIFIED" });

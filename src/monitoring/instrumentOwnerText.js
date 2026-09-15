@@ -114,10 +114,41 @@ export function formatInstrumentStatus({
       `Supervisor brake: ${supervisorBook.braked ? "ACTIVE" : "READY"}${supervisorBook.readFailed ? " (book unread)" : ""}`
     );
   }
-  if (botState?.operator_killed) lines.push("Operator pause: ACTIVE");
-  if (botState?.safety_halt) lines.push(`Safety halt: ${botState.halt_reason ?? "Manual review required"}`);
+  if (botState?.operator_killed) {
+    lines.push("Operator pause: ACTIVE", `  → release with: /resume ${instrument}`);
+  }
+  if (botState?.safety_halt) {
+    lines.push(`Safety halt: ${botState.halt_reason ?? "Manual review required"}`);
+    lines.push(`  → release with: ${haltReleaseHint(botState.halt_reason, instrument)}`);
+  }
   lines.push("", ...brokerBookLines(accountMonitor, instrument));
   return lines.join("\n");
+}
+
+// Six different things can stop this bot and each has its own release. Reading
+// the halt text and remembering which command clears it is exactly the wrong
+// thing to ask of someone at 7am, so /status names the command directly.
+export function haltReleaseHint(reason, instrument = null) {
+  const text = typeof reason === "string" ? reason.toLowerCase() : "";
+  const code = typeof instrument === "string" && instrument.includes("/")
+    ? instrument.split("/")[0]
+    : "<INSTRUMENT>";
+  if (text.endsWith("production runtime error; owner review required")) {
+    return "/rerun  (needs every book matching first)";
+  }
+  if (text.includes("does not reconcile to the dxtrade net position")) {
+    return `/rematch ${code}  (needs virtual and broker nets to agree first)`;
+  }
+  if (text.includes("harvest could not confirm every book flat")) {
+    return "close any remaining broker positions, then /harvestrecover";
+  }
+  if (text.includes("foreign position") || text.includes("position metrics")) {
+    return "clear the unexpected broker position in DXtrade, then /pausehalt if it is still counting down";
+  }
+  if (text.includes("virtual") && text.includes("flat")) {
+    return `/reconcile ${code}  (broker flat, virtual lots left over)`;
+  }
+  return `/rerun if it ends "production runtime error", /rematch ${code} for a net mismatch, /reconcile ${code} for leftover virtual lots on a flat broker`;
 }
 
 export function formatInstrumentHealth({

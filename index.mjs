@@ -649,6 +649,8 @@ haltWarningTimer.unref?.();
 void haltWarnings.advance().catch((error) => console.error(`Initial owner halt-warning cycle check failed: ${error.message}`));
 
 const HYBRID_RECONCILE_MS = 60 * 1000;
+const HYBRID_HALT_SIGNATURE = "diverged from the DXtrade book and no manual fill explains it";
+let lastHybridHaltReason = null;
 
 async function runHybridReconcileOnce() {
   const books = typeof service.hybridBooks === "function" ? service.hybridBooks() : {};
@@ -698,11 +700,35 @@ async function runHybridReconcileOnce() {
 
   if (report.escalations.length === 0) {
     await clearNonHarvestHalt("hybrid-reconciliation");
+    // Clearing the pending warning cycle is not enough once it has converted to
+    // a durable safety halt. Match on the stored reason rather than an in-memory
+    // variable: a restart wipes the variable, and a halt that only this pass can
+    // recognise would otherwise survive with no command able to release it.
+    if (typeof database.clearSafetyHaltIfReason === "function") {
+      try {
+        const current = await database.getState();
+        const reason = typeof current?.halt_reason === "string" ? current.halt_reason : null;
+        if (current?.safety_halt === true && reason && reason.includes(HYBRID_HALT_SIGNATURE)) {
+          const cleared = await database.clearSafetyHaltIfReason(reason);
+          if (cleared) console.log("HYBRID: every book agrees; cleared the hybrid safety halt.");
+          else console.warn("HYBRID: hybrid safety halt changed before it could be cleared; will retry next pass.");
+        }
+      } catch (error) {
+        console.error(`HYBRID: could not clear the hybrid safety halt: ${error.message}`);
+      }
+    }
+    lastHybridHaltReason = null;
     return;
   }
 
   const first = report.escalations[0];
   const names = report.escalations.map((e) => e.instrument).join(", ");
+  // The suffix matters: /rerun only clears halts whose reason ends with the
+  // runtime-error tail. Without it this halt would have no release path.
+  const haltReason = report.accountWide
+    ? `${names} diverged from the DXtrade book at the same time and no manual fill explains it; production runtime error; owner review required`
+    : `${first.instrument} diverged from the DXtrade book and no manual fill explains it: ${first.reason}; production runtime error; owner review required`;
+  lastHybridHaltReason = haltReason;
   await database.addEvent("ERROR", "HYBRID_UNEXPLAINED_NET", {
     escalations: report.escalations,
     accountWide: report.accountWide
@@ -710,11 +736,9 @@ async function runHybridReconcileOnce() {
   await requestNonHarvestHalt({
     key: "hybrid-reconciliation",
     reasonCode: "HYBRID_UNEXPLAINED_NET",
-    reason: report.accountWide
-      ? `${names} diverged from the DXtrade book at the same time and no manual fill explains it`
-      : `${first.instrument} diverged from the DXtrade book and no manual fill explains it: ${first.reason}`,
+    reason: haltReason,
     instrument: report.accountWide ? null : first.instrument,
-    correction: "Inspect /status and /rawhistory, then reconcile in DXtrade. /pausehalt defers this for a fresh 25-minute warning cycle."
+    correction: "Inspect /status and /rawhistory, then reconcile in DXtrade. /pausehalt defers this for a fresh 25-minute warning cycle, and /rerun clears it once every book matches."
   });
 }
 
