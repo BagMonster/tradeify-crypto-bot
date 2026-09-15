@@ -577,6 +577,22 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
   }
 
   async function addEvent(level, kind, payload = {}) {
+    // Events are the bot's permanent record, but Postgres is invisible from
+    // Railway. Mirror anything that needs attention to the console so a failure
+    // explains itself in the log stream instead of only in the database.
+    // ERROR and WARN only: mirroring INFO would bury the lines that matter.
+    const severity = typeof level === "string" ? level.toUpperCase() : "";
+    if (severity === "ERROR" || severity === "WARN") {
+      let detail = "";
+      try {
+        detail = JSON.stringify(payload);
+        if (typeof detail === "string" && detail.length > 900) detail = `${detail.slice(0, 900)}...`;
+      } catch {
+        detail = "[payload not serialisable]";
+      }
+      const line = `EVENT ${severity} ${kind} ${detail}`;
+      if (severity === "ERROR") console.error(line); else console.log(line);
+    }
     await pool.query(
       "INSERT INTO events (level, kind, payload) VALUES ($1, $2, $3::jsonb)",
       [level, kind, JSON.stringify(payload)]
