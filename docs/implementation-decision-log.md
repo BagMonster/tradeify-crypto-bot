@@ -143,3 +143,12 @@ Full decision: `docs/decisions/D-053-matched-book-rematch.md`.
 **Status:** APPROVED 2026-08-23; sizing superseded by D-049, then by D-060.
 
 Full original decision: `docs/decisions/D-040-sol-outer-heavy-v1.md`.
+## D-067 — Tiered ring capacity, profit-first entry gates, and MA final exits
+
+**Status:** APPROVED for live deployment on `main`.
+
+Each coin now has a hard $200,000 gross cap for its one active directional side. SOL levels 1–5 are single-fill and 6–10 are two-fill; the other books use levels 1–6 single-fill and 7–12 two-fill. The existing outer-heavy curve remains, recalculated across the permitted slots.
+
+Nearer entries wait for broker-confirmed normal profit tranches from controlling deeper lots. Inner rings check every deeper same-side level; outer rings begin at two levels deeper. Manual/adopted positions remain exit-only, while normal same-side ring entries remain eligible under their ordinary rules; manual inventory blocks only opposite-side entries. The MA is a final exit boundary except when the absolute harvest gate has exits paused.
+
+Full decision: `docs/decisions/D-067-tiered-ring-capacity-and-ma-exits.md`.

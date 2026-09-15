@@ -28,25 +28,25 @@ test("INJ/USD profile resolves to INJUSDT", () => {
   assert.equal(resolved.binanceSymbol, "INJUSDT");
 });
 
-test("INJ fitted geometry is ±20% to ±75% at the D-064 $100,000 cap", () => {
+test("INJ fitted geometry is ±20% to ±75% at the D-067 $200,000 active-side cap", () => {
   const entry = raw.instruments.find((item) => item.instrument === "INJ/USD");
   const definition = buildGridDefinition(entry, 5.06);
-  assert.equal(Number(definition.baseUsd.toFixed(2)), 194.18);
+  assert.equal(Number(definition.baseUsd.toFixed(2)), 404.69);
   assert.equal(definition.levels, 12);
   assert.equal(definition.innermostDistance, 0.20);
   assert.equal(definition.outermostDistance, 0.75);
-  assert.equal(definition.grossExposureCeilingUsd, 100000);
+  assert.equal(definition.grossExposureCeilingUsd, 200000);
   assert.ok(definition.innermostRingUsd > 0.01 * 5.06);
 });
 
-test("D-060 current live SOL compatibility geometry derives the $6,600 cap", () => {
+test("tiered SOL sizing derives the active-side cap across one and two-lot rings", () => {
   const cfg = structuredClone(raw.instruments[0]);
   cfg.geometry.bandPct = 0.045;
   cfg.geometry.deadZoneBands = 2;
   cfg.sizing.capUsd = 6600;
   const state = createRingGrid(cfg).createInitialState();
   assert.deepEqual(state.rings.slice(0, 4).map((ring) => ring.tag), ["BUY1", "SELL1", "BUY2", "SELL2"]);
-  assert.equal(state.rings.find((ring) => ring.tag === "BUY1").usd, 29.118483412322274);
+  assert.equal(state.rings.find((ring) => ring.tag === "BUY1").usd, 30.917308642427127);
 });
 
 test("D-060 broker nets remain separate and unreadable books are unknown", () => {

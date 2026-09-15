@@ -35,9 +35,9 @@ function integer(name, value, minimum = 1) {
   return value;
 }
 
-function unitGross(levels, growth) {
+function unitGross(levels, growth, capacityForLevel = () => 1) {
   let total = 0;
-  for (let level = 1; level <= levels; level += 1) total += 2 * (growth ** (level - 1));
+  for (let level = 1; level <= levels; level += 1) total += capacityForLevel(level) * (growth ** (level - 1));
   return total;
 }
 
@@ -60,7 +60,19 @@ function validateInstrument(input, index, seenPrefixes) {
   const deadZoneBands = integer(`${instrument}.geometry.deadZoneBands`, geometry.deadZoneBands, 0);
   const activeLevelsPerSide = integer(`${instrument}.geometry.activeLevelsPerSide`, geometry.activeLevelsPerSide, 1);
   const growth = positive(`${instrument}.geometry.growth`, geometry.growth);
-  const positionsPerRing = integer(`${instrument}.geometry.positionsPerRing`, geometry.positionsPerRing, 1);
+  const legacyPositionsPerRing = geometry.positionsPerRing == null
+    ? null
+    : integer(`${instrument}.geometry.positionsPerRing`, geometry.positionsPerRing, 1);
+  const innerLevels = geometry.innerLevels == null
+    ? 0
+    : integer(`${instrument}.geometry.innerLevels`, geometry.innerLevels, 0);
+  if (innerLevels >= activeLevelsPerSide) throw new Error(`${instrument}.geometry.innerLevels must be below activeLevelsPerSide`);
+  const innerPositionsPerRing = geometry.innerPositionsPerRing == null
+    ? (legacyPositionsPerRing ?? 1)
+    : integer(`${instrument}.geometry.innerPositionsPerRing`, geometry.innerPositionsPerRing, 1);
+  const outerPositionsPerRing = geometry.outerPositionsPerRing == null
+    ? (legacyPositionsPerRing ?? innerPositionsPerRing)
+    : integer(`${instrument}.geometry.outerPositionsPerRing`, geometry.outerPositionsPerRing, 1);
   const rearmBands = positive(`${instrument}.geometry.rearmBands`, geometry.rearmBands);
   const capUsd = positive(`${instrument}.sizing.capUsd`, sizing.capUsd);
   const lotStep = positive(`${instrument}.sizing.lotStep`, sizing.lotStep);
@@ -71,7 +83,8 @@ function validateInstrument(input, index, seenPrefixes) {
   const denominator = integer(`${instrument}.tranches.denominator`, tranches.denominator, 1);
   if (tranches.weights.reduce((sum, weight) => sum + weight, 0) !== denominator) throw new Error(`${instrument}.tranches.denominator must equal the weight sum`);
 
-  const derivedBaseUsd = capUsd / unitGross(activeLevelsPerSide, growth);
+  const capacityForLevel = (level) => level <= innerLevels ? innerPositionsPerRing : outerPositionsPerRing;
+  const derivedBaseUsd = capUsd / unitGross(activeLevelsPerSide, growth, capacityForLevel);
   if (value.enabled && profile.lotStep == null) throw new Error(`${instrument} is enabled but instrumentProfile has no verified minimum lot`);
   if (value.enabled && Math.abs(profile.lotStep - lotStep) > 1e-12) throw new Error(`${instrument} lotStep does not match instrumentProfile`);
 
@@ -81,7 +94,7 @@ function validateInstrument(input, index, seenPrefixes) {
     orderPrefix,
     enabled: value.enabled,
     profile,
-    geometry: Object.freeze({ maDays, bandPct, deadZoneBands, activeLevelsPerSide, growth, positionsPerRing, rearmBands }),
+    geometry: Object.freeze({ maDays, bandPct, deadZoneBands, activeLevelsPerSide, growth, innerLevels, innerPositionsPerRing, outerPositionsPerRing, rearmBands }),
     sizing: Object.freeze({ capUsd, lotStep, roundTripCostFloorPct, baseUsd: derivedBaseUsd }),
     tranches: Object.freeze({ weights: Object.freeze([...tranches.weights]), denominator })
   });
@@ -133,8 +146,13 @@ export async function loadInstrumentConfig(path = "config/instruments.json") {
   return loadInstrumentConfigObject(JSON.parse(await readFile(path, "utf8")));
 }
 
-export function derivedBaseUsd({ capUsd, activeLevelsPerSide, growth }) {
-  return positive("capUsd", capUsd) / unitGross(integer("activeLevelsPerSide", activeLevelsPerSide), positive("growth", growth));
+export function derivedBaseUsd({ capUsd, activeLevelsPerSide, growth, innerLevels = 0, innerPositionsPerRing = 1, outerPositionsPerRing = innerPositionsPerRing }) {
+  const levels = integer("activeLevelsPerSide", activeLevelsPerSide);
+  const inner = integer("innerLevels", innerLevels, 0);
+  if (inner >= levels) throw new Error("innerLevels must be below activeLevelsPerSide");
+  const innerCapacity = integer("innerPositionsPerRing", innerPositionsPerRing);
+  const outerCapacity = integer("outerPositionsPerRing", outerPositionsPerRing);
+  return positive("capUsd", capUsd) / unitGross(levels, positive("growth", growth), (level) => level <= inner ? innerCapacity : outerCapacity);
 }
 
 export function assertInnermostRingSupportsMinimumLot(instrument, currentPriceUsd) {

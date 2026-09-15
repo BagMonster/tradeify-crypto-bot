@@ -39,7 +39,7 @@ export function createRingGridInstance({
   if (!Number.isInteger(minimumHoldSeconds) || minimumHoldSeconds < 25) throw new TypeError("minimumHoldSeconds is invalid");
   if (typeof addEvent !== "function") throw new TypeError("addEvent must be a function");
   if (notifications !== null && typeof notifications?.enqueue !== "function") throw new TypeError("notifications.enqueue must be a function");
-  const { instrument, marketSymbol, lotStep, perRing, grossExposureCeilingUsd, orderPrefix } = grid.definition;
+  const { instrument, marketSymbol, lotStep, grossExposureCeilingUsd, orderPrefix } = grid.definition;
   const prefix = eventPrefix(orderPrefix, instrument);
   let previousPrice = null;
   let entryBrake = false;
@@ -95,18 +95,24 @@ export function createRingGridInstance({
     let state = await load();
     const rearmed = grid.observeRearm(state, { price: trade.price, ma });
     if (rearmed.version !== state.version) state = await store.save(state.version, rearmed);
+    let exitFilledThisUpdate = false;
     while (!exitsPaused()) {
-      const action = grid.nextExitAction(state, { price: trade.price, ma });
+      const action = grid.nextMovingAverageExitAction?.(state, { price: trade.price, ma }) ?? grid.nextExitAction(state, { price: trade.price, ma });
       if (!action) break;
       if (action.type === "SKIP_EXIT") { state = await store.save(state.version, grid.applySkippedExit(state, action)); continue; }
-      const lot = state.rings.flatMap((ring) => ring.lots).find((candidate) => candidate.id === action.lotId);
-      if (!lot || Date.parse(trade.tradeTime) - Date.parse(lot.openedAt) < minimumHoldSeconds * 1000) break;
+      const lot = action.adopted === true
+        ? state.adopted.find((candidate) => candidate.id === action.lotId)
+        : state.rings.flatMap((ring) => ring.lots).find((candidate) => candidate.id === action.lotId);
+      if (!lot || (action.forcedAtMovingAverage !== true && Date.parse(trade.tradeTime) - Date.parse(lot.openedAt) < minimumHoldSeconds * 1000)) break;
       if (execution.isEnabled?.() !== true) break;
       const lotBeforeExit = Object.freeze({ ...lot });
       const result = await execution.executeIntent(action);
       if (result.status !== "FILLED") return Object.freeze({ status: "EXIT_PENDING", state, action, result });
       state = await store.save(state.version, grid.applyConfirmedExit(state, action, result));
-      const lotAfterExit = state.rings.flatMap((ring) => ring.lots).find((candidate) => candidate.id === action.lotId);
+      exitFilledThisUpdate = true;
+      const lotAfterExit = action.adopted === true
+        ? state.adopted.find((candidate) => candidate.id === action.lotId)
+        : state.rings.flatMap((ring) => ring.lots).find((candidate) => candidate.id === action.lotId);
       enqueueNotification({
         kind: "TRANCHE_EXIT_CONFIRMED",
         eventKey: `${prefix}-TRANCHE:${result.orderCode}`,
@@ -138,10 +144,12 @@ export function createRingGridInstance({
         });
       }
     }
-    if (!entryBrake) {
+    // A confirmed exit consumes this update. A later fresh crossing is required
+    // before the bot may add inventory again.
+    if (!entryBrake && !exitFilledThisUpdate) {
       for (const candidate of grid.entryCandidates(state, { previousPrice, price: trade.price, ma })) {
         const ring = state.rings.find((item) => item.tag === candidate.ringTag);
-        if (!ring || !ring.armed || ring.lots.length >= perRing) continue;
+        if (!ring || !ring.armed || ring.lots.length >= ring.capacity) continue;
         const proposed = candidate.quantity * trade.price;
         if (grid.grossVirtualExposureUsd(state, trade.price) + proposed > grossExposureCeilingUsd + 1e-8) continue;
         if (execution.isEnabled?.() !== true) continue;
