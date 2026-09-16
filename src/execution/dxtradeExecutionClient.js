@@ -416,11 +416,16 @@ export class DxtradeExecutionClient {
         return await this.#attemptJson({ method, path, query, authenticated, body });
       } catch (error) {
         lastError = error;
-        const timedOut = error instanceof DxtradeExecutionError &&
-          typeof error.message === "string" && error.message.includes("timed out");
-        if (!idempotent || !timedOut || attempt === attempts) throw error;
+        // A timeout and a dropped connection are both transient and both leave
+        // the server state untouched, so either is safe to retry on a GET.
+        // NETWORK_ERROR surfaces as "DXtrade request failed" rather than a
+        // timeout, and was previously not retried at all.
+        const transient = error instanceof DxtradeExecutionError &&
+          typeof error.message === "string" &&
+          (error.message.includes("timed out") || error.message.includes("request failed"));
+        if (!idempotent || !transient || attempt === attempts) throw error;
         const backoffMs = attempt * 1000;
-        console.warn(`DXtrade GET ${path} timed out (attempt ${attempt}/${attempts}); retrying in ${backoffMs}ms`);
+        console.warn(`DXtrade GET ${path} failed transiently (${error.message}; attempt ${attempt}/${attempts}); retrying in ${backoffMs}ms`);
         await new Promise((resolve) => {
           const timer = setTimeout(resolve, backoffMs);
           timer.unref?.();
