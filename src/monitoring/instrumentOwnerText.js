@@ -20,12 +20,42 @@ function units(value) {
   return value.toFixed(2);
 }
 
-function ringLabel(ring, perRing) {
+function ringLabel(ring, capacity) {
   const count = Array.isArray(ring?.lots) ? ring.lots.length : 0;
-  const cap = Number.isFinite(perRing) ? perRing : 2;
+  const cap = Number.isInteger(capacity) && capacity > 0 ? capacity : 1;
   if (count >= cap) return `FULL ${cap}/${cap}`;
-  if (ring?.armed) return count > 0 ? `ARMED ${count}/${cap}` : "ARMED";
-  return count > 0 ? `DISARMED ${count}/${cap}` : "DISARMED";
+  if (ring?.armed) return `ARMED ${count}/${cap}`;
+  return count > 0 ? `REARM REQUIRED ${count}/${cap}` : `DISARMED ${count}/${cap}`;
+}
+
+function capacityForRing(definition, ring, stateRing) {
+  const capacity = stateRing?.capacity
+    ?? definition.capacityForLevel?.(ring.level)
+    ?? definition.perRing
+    ?? 1;
+  return Number.isInteger(capacity) && capacity > 0 ? capacity : 1;
+}
+
+function openLots(gridState) {
+  const ringLots = (gridState?.rings ?? []).flatMap((ring) => ring.lots ?? []);
+  return [...ringLots, ...(gridState?.adopted ?? [])];
+}
+
+function priceRelation(livePrice, ma) {
+  if (!(Number.isFinite(livePrice) && livePrice > 0 && Number.isFinite(ma) && ma > 0)) return "MA relation unavailable";
+  if (Math.abs(livePrice - ma) < 1e-12) return "AT MA";
+  return livePrice > ma ? "ABOVE MA" : "BELOW MA";
+}
+
+function tierCapacityText(definition) {
+  const innerLevels = Number(definition.innerLevels ?? 0);
+  const levels = Number(definition.activeLevelsPerSide ?? 0);
+  const innerCapacity = Number(definition.innerPositionsPerRing ?? definition.perRing ?? 1);
+  const outerCapacity = Number(definition.outerPositionsPerRing ?? definition.perRing ?? innerCapacity);
+  if (innerLevels > 0 && innerLevels < levels && innerCapacity !== outerCapacity) {
+    return `Tier capacity: levels 1–${innerLevels} = ${innerCapacity} lot${innerCapacity === 1 ? "" : "s"} | levels ${innerLevels + 1}–${levels} = ${outerCapacity} lots`;
+  }
+  return `Tier capacity: levels 1–${levels} = ${innerCapacity} lot${innerCapacity === 1 ? "" : "s"}`;
 }
 
 export function brokerBookLines(accountMonitor, instrument) {
@@ -179,29 +209,52 @@ export function formatInstrumentLevels({
   price: livePrice,
   ma
 }) {
-  const perRing = definition.perRing ?? 2;
+  const live = Number(livePrice);
+  const mark = Number(ma);
   const stateByTag = new Map((gridState?.rings ?? []).map((ring) => [ring.tag, ring]));
+  const lots = openLots(gridState);
+  const sides = [...new Set(lots.map((lot) => lot.side).filter((side) => side === "BUY" || side === "SELL"))];
+  const activeSide = sides.length === 0 ? "NONE" : sides.length === 1 ? sides[0] : "MIXED — REVIEW";
+  const gross = Number.isFinite(live) && live > 0
+    ? lots.reduce((total, lot) => total + (Number(lot.remainingUnits) * live), 0)
+    : null;
+  const cap = Number(definition.grossExposureCeilingUsd ?? definition.capUsd);
+  const remaining = Number.isFinite(gross) && Number.isFinite(cap) ? Math.max(0, cap - gross) : null;
+  const oppositeSide = sides.length === 1 ? (activeSide === "BUY" ? "SELL" : "BUY") : null;
+  const unitName = definition.orderPrefix || definition.instrument.split("/")[0];
   const lines = [
     `${definition.instrument} GRID LEVELS`,
-    `${definition.instrument} ${price(livePrice)} | MA ${price(ma)}`,
+    `${definition.instrument} ${price(live)} | MA ${price(mark)} | ${priceRelation(live, mark)}`,
     `Strategy: ${definition.strategyId}`,
+    `Active side: ${activeSide} | Open lots: ${lots.length}`,
+    `Open gross @ price: ${money(gross)} | Capacity remaining: ${money(remaining)} / ${money(cap)}`,
+    tierCapacityText(definition),
+    "Rows: trigger price · cash/lot · units at trigger · state",
     "",
     "BUY RINGS"
   ];
   const buys = definition.rings.filter((ring) => ring.side === "BUY");
   const shorts = definition.rings.filter((ring) => ring.side === "SELL");
   for (const ring of buys) {
-    const trigger = ma * (1 + ring.distance);
-    const est = livePrice > 0 ? ring.usd / livePrice : 0;
-    lines.push(`${ring.tag} ${price(trigger)} · ${money(ring.usd)} · ~${est.toFixed(2)} · ${ringLabel(stateByTag.get(ring.tag), perRing)}`);
+    const trigger = mark * (1 + ring.distance);
+    const est = trigger > 0 ? ring.usd / trigger : null;
+    const stateRing = stateByTag.get(ring.tag);
+    const label = oppositeSide === ring.side
+      ? `BLOCKED — ${activeSide} inventory open`
+      : ringLabel(stateRing, capacityForRing(definition, ring, stateRing));
+    lines.push(`${ring.tag} ${price(trigger)} · ${money(ring.usd)} · ~${units(est)} ${unitName} · ${label}`);
   }
   lines.push("", "SHORT RINGS");
   for (const ring of shorts) {
-    const trigger = ma * (1 + ring.distance);
-    const est = livePrice > 0 ? ring.usd / livePrice : 0;
-    lines.push(`${ring.tag} ${price(trigger)} · ${money(ring.usd)} · ~${est.toFixed(2)} · ${ringLabel(stateByTag.get(ring.tag), perRing)}`);
+    const trigger = mark * (1 + ring.distance);
+    const est = trigger > 0 ? ring.usd / trigger : null;
+    const stateRing = stateByTag.get(ring.tag);
+    const label = oppositeSide === ring.side
+      ? `BLOCKED — ${activeSide} inventory open`
+      : ringLabel(stateRing, capacityForRing(definition, ring, stateRing));
+    lines.push(`${ring.tag} ${price(trigger)} · ${money(ring.usd)} · ~${units(est)} ${unitName} · ${label}`);
   }
-  lines.push("", `Trigger prices use Binance ${definition.marketSymbol}. Actual DXtrade ${definition.instrument} fills may differ.`);
+  lines.push("", `Trigger prices use Binance ${definition.marketSymbol}; units are estimated at each trigger price. Actual DXtrade ${definition.instrument} fills may differ.`);
   return lines.join("\n");
 }
 

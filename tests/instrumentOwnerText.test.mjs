@@ -108,3 +108,29 @@ test("health and levels name the instrument they describe", () => {
   assert.match(levels, /BUY12 /);
   assert.doesNotMatch(levels, /BUY13 /);
 });
+
+test("levels show the exact tier capacity, trigger-price units, and active-side block", () => {
+  const { definition, state } = book("SOL/USD");
+  const next = structuredClone(state);
+  const sell3 = next.rings.find((ring) => ring.tag === "SELL3");
+  const sell6 = next.rings.find((ring) => ring.tag === "SELL6");
+  sell3.lots.push({ side: "SELL", remainingUnits: 10 });
+  sell3.armed = false;
+  sell6.lots.push({ side: "SELL", remainingUnits: 10 });
+  sell6.armed = false;
+
+  const text = formatInstrumentLevels({
+    definition,
+    gridState: next,
+    price: 99.32,
+    ma: 83.3628
+  });
+
+  assert.match(text, /SOL\/USD \$99\.32 \| MA \$83\.3628 \| ABOVE MA/);
+  assert.match(text, /Active side: SELL \| Open lots: 2/);
+  assert.match(text, /Open gross @ price: \$1,986\.40 \| Capacity remaining: \$198,013\.60 \/ \$200,000\.00/);
+  assert.match(text, /Tier capacity: levels 1–5 = 1 lot \| levels 6–10 = 2 lots/);
+  assert.match(text, /SELL3 \$100\.0354 · \$2,108\.00 · ~21\.07 SOL · FULL 1\/1/);
+  assert.match(text, /SELL6 \$112\.5398 · \$7,114\.49 · ~63\.22 SOL · REARM REQUIRED 1\/2/);
+  assert.match(text, /BUY1 \$75\.026[45] · \$936\.89 · ~12\.49 SOL · BLOCKED — SELL inventory open/);
+});
