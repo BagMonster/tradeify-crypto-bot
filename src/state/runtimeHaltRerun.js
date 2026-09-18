@@ -1,9 +1,19 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 
 export const RUNTIME_HALT_REASON_TAIL = "production runtime error; owner review required";
+export const RUNTIME_HALT_REASON_MARKER = "production runtime error";
 
 export function isRuntimeErrorHalt(reason) {
-  return typeof reason === "string" && reason.trim().toLowerCase().endsWith(RUNTIME_HALT_REASON_TAIL);
+  if (typeof reason !== "string") return false;
+  const text = reason.trim().toLowerCase();
+  // index.mjs writes "<INST> production runtime error: <detail>", which ends with
+  // the error detail rather than the canonical tail. The tail-only test therefore
+  // never matched a runtime halt the runtime itself had written, and /rerun could
+  // not clear it — leaving the account paused with no command able to release it.
+  // Match the marker anywhere as well. No other halt reason in this codebase
+  // contains the phrase "production runtime error": reconciliation, 15-minute,
+  // D-049 and D-064 halts all still return false.
+  return text.endsWith(RUNTIME_HALT_REASON_TAIL) || text.includes(RUNTIME_HALT_REASON_MARKER);
 }
 
 export function hasRuntimeErrorHalt(state) {
