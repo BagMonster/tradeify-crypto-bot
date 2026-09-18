@@ -56,8 +56,22 @@ export function createSolanaQuantityAdapter({
         await persistence.markStatus(request.orderCode, result.status, { lastError: `DXtrade SOL order ended ${result.status}` });
         return Object.freeze({ confirmed: false, status: result.status, orderCode: request.orderCode });
       }
+      // "Not found in DXtrade history" is not the same as "working at the broker".
+      // An order the broker has never heard of after the full confirmation window
+      // was never accepted, so it is resolved to a terminal FAILED rather than
+      // left PENDING forever. A row that stays non-terminal blocks its order code
+      // permanently, because the throw below prevents the state version from
+      // advancing and the frozen version keeps regenerating the same code.
+      const brokerHasNoRecord = typeof result.reason === "string" &&
+        result.reason.toLowerCase().includes("not found in dxtrade history");
       await persistence.markStatus(request.orderCode, "PENDING");
       if (Date.now() >= deadline) {
+        if (brokerHasNoRecord) {
+          await persistence.markStatus(request.orderCode, "FAILED", {
+            lastError: "DXtrade never accepted this order code; resolved to FAILED so it cannot block the code forever"
+          });
+          return Object.freeze({ confirmed: false, status: "FAILED", orderCode: request.orderCode, brokerHasNoRecord: true });
+        }
         return Object.freeze({ confirmed: false, status: "PENDING", orderCode: request.orderCode });
       }
       await sleep(pollIntervalMs);
@@ -89,7 +103,42 @@ export function createSolanaQuantityAdapter({
       side: request.side,
       requestedQuantity: request.quantity
     });
-    if (!sameRequest(row, request)) throw new Error("Persistent SOL order does not match current request");
+    // The order code does not encode quantity: makeOrderCode() keys on
+    // (prefix, stateVersion, tag, tranche) only. Entry size is
+    // floorLot(ring.usd / price) and therefore moves whenever price moves, and a
+    // forced moving-average exit reuses an ordinary tranche exit's tag and
+    // tranche with a different size. So a retry can legitimately arrive with a
+    // quantity the stored row does not carry.
+    //
+    // Throwing on that left the row non-terminal for good: the throw stopped the
+    // state version from advancing, the frozen version regenerated the same
+    // colliding code on the next tick, and the book halted every tick thereafter.
+    //
+    // Resolve the stored order instead of rejecting the caller. A terminal row is
+    // a settled fact and is reported as-is. A live row is reconciled against the
+    // broker using the size that was actually submitted, never the new one. A new
+    // order is never placed under a code whose row is still live, so this cannot
+    // double-fill.
+    if (!sameRequest(row, request)) {
+      if (row.status === "FILLED") {
+        // The broker filled a different size under this code. Do not hand it back
+        // as this intent's fill; the caller would apply the wrong quantity to the
+        // virtual book. Report it and let the hybrid reconciliation pass absorb
+        // the difference from broker truth.
+        return Object.freeze({
+          confirmed: false,
+          status: "STALE_CODE_ALREADY_FILLED",
+          orderCode: row.orderCode,
+          storedQuantity: row.requestedQuantity,
+          requestedQuantity: request.quantity,
+          reason: "This order code already filled under a different quantity"
+        });
+      }
+      if (FINAL_NONFILL.has(row.status)) {
+        return Object.freeze({ confirmed: false, status: row.status, orderCode: row.orderCode, staleCode: true });
+      }
+      return reconcile(Object.freeze({ ...request, quantity: row.requestedQuantity }));
+    }
 
     if (row.status === "FILLED") {
       return Object.freeze({
