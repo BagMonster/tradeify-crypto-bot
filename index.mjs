@@ -474,7 +474,11 @@ async function drainLatestTrades(stack) {
           key: `RUNTIME_ERROR:${stack.cfg.orderPrefix}`,
           reasonCode: "RUNTIME_ERROR",
           instrument: stack.cfg.instrument,
-          reason: `${stack.cfg.instrument} production runtime error: ${detail.slice(0, 180)}`,
+          // The reason must END with the canonical tail or /rerun cannot clear the
+          // halt: isRuntimeErrorHalt() tests endsWith("production runtime error;
+          // owner review required"). Putting the detail first keeps it visible in
+          // /status while leaving the tail in the position the predicate needs.
+          reason: `${stack.cfg.instrument} [${detail.slice(0, 120)}] production runtime error; owner review required`,
           correction: "Inspect /status and Railway logs. If the error clears, the pending warning cycle clears automatically; otherwise send /pausehalt to defer the durable halt."
         });
         await database.addEvent("ERROR", "RUNTIME_ERROR", {
