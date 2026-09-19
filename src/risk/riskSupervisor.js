@@ -8,6 +8,7 @@
 import { harvestReason, setTrancheExitsPausedAll } from "./sessionHarvest.js";
 
 const DEFAULT_HARVEST_FRESH_DATA_GRACE_MS = 5 * 60 * 1000;
+const DEFAULT_CUT_COOLDOWN_MS = 5 * 60 * 1000;
 
 const REQUIRED_CONFIG = Object.freeze([
   "entryBrakeUsd",
@@ -27,6 +28,21 @@ function fixed2(value) {
   return Number(Number(value).toFixed(2));
 }
 
+// Every book carrying an unrealised loss is cut, at the same fraction.
+//
+// There is deliberately no exemption for a book that is net positive on the
+// day. An earlier revision gated on day P&L so a book that had banked realised
+// profit could not be cut, and that produced an unbounded failure: if the
+// exempt book's own unrealised loss exceeded the tier threshold on its own, the
+// tier stayed breached forever while the only cuttable book was ground to dust
+// paying for a loss it had not caused. Simulated at -$600 exempt against -$50
+// cuttable, the innocent book lost 72% of its position in one hour and the tier
+// never released. One rule for every book avoids that entirely.
+//
+// The flat fraction is already proportional in dollars: closing 10% of a book
+// realises 10% of that book's unrealised loss, so a book that is -$400 down
+// gives up four times the dollars of one that is -$100 down. `share` is
+// reported for the logs and for /status, not used to size the cut.
 export function allocateProportionalCut(instrumentLosses, partialCutFraction) {
   const losses = instrumentLosses.map((entry) => Object.freeze({
     instrument: entry.instrument,
@@ -40,7 +56,8 @@ export function allocateProportionalCut(instrumentLosses, partialCutFraction) {
     .map((entry) => Object.freeze({
       instrument: entry.instrument,
       share: Number((entry.loss / lossSum).toFixed(6)),
-      fraction: Number(partialCutFraction.toFixed(6))
+      fraction: Number(partialCutFraction.toFixed(6)),
+      unrealisedLossUsd: Number(entry.loss.toFixed(2))
     })));
 }
 
@@ -112,6 +129,10 @@ export function createRiskSupervisor({
     ? positiveNumber("sessionHarvestUsd", config.sessionHarvestUsd)
     : Number(config.sessionHarvestUsd);
   const sessionHarvestThreshold = sessionHarvestEnabled ? sessionHarvestUsd : 0;
+  const configuredCutCooldownMs = Number(config.cutCooldownMs);
+  const cutCooldownMs = Number.isFinite(configuredCutCooldownMs) && configuredCutCooldownMs >= 0
+    ? configuredCutCooldownMs
+    : DEFAULT_CUT_COOLDOWN_MS;
   const configuredFreshDataGrace = Number(config.sessionHarvestFreshDataGraceMs);
   const sessionHarvestFreshDataGraceMs = sessionHarvestEnabled && Number.isFinite(configuredFreshDataGrace)
     ? positiveNumber("sessionHarvestFreshDataGraceMs", configuredFreshDataGrace)
@@ -124,6 +145,29 @@ export function createRiskSupervisor({
   let flattenedToday = false;
   let harvestState = null;
   let cutsToday = 0;
+  // Deepest cut tier that has fired this account day (dollars; 0 = none), and
+  // when the last cut fired.
+  //
+  // A cut tier used to re-fire on EVERY evaluation while combined day P&L stayed
+  // below its threshold. Cutting a losing position cannot lift that figure — it
+  // converts unrealised loss into realised loss at the same value — so the
+  // trigger condition was the one thing cutting could never clear. Tier 1
+  // compounded 10% per tick until the account was flat and the loss permanent.
+  // On 2026-09-18 that turned a -$733 unrealised drawdown into -$841 realised
+  // across 106 cuts in about two minutes, with no chance for price to recover.
+  //
+  // The cooldown restores the cadence the strategy was actually validated at.
+  // portfolio-harvest-sim.mjs steps the same cut logic over 5-minute bars
+  // (380,720 steps / 1,323 account days = 288 per day), so the backtest could
+  // never cut more than twelve times an hour. The live runtime evaluates on every
+  // Binance trade tick instead, which is roughly 250x faster — the logic matched
+  // the test, the clock did not. The default below is 5 minutes so live matches
+  // the tested cadence exactly.
+  //
+  // A DEEPER tier bypasses the cooldown: the account is falling faster than the
+  // ladder planned for and the larger cut should not be delayed.
+  let deepestCutTierFiredUsd = 0;
+  let lastCutAtMs = null;
   const brakedToday = new Set();
   let evaluating = false;
   let hasSuccessfulRead = false;
@@ -161,6 +205,8 @@ export function createRiskSupervisor({
     // This preserves an already-confirmed/pending harvest across a Railway restart.
     harvestState = null;
     cutsToday = 0;
+    deepestCutTierFiredUsd = 0;
+    lastCutAtMs = null;
     brakedToday.clear();
     unreadSinceMs = null;
     for (const book of instruments) applyEntryBrake(book, false);
@@ -403,16 +449,55 @@ export function createRiskSupervisor({
 
       if (harvestBlocksNormalActions()) return runHarvest({ incomingDayKey, combined, readings });
 
-      const activeTier = cutTiers.find((tier) => combined <= -tier.thresholdUsd) ?? null;
+      // The cut tiers read UNREALISED loss across all books, not combined day
+      // P&L. The brake, the full flatten and the daily loss limit above keep
+      // reading combined, because those rails exist to protect the Tradeify
+      // daily limit, which counts realised money.
+      //
+      // The cut ladder is a different job: it reduces live exposure. Reading
+      // combined made it read losses that were already closed, so a day that
+      // had realised -$841 stayed pinned at the 20% tier with no open risk
+      // left, and every fresh position that dipped was cut for a loss it had
+      // nothing to do with. Worse, cutting could never clear the condition:
+      // closing a position moves loss from unrealised to realised at the same
+      // value, so combined did not improve and the tier never released. That
+      // is the unbounded loop that took 95% of four books on 2026-09-18.
+      //
+      // Against unrealised the same cut is self-limiting. Closing 20% of a
+      // book removes 20% of its unrealised loss, so -$620 becomes -$496, the
+      // -$500 tier releases, and the ladder stops on its own. The cooldown
+      // below is now a backstop rather than the only brake.
+      const totalUnrealisedUsd = fixed2(readings.reduce((sum, r) => sum + r.unrealisedUsd, 0));
+
+      // cutTiers is sorted deepest-first. A tier fires when it is breached AND
+      // either it is deeper than anything fired so far (an escalation, which
+      // bypasses the cooldown) or the cooldown since the last cut has elapsed.
+      const cooldownRemainingMs = lastCutAtMs === null
+        ? 0
+        : Math.max(0, cutCooldownMs - (now() - lastCutAtMs));
+      const activeTier = cutTiers.find((tier) => {
+        if (totalUnrealisedUsd > -tier.thresholdUsd) return false;
+        if (tier.thresholdUsd > deepestCutTierFiredUsd) return true;
+        return cooldownRemainingMs === 0;
+      }) ?? null;
       if (activeTier) {
         const allocations = allocateProportionalCut(
           readings.map((r) => ({ instrument: r.instrument, unrealisedUsd: r.unrealisedUsd })),
           activeTier.fraction
         );
         if (allocations.length === 0) {
-          await addEvent("WARN", "RISK_SUPERVISOR_CUT_NO_LOSING_BOOK", { combinedDayPnlUsd: combined });
+          // The tier is breached but no book is carrying an unrealised loss.
+          // Nothing is cut and the cooldown is NOT consumed, because no cut
+          // happened.
+          await addEvent("WARN", "RISK_SUPERVISOR_CUT_NO_LOSING_BOOK", {
+            combinedDayPnlUsd: combined,
+            totalUnrealisedUsd,
+            threshold: -activeTier.thresholdUsd
+          });
         } else {
           cutsToday += 1;
+          deepestCutTierFiredUsd = Math.max(deepestCutTierFiredUsd, activeTier.thresholdUsd);
+          lastCutAtMs = now();
           const results = [];
           for (const allocation of allocations) {
             const reading = readings.find((r) => r.instrument === allocation.instrument);
@@ -422,7 +507,7 @@ export function createRiskSupervisor({
                 fraction: allocation.fraction,
                 result: await reading.book.executeProtectiveCut({
                   fraction: allocation.fraction,
-                  reason: `D-063 tier cut ${(activeTier.fraction * 100).toFixed(0)}% at ${combined.toFixed(2)} (threshold -${activeTier.thresholdUsd}, share ${(allocation.share * 100).toFixed(1)}%)`,
+                  reason: `D-063 tier cut ${(activeTier.fraction * 100).toFixed(0)}% at unrealised ${totalUnrealisedUsd.toFixed(2)} (threshold -${activeTier.thresholdUsd}, combined ${combined.toFixed(2)}, this book ${allocation.unrealisedLossUsd.toFixed(2)} = ${(allocation.share * 100).toFixed(1)}% of the loss)`,
                   dayKey: incomingDayKey,
                   bypassSlippageCap: true
                 })
@@ -432,13 +517,22 @@ export function createRiskSupervisor({
             }
           }
           await addEvent("WARN", "RISK_SUPERVISOR_PARTIAL_CUT", {
+            totalUnrealisedUsd,
             combinedDayPnlUsd: combined,
             threshold: -activeTier.thresholdUsd,
             tierFraction: activeTier.fraction,
             cutNumber: cutsToday,
+            cutCooldownMs,
+            nextCutEligibleAt: new Date(now() + cutCooldownMs).toISOString(),
             allocations: results.map((r) => ({ instrument: r.instrument, fraction: r.fraction, status: r.result?.status ?? "UNKNOWN" }))
           });
-          return Object.freeze({ action: "CUT", combinedDayPnlUsd: combined, tier: activeTier, results: Object.freeze(results) });
+          return Object.freeze({
+            action: "CUT",
+            totalUnrealisedUsd,
+            combinedDayPnlUsd: combined,
+            tier: activeTier,
+            results: Object.freeze(results)
+          });
         }
       }
 
@@ -552,6 +646,14 @@ export function createRiskSupervisor({
       harvestedToday: harvestState?.status === "CONFIRMED",
       trancheExitsPaused: ["PENDING", "CONFIRMED", "HALTED"].includes(harvestState?.status),
       cutsToday,
+      cutCooldownMs,
+      deepestCutTierFiredUsd,
+      // The figure the cut tiers actually read. Shown next to combined so
+      // /status makes it obvious which number is driving the ladder.
+      totalUnrealisedUsd: fixed2(readings.reduce((sum, r) => sum + r.unrealisedUsd, 0)),
+      cutCooldownRemainingMs: lastCutAtMs === null
+        ? 0
+        : Math.max(0, cutCooldownMs - (now() - lastCutAtMs)),
       lastError,
       perInstrument: Object.freeze(readings.map((r) => Object.freeze({
         instrument: r.instrument,
@@ -559,6 +661,8 @@ export function createRiskSupervisor({
         unrealisedUsd: fixed2(r.unrealisedUsd),
         exposureUsd: fixed2(r.exposureUsd),
         braked: brakedToday.has(r.instrument),
+        // Whether this book would be cut if a tier fired right now.
+        cuttable: r.unrealisedUsd < 0,
         readFailed: r.readFailed
       })))
     });
