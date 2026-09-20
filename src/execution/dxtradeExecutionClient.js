@@ -1,3 +1,5 @@
+import { dxtradeLoginGate } from "./dxtradeLoginGate.js";
+
 const REQUIRED_HOSTNAME = "dx.tradeifycrypto.co";
 const REQUIRED_PATH = "/dxsca-web";
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -279,16 +281,23 @@ export class DxtradeExecutionClient {
 
   async login() {
     if (this.#sessionToken) return this.getSessionInfo();
-    const response = await this.#requestJson({
-      method: "POST",
-      path: "/login",
-      authenticated: false,
-      body: { username: this.#username, domain: this.#domain, password: this.#password }
+    // Through the shared gate - see src/execution/dxtradeLoginGate.js. All six
+    // sessions in this process share one credential set and expire together.
+    await dxtradeLoginGate.login("account-monitor", async () => {
+      // Re-check inside the gate: while queued, this client's own re-auth may
+      // already have established a session.
+      if (this.#sessionToken) return;
+      const response = await this.#requestJson({
+        method: "POST",
+        path: "/login",
+        authenticated: false,
+        body: { username: this.#username, domain: this.#domain, password: this.#password }
+      });
+      if (typeof response?.sessionToken !== "string" || response.sessionToken.length < 8) {
+        throw new DxtradeExecutionError("DXtrade login response did not contain a valid session token");
+      }
+      this.#sessionToken = response.sessionToken;
     });
-    if (typeof response?.sessionToken !== "string" || response.sessionToken.length < 8) {
-      throw new DxtradeExecutionError("DXtrade login response did not contain a valid session token");
-    }
-    this.#sessionToken = response.sessionToken;
     return this.getSessionInfo();
   }
 
