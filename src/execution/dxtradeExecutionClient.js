@@ -231,6 +231,14 @@ export class DxtradeExecutionClient {
   #fetch;
   #timeoutMs;
   #sessionToken = null;
+  // Single-flight re-authentication. Five books tick concurrently, so a dead
+  // session produces a burst of simultaneous 401s. Without this every one of
+  // them would call /login at once and hammer an endpoint that may rate-limit
+  // or lock the account. They all await the same in-flight login instead.
+  #reauthPromise = null;
+  #reauthCount = 0;
+  #lastReauthAt = null;
+  #lastReauthError = null;
 
   constructor({
     restBaseUrl,
@@ -257,7 +265,12 @@ export class DxtradeExecutionClient {
   }
 
   getSessionInfo() {
-    return Object.freeze({ authenticated: Boolean(this.#sessionToken) });
+    return Object.freeze({
+      authenticated: Boolean(this.#sessionToken),
+      reauthCount: this.#reauthCount,
+      lastReauthAt: this.#lastReauthAt,
+      lastReauthError: this.#lastReauthError
+    });
   }
 
   getInstrument() {
@@ -285,6 +298,49 @@ export class DxtradeExecutionClient {
       await this.#requestJson({ method: "POST", path: "/logout" });
     } finally {
       this.#sessionToken = null;
+    }
+  }
+
+  /**
+   * Drop whatever session we hold and establish a new one.
+   *
+   * login() returns early when a token is already present, so anything that
+   * wants a genuinely fresh session has to clear the token first. That early
+   * return is why a scheduled "log in once a day" does nothing on its own.
+   *
+   * Used by the daily rotation, by /relogin, and by the 401 recovery below.
+   */
+  async forceRelogin() {
+    try {
+      await this.logout();
+    } catch {
+      // The session is very likely already dead - that is usually why we are
+      // here. logout() nulls the token in its finally block regardless, so a
+      // failure here is not worth propagating.
+    }
+    this.#sessionToken = null;
+    await this.login();
+    this.#lastReauthAt = new Date().toISOString();
+    this.#lastReauthError = null;
+    return this.getSessionInfo();
+  }
+
+  async #reauthenticate() {
+    if (this.#reauthPromise) return this.#reauthPromise;
+    this.#reauthPromise = (async () => {
+      this.#sessionToken = null;
+      await this.login();
+      this.#reauthCount += 1;
+      this.#lastReauthAt = new Date().toISOString();
+      this.#lastReauthError = null;
+    })();
+    try {
+      return await this.#reauthPromise;
+    } catch (error) {
+      this.#lastReauthError = error?.message ?? "re-authentication failed";
+      throw error;
+    } finally {
+      this.#reauthPromise = null;
     }
   }
 
@@ -403,7 +459,54 @@ export class DxtradeExecutionClient {
     if (!this.#sessionToken) throw new DxtradeExecutionError("DXtrade execution session is not authenticated");
   }
 
-  async #requestJson({ method, path, query = null, authenticated = true, body = undefined }) {
+  /**
+   * A 401 means DXtrade rejected the session, not the request. Sessions expire
+   * on their own schedule; this is the most ordinary failure a long-running
+   * broker client sees, and until now it was fatal: #attemptJson nulled the
+   * token, threw, and nothing ever logged back in. On 2026-09-19 that turned a
+   * routine session expiry into 17 consecutive protective cuts that executed
+   * nothing, and cost the account.
+   *
+   * Re-authenticate once and replay the call - but ONLY for GET.
+   *
+   * A POST may have been accepted before the response came back. A 401 is an
+   * authentication rejection and should happen before any order is matched, so
+   * resending would probably be safe - but "probably" is not good enough when
+   * the failure mode is a doubled position on a funded account. So a POST gets
+   * its session repaired for the next caller and then rethrows; the order-code
+   * idempotency machinery resolves whether it filled by polling history, which
+   * is the same path a timed-out POST already takes.
+   *
+   * The position read that failed all day on 2026-09-19 is a GET, so the case
+   * that actually broke is fully covered.
+   */
+  async #requestJson(options) {
+    const { method, path, authenticated = true } = options;
+    try {
+      return await this.#requestJsonOnce(options);
+    } catch (error) {
+      const unauthorized = error instanceof DxtradeExecutionError && error.status === 401;
+      // /login is unauthenticated and /logout is how we tear a session down;
+      // neither may trigger recovery, or a dead session would recurse.
+      if (!unauthorized || authenticated !== true || path === "/logout") throw error;
+
+      console.warn(`DXtrade ${method} ${path} returned 401; re-authenticating and retrying.`);
+      try {
+        await this.#reauthenticate();
+      } catch (reauthError) {
+        // Surface the re-auth failure: it is the more actionable of the two,
+        // and it means the credentials themselves may no longer be valid.
+        throw new DxtradeExecutionError(
+          `DXtrade session expired and re-authentication failed: ${reauthError?.message ?? "unknown error"}`,
+          { status: 401, cause: reauthError }
+        );
+      }
+      if (method !== "GET") throw error;
+      return this.#requestJsonOnce(options);
+    }
+  }
+
+  async #requestJsonOnce({ method, path, query = null, authenticated = true, body = undefined }) {
     // A GET changes nothing, so a timeout can be retried safely. Placement and
     // close are POSTs and are never retried here: a timed-out POST may already
     // have filled, and re-sending it would double the position. Those paths
