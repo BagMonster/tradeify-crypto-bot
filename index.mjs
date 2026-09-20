@@ -554,6 +554,86 @@ const liveCanary = createSolanaLiveCanary({
   minimumHoldSeconds: account.minimumHoldSeconds
 });
 
+// Every DXtrade session in the process, in one place.
+//
+// dxtradeClient is the ACCOUNT MONITOR session - the one /status reads.
+// stack.quantityClient is the EXECUTION session - the one that places orders,
+// and the one the ring execution guard reads positions through.
+//
+// On 2026-09-19 the execution sessions were rejected with 401 and the monitor
+// session was not, so /status reported "risk reads: 5/5 OK" for eighty minutes
+// while every protective cut failed silently. Anything claiming to report
+// health has to exercise the execution clients specifically.
+function allDxtradeSessions() {
+  return [
+    { name: "account-monitor", client: dxtradeClient },
+    ...stacks.map((s) => ({ name: `${s.cfg.instrument} execution`, client: s.quantityClient }))
+  ];
+}
+
+async function reloginAllSessions() {
+  const results = [];
+  for (const { name, client } of allDxtradeSessions()) {
+    if (typeof client?.forceRelogin !== "function") {
+      results.push({ name, ok: false, error: "client does not support forceRelogin" });
+      continue;
+    }
+    try {
+      await client.forceRelogin();
+      results.push({ name, ok: true });
+    } catch (error) {
+      results.push({ name, ok: false, error: error?.message ?? "re-login failed" });
+    }
+  }
+  await database.addEvent(
+    results.every((r) => r.ok) ? "WARN" : "ERROR",
+    "DXTRADE_SESSION_ROTATION",
+    { results }
+  );
+  return results;
+}
+
+// Probe the client that actually places orders. A successful read here is the
+// only evidence that the protective ladder can execute at all.
+async function probeExecutionClient() {
+  const stack = stacks[0];
+  if (!stack?.quantityClient) return { ok: false, error: "no execution client is configured" };
+  try {
+    const payload = await stack.quantityClient.getOpenPositions();
+    const positions = Array.isArray(payload?.positions) ? payload.positions.length : null;
+    const info = stack.quantityClient.getSessionInfo?.() ?? {};
+    return { ok: true, positionCount: positions, reauthCount: info.reauthCount ?? 0 };
+  } catch (error) {
+    return { ok: false, error: error?.message ?? "position read failed" };
+  }
+}
+
+async function flattenEveryBook() {
+  const results = [];
+  for (const stack of stacks) {
+    try {
+      const result = await stack.runtime.executeProtectiveFlatten({
+        reason: "owner /flatall",
+        dayKey: accountDayKey(Date.now()),
+        bypassSlippageCap: true
+      });
+      results.push({
+        instrument: stack.cfg.instrument,
+        status: result?.status ?? "UNKNOWN",
+        reason: result?.reason ?? null
+      });
+    } catch (error) {
+      results.push({
+        instrument: stack.cfg.instrument,
+        status: "THREW",
+        reason: error?.message ?? "flatten threw"
+      });
+    }
+  }
+  await database.addEvent("WARN", "OWNER_FLATTEN_ALL", { results });
+  return results;
+}
+
 const service = createMultiInstrumentOwnerService({
   // Surfaces the raw /metrics figures in /status. equity - balance is the account's
   // open P&L; if that gap is non-zero while combined day P&L reads $0.00, the ladder
@@ -581,6 +661,9 @@ const service = createMultiInstrumentOwnerService({
   onRuntimeHaltCleared: () => {
     for (const stack of stacks) stack.runtimeErrorLatched = false;
   },
+  reloginAll: reloginAllSessions,
+  flattenAll: flattenEveryBook,
+  executionHealth: probeExecutionClient,
   buildOwnerService: (cfg) => {
     const stack = stackByInstrument.get(cfg.instrument);
     return createSolanaOwnerService({
@@ -630,6 +713,51 @@ console.log(`D-064 startup account-day evaluation: ${startupRisk.action}.`);
 const startupRecovery = await service.recoverVerifiedD064AtStartup();
 console.log(`D-064 verified startup recovery: ${startupRecovery.action}.`);
 for (const stack of stacks) stack.feed.start();
+
+// Daily DXtrade session rotation.
+//
+// This is a canary, not the fix - reactive re-auth inside the clients is the
+// fix. What the rotation buys is that the credentials get proven at a known
+// hour rather than during an incident, and the re-auth path gets exercised on
+// a schedule so it cannot rot silently between failures.
+//
+// 22:15 UTC, deliberately offset from the 22:00 rollover so a session swap is
+// never stacked on top of the day-key change, harvest reset and baseline
+// re-derivation that all fire at once on the hour.
+const SESSION_ROTATION_UTC_HOUR = 22;
+const SESSION_ROTATION_UTC_MINUTE = 15;
+let lastRotationDayKey = null;
+
+const sessionRotationTimer = setInterval(async () => {
+  const nowDate = new Date();
+  const pastRotationTime = nowDate.getUTCHours() > SESSION_ROTATION_UTC_HOUR ||
+    (nowDate.getUTCHours() === SESSION_ROTATION_UTC_HOUR &&
+     nowDate.getUTCMinutes() >= SESSION_ROTATION_UTC_MINUTE);
+  if (!pastRotationTime) return;
+  const rotationDayKey = accountDayKey(Date.now());
+  if (lastRotationDayKey === rotationDayKey) return;
+  lastRotationDayKey = rotationDayKey;
+  try {
+    const results = await reloginAllSessions();
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length > 0) {
+      // A failed rotation has just manufactured the exact state that closed
+      // the funded account, so it is an alert, never a log line.
+      console.error(`Daily DXtrade session rotation failed for: ${failed.map((f) => f.name).join(", ")}`);
+      liveNotifications.enqueue?.({
+        kind: "SESSION_ROTATION_FAILED",
+        eventKey: `SESSION-ROT-FAIL:${rotationDayKey}`,
+        failed: failed.map((f) => ({ name: f.name, error: f.error }))
+      });
+    } else {
+      console.log(`Daily DXtrade session rotation complete for ${results.length} sessions.`);
+    }
+  } catch (error) {
+    console.error(`Daily DXtrade session rotation threw: ${error?.message ?? "unknown error"}`);
+  }
+}, 60_000);
+sessionRotationTimer.unref?.();
+console.log(`Daily DXtrade session rotation armed for ${SESSION_ROTATION_UTC_HOUR}:${String(SESSION_ROTATION_UTC_MINUTE).padStart(2, "0")} UTC.`);
 
 const HEARTBEAT_CHECK_MS = 60 * 60 * 1000;
 const heartbeatTimer = setInterval(() => {
@@ -783,6 +911,7 @@ async function shutdown(signal) {
   telegramBot.stopDevCompanionDelivery?.();
   for (const stack of stacks) stack.feed.stop();
   accountMonitor.stop();
+  clearInterval(sessionRotationTimer);
   try {
     await telegramBot.stopPolling();
   } finally {
