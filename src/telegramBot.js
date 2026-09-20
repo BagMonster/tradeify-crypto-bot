@@ -263,6 +263,17 @@ export async function startTelegramBot({
     await sendLatched(message.chat.id, "/kill", await service.kill());
   }));
 
+  bot.onText(/^\/relogin(?:@\w+)?$/i, withAuthorization(async (message) => {
+    await bot.sendMessage(message.chat.id, "Rotating every DXtrade session. No order will be placed.");
+    await sendLatched(message.chat.id, "/relogin", await service.reloginText());
+  }));
+
+  // Requires the literal argument CONFIRM. This is the most destructive
+  // command in the bot and a mistyped message must not be able to fire it.
+  bot.onText(/^\/flatall(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/flatall", await service.flatAllText(match?.[1]));
+  }));
+
   bot.onText(/^\/resume(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
     const result = await service.requestResume(match?.[1]);
     await sendLatched(message.chat.id, "/resume", result.message);
@@ -355,6 +366,10 @@ export async function startTelegramBot({
     targets: (chatId, _query, symbol) => runLatched(chatId, "/targets", () => service.targetsText(instrumentArg(symbol))),
     flat: (chatId, _query, symbol) => runLatched(chatId, "/flat", () => service.flatInstructions(instrumentArg(symbol))),
     kill: (chatId) => runLatched(chatId, "/kill", () => service.kill()),
+    relogin: (chatId) => runLatched(chatId, "/relogin", () => service.reloginText()),
+    // No argument from a menu button, so this returns the confirmation prompt
+    // rather than flattening. Firing it needs a typed "/flatall CONFIRM".
+    flatall: (chatId) => runLatched(chatId, "/flatall", () => service.flatAllText(null)),
     resume: async (chatId, _query, symbol) => {
       const result = await service.requestResume(instrumentArg(symbol));
       await sendLatched(chatId, "/resume", result.message);
