@@ -174,8 +174,26 @@ export function createRiskSupervisor({
   let lastError = null;
   let unreadSinceMs = null;
 
+  // A protective cut that does not fill leaves the account unprotected. On
+  // 2026-09-19 seventeen consecutive cuts returned ACCOUNT_DATA_UNAVAILABLE
+  // over eighty minutes, the supervisor logged each one and rescheduled, and
+  // nobody was told until the account had already breached. The ladder was
+  // working perfectly and firing into a dead broker session.
+  //
+  // So: the moment a cut fails to fill, stop opening new positions and say so.
+  // Entries are the one thing still fully under our control when execution is
+  // broken, and the three entries opened at 16:05-16:13 that day took exposure
+  // from $23k to $41k on a $49k account. Those are what made the loss fatal.
+  //
+  // The ladder keeps retrying on its normal cooldown, per the owner's choice:
+  // if the session recovers the bot resumes on its own without intervention.
+  let protectionFailing = false;
+  let consecutiveFailedCuts = 0;
+  let protectionFailingSinceMs = null;
+  let lastProtectionFailureReason = null;
+
   function stickyBrake(instrument) {
-    return flattenedToday === true || brakedToday.has(instrument);
+    return flattenedToday === true || brakedToday.has(instrument) || protectionFailing === true;
   }
 
   function applyEntryBrake(book, on) {
@@ -183,6 +201,83 @@ export function createRiskSupervisor({
       book.setEntryBrake(on === true);
     } catch {
       // a book that cannot accept the flag stays in the last known state
+    }
+  }
+
+  /**
+   * Record whether a protective cut actually closed anything, and react.
+   *
+   * Failure: brake entries on every book immediately and alert. We do not halt
+   * or force a flatten - a flatten needs the same broker read that just failed,
+   * so it would fail too, and halting would need manual release for what is
+   * usually a transient session problem. Blocking entries is the action that is
+   * always available and always correct: if the ladder cannot take risk off,
+   * the bot must at minimum stop putting more on.
+   *
+   * Recovery: clear the brake for any book not braked for another reason, and
+   * say so, so a silent recovery is as visible as the failure was.
+   */
+  async function recordProtectionOutcome({ filled, statuses, totalUnrealisedUsd, combined, readings }) {
+    const failureStatuses = statuses.filter((s) => s.status !== "FILLED");
+
+    if (filled === true) {
+      consecutiveFailedCuts = 0;
+      if (protectionFailing === true) {
+        const outageMs = protectionFailingSinceMs === null ? null : now() - protectionFailingSinceMs;
+        protectionFailing = false;
+        protectionFailingSinceMs = null;
+        lastProtectionFailureReason = null;
+        for (const reading of readings) applyEntryBrake(reading.book, stickyBrake(reading.instrument));
+        await addEvent("WARN", "RISK_SUPERVISOR_PROTECTION_RECOVERED", {
+          outageMs,
+          totalUnrealisedUsd,
+          combinedDayPnlUsd: combined
+        });
+        notifications?.enqueue?.({
+          kind: "PROTECTION_RECOVERED",
+          eventKey: `PROT-OK:${now()}`,
+          outageMs,
+          totalUnrealisedUsd,
+          combinedDayPnlUsd: combined
+        });
+      }
+      return;
+    }
+
+    consecutiveFailedCuts += 1;
+    const firstFailure = protectionFailing !== true;
+    if (firstFailure) {
+      protectionFailing = true;
+      protectionFailingSinceMs = now();
+    }
+    lastProtectionFailureReason = failureStatuses[0]?.status ?? "UNKNOWN";
+
+    // Brake every book, including ones that were fine a moment ago. The
+    // execution path is shared, so a failure on one is a failure on all.
+    for (const reading of readings) applyEntryBrake(reading.book, true);
+
+    await addEvent("ERROR", "RISK_SUPERVISOR_PROTECTION_FAILED", {
+      consecutiveFailedCuts,
+      failureStatus: lastProtectionFailureReason,
+      failingSinceMs: protectionFailingSinceMs,
+      totalUnrealisedUsd,
+      combinedDayPnlUsd: combined,
+      entriesBlocked: true,
+      allocations: statuses
+    });
+
+    // Tell the owner on the first failure, then keep nagging every third so a
+    // long outage does not go quiet, without a message every five minutes.
+    if (firstFailure || consecutiveFailedCuts % 3 === 0) {
+      notifications?.enqueue?.({
+        kind: "PROTECTION_FAILED",
+        eventKey: `PROT-FAIL:${protectionFailingSinceMs}:${consecutiveFailedCuts}`,
+        consecutiveFailedCuts,
+        failureStatus: lastProtectionFailureReason,
+        outageMs: protectionFailingSinceMs === null ? 0 : now() - protectionFailingSinceMs,
+        totalUnrealisedUsd,
+        combinedDayPnlUsd: combined
+      });
     }
   }
 
@@ -209,7 +304,11 @@ export function createRiskSupervisor({
     lastCutAtMs = null;
     brakedToday.clear();
     unreadSinceMs = null;
-    for (const book of instruments) applyEntryBrake(book, false);
+    // protectionFailing deliberately survives the rollover. A broken broker
+    // session does not heal at 22:00 UTC, and clearing the brake here would
+    // silently re-arm entries into an execution path that still cannot cut.
+    // It clears only when a cut actually fills again.
+    for (const book of instruments) applyEntryBrake(book, protectionFailing === true);
     applyTrancheExitPause(false);
   }
 
@@ -516,6 +615,20 @@ export function createRiskSupervisor({
               results.push({ instrument: allocation.instrument, fraction: allocation.fraction, result: { status: "THREW", reason: error?.message ?? "cut threw" } });
             }
           }
+          const statuses = results.map((r) => ({
+            instrument: r.instrument,
+            fraction: r.fraction,
+            status: r.result?.status ?? "UNKNOWN"
+          }));
+          // A cut only counts as protection if something actually closed.
+          const anyFilled = statuses.some((s) => s.status === "FILLED");
+          await recordProtectionOutcome({
+            filled: anyFilled,
+            statuses,
+            totalUnrealisedUsd,
+            combined,
+            readings
+          });
           await addEvent("WARN", "RISK_SUPERVISOR_PARTIAL_CUT", {
             totalUnrealisedUsd,
             combinedDayPnlUsd: combined,
@@ -524,13 +637,17 @@ export function createRiskSupervisor({
             cutNumber: cutsToday,
             cutCooldownMs,
             nextCutEligibleAt: new Date(now() + cutCooldownMs).toISOString(),
-            allocations: results.map((r) => ({ instrument: r.instrument, fraction: r.fraction, status: r.result?.status ?? "UNKNOWN" }))
+            executed: anyFilled,
+            consecutiveFailedCuts,
+            allocations: statuses
           });
           return Object.freeze({
-            action: "CUT",
+            action: anyFilled ? "CUT" : "CUT_FAILED",
             totalUnrealisedUsd,
             combinedDayPnlUsd: combined,
             tier: activeTier,
+            executed: anyFilled,
+            consecutiveFailedCuts,
             results: Object.freeze(results)
           });
         }
@@ -648,6 +765,12 @@ export function createRiskSupervisor({
       cutsToday,
       cutCooldownMs,
       deepestCutTierFiredUsd,
+      // Whether the ladder can actually execute. This is the line that would
+      // have made 2026-09-19 obvious from a single /status.
+      protectionFailing,
+      consecutiveFailedCuts,
+      protectionFailingSinceMs,
+      lastProtectionFailureReason,
       // The figure the cut tiers actually read. Shown next to combined so
       // /status makes it obvious which number is driving the ladder.
       totalUnrealisedUsd: fixed2(readings.reduce((sum, r) => sum + r.unrealisedUsd, 0)),
