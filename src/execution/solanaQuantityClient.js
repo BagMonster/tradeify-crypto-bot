@@ -107,6 +107,13 @@ export class SolanaQuantityClient {
   #fetch;
   #timeoutMs;
   #sessionToken = null;
+  // Single-flight re-authentication. Each instrument owns its own client, and
+  // a book can have several requests in flight at once, so a dead session
+  // produces a burst of simultaneous 401s. They all await the same login.
+  #reauthPromise = null;
+  #reauthCount = 0;
+  #lastReauthAt = null;
+  #lastReauthError = null;
 
   constructor({ restBaseUrl, username, domain, password, accountCode, instrument = "SOL/USD", fetchImpl = globalThis.fetch, timeoutMs = 10_000 }) {
     this.#base = baseUrl(restBaseUrl);
@@ -121,7 +128,96 @@ export class SolanaQuantityClient {
     this.#timeoutMs = timeoutMs;
   }
 
-  async #request({ method, path, body = null, query = null, authenticated = true }) {
+  /**
+   * A 401 means DXtrade rejected the session, not the request.
+   *
+   * Before this, a 401 left #sessionToken in place and threw. login() returns
+   * early whenever a token exists, so every subsequent call re-sent the same
+   * dead token and got the same 401. The session could never recover inside a
+   * running process - a restart was the only way out.
+   *
+   * On 2026-09-19 that turned a routine session expiry into eighty minutes in
+   * which seventeen consecutive protective cuts executed nothing, and the
+   * funded account breached its daily limit. This client is the one the ring
+   * execution guard holds, so this is the path that failed.
+   *
+   * Recover once and replay - GET only. A POST may have been accepted before
+   * the response came back; a 401 should be rejected before matching, but
+   * "probably safe" is not good enough when the failure is a doubled position.
+   * A POST gets its session repaired for the next caller and rethrows, and the
+   * order-code history poll resolves whether it filled.
+   *
+   * getOpenPositions() is a GET, and that is the call the cut path makes, so
+   * the case that actually broke recovers automatically.
+   */
+  async #request(options) {
+    const { method, path, authenticated = true } = options;
+    try {
+      return await this.#requestOnce(options);
+    } catch (error) {
+      if (error?.status !== 401 || authenticated !== true || path === "/logout") throw error;
+      console.warn(`DXtrade SOL ${method} ${path} returned 401; re-authenticating and retrying.`);
+      try {
+        await this.#reauthenticate();
+      } catch (reauthError) {
+        const failure = new Error(
+          `DXtrade SOL session expired and re-authentication failed: ${reauthError?.message ?? "unknown error"}`
+        );
+        failure.status = 401;
+        failure.cause = reauthError;
+        throw failure;
+      }
+      if (method !== "GET") throw error;
+      return this.#requestOnce(options);
+    }
+  }
+
+  async #reauthenticate() {
+    if (this.#reauthPromise) return this.#reauthPromise;
+    this.#reauthPromise = (async () => {
+      // login() short-circuits on a live token, so the dead one must go first.
+      this.#sessionToken = null;
+      await this.login();
+      this.#reauthCount += 1;
+      this.#lastReauthAt = new Date().toISOString();
+      this.#lastReauthError = null;
+    })();
+    try {
+      return await this.#reauthPromise;
+    } catch (error) {
+      this.#lastReauthError = error?.message ?? "re-authentication failed";
+      throw error;
+    } finally {
+      this.#reauthPromise = null;
+    }
+  }
+
+  /** Drop the current session and establish a new one. Used by the daily
+   *  rotation and by /relogin. */
+  async forceRelogin() {
+    try {
+      await this.logout();
+    } catch {
+      // Usually already dead; logout() nulls the token in its finally block.
+    }
+    this.#sessionToken = null;
+    await this.login();
+    this.#lastReauthAt = new Date().toISOString();
+    this.#lastReauthError = null;
+    return this.getSessionInfo();
+  }
+
+  getSessionInfo() {
+    return Object.freeze({
+      instrument: this.#instrument,
+      authenticated: Boolean(this.#sessionToken),
+      reauthCount: this.#reauthCount,
+      lastReauthAt: this.#lastReauthAt,
+      lastReauthError: this.#lastReauthError
+    });
+  }
+
+  async #requestOnce({ method, path, body = null, query = null, authenticated = true }) {
     if (authenticated && !this.#sessionToken) throw new Error("DXtrade SOL session is not authenticated");
     const url = new URL(`${this.#base.pathname}${path}`, this.#base.origin);
     for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, String(value));
@@ -144,7 +240,13 @@ export class SolanaQuantityClient {
       if (raw) {
         try { payload = JSON.parse(raw); } catch { throw new Error(`DXtrade SOL response was malformed JSON (HTTP ${response.status})`); }
       }
-      if (!response.ok) throw new Error(safeApiError(payload, response.status));
+      if (!response.ok) {
+        // The status has to travel with the error so #request can tell a 401
+        // (recoverable: re-login and replay) from a 400 (do not retry).
+        const failure = new Error(safeApiError(payload, response.status));
+        failure.status = response.status;
+        throw failure;
+      }
       return payload;
     } finally {
       clearTimeout(timer);

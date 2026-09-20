@@ -44,7 +44,13 @@ export function createMultiInstrumentOwnerService({
   sharedPause = null,
   database = null,
   haltWarnings = null,
-  onRuntimeHaltCleared = async () => {}
+  onRuntimeHaltCleared = async () => {},
+  // Supplied by index.mjs, which owns the DXtrade clients and the runtimes.
+  // Routing these through callbacks keeps the per-book owner services out of
+  // it entirely - none of them need to know about sessions or flattening.
+  reloginAll = null,
+  flattenAll = null,
+  executionHealth = null
 }) {
   if (!Array.isArray(instrumentConfigs) || instrumentConfigs.length === 0) {
     throw new TypeError("instrumentConfigs must be a non-empty array");
@@ -193,8 +199,14 @@ export function createMultiInstrumentOwnerService({
       return `${accountSummaryLines().join("\n")}\n\n${per}`;
     },
     async healthText(arg) {
+      // The execution probe goes FIRST and on its own line. On 2026-09-19
+      // /status and /health both reported 5/5 OK while every protective cut
+      // was failing, because they read the account monitor's session and the
+      // orders go out on a different one. A health check that does not
+      // exercise the client that places orders is not a health check.
+      const probe = await executionProbeLine();
       const per = await fanOut("healthText", arg);
-      return `${accountSummaryLines().join("\n")}\n\n${per}`;
+      return `${accountSummaryLines().join("\n")}\n${probe}\n\n${per}`;
     },
     levelsText: (arg) => fanOut("levelsText", arg),
     ringsText: (arg) => fanOut("ringsText", arg),
@@ -362,6 +374,94 @@ export function createMultiInstrumentOwnerService({
       ].join("\n");
     },
     requestRerun: () => rerun.requestRerun(),
-    confirmRerun: (code) => rerun.confirmRerun(code)
+    confirmRerun: (code) => rerun.confirmRerun(code),
+
+    /**
+     * Force a fresh DXtrade session on every client.
+     *
+     * Recovery for the failure that killed the funded account on 2026-09-19:
+     * the execution session was rejected with 401 for eighty minutes and a
+     * Railway restart was the only way back. This is that restart, without
+     * the restart - which matters, because restarting also re-baselines the
+     * day-open balance and zeroes the cut counter.
+     */
+    async reloginText() {
+      if (typeof reloginAll !== "function") {
+        return "Re-login is not configured on this deployment.";
+      }
+      const started = Date.now();
+      try {
+        const results = await reloginAll();
+        const lines = Array.isArray(results)
+          ? results.map((r) => `  ${r.name}: ${r.ok ? "OK" : `FAILED - ${r.error}`}`)
+          : ["  (no client detail reported)"];
+        const failed = Array.isArray(results) && results.some((r) => !r.ok);
+        return [
+          failed ? "DXTRADE RE-LOGIN PARTIALLY FAILED" : "DXTRADE RE-LOGIN COMPLETE",
+          ...lines,
+          `Took ${Date.now() - started}ms.`,
+          failed
+            ? "At least one session is still dead. Check the credentials before resuming."
+            : "Send /health to confirm the execution client can read positions."
+        ].join("\n");
+      } catch (error) {
+        return `DXTRADE RE-LOGIN FAILED\n${error?.message ?? "unknown error"}`;
+      }
+    },
+
+    /**
+     * Close every open position now.
+     *
+     * Requires the literal argument CONFIRM. This is the most destructive
+     * command in the bot and a mistyped message should not be able to fire
+     * it, but a second /confirmflatall round-trip would be one more pause
+     * path in a system that already has too many.
+     */
+    async flatAllText(arg) {
+      if (typeof flattenAll !== "function") {
+        return "Automatic flatten is not configured on this deployment.";
+      }
+      if (String(arg ?? "").trim().toUpperCase() !== "CONFIRM") {
+        return [
+          "FLATTEN EVERY POSITION",
+          "This closes all open positions on every instrument at market.",
+          "",
+          "Send: /flatall CONFIRM"
+        ].join("\n");
+      }
+      try {
+        const results = await flattenAll();
+        const lines = (Array.isArray(results) ? results : []).map((r) =>
+          `  ${r.instrument}: ${r.status}${r.reason ? ` - ${r.reason}` : ""}`);
+        const bad = (Array.isArray(results) ? results : [])
+          .filter((r) => r.status !== "FILLED" && r.status !== "ALREADY_FLAT");
+        return [
+          bad.length === 0 ? "FLATTEN COMPLETE - every instrument" : "FLATTEN INCOMPLETE",
+          ...lines,
+          bad.length === 0
+            ? "Send /status and confirm exposure reads $0.00."
+            : "Some books did not confirm flat. Inspect DXtrade directly before trusting /status."
+        ].join("\n");
+      } catch (error) {
+        return `FLATTEN FAILED\n${error?.message ?? "unknown error"}`;
+      }
+    }
   });
+
+  async function executionProbeLine() {
+    if (typeof executionHealth !== "function") {
+      return "  execution client: not wired on this deployment (cannot verify order path)";
+    }
+    const started = Date.now();
+    try {
+      const result = await executionHealth();
+      const ms = Date.now() - started;
+      if (result?.ok === true) {
+        return `  execution client: OK (${ms}ms, ${result.positionCount ?? "?"} open positions, reauths today ${result.reauthCount ?? 0})`;
+      }
+      return `  execution client: *** FAILING *** ${result?.error ?? "unknown error"} - protective cuts cannot execute`;
+    } catch (error) {
+      return `  execution client: *** FAILING *** ${error?.message ?? "probe threw"} - protective cuts cannot execute`;
+    }
+  }
 }
