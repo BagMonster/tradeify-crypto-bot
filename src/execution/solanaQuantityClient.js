@@ -1,3 +1,5 @@
+import { dxtradeLoginGate } from "./dxtradeLoginGate.js";
+
 const REQUIRED_HOSTNAME = "dx.tradeifycrypto.co";
 const REQUIRED_PATH = "/dxsca-web";
 
@@ -255,14 +257,22 @@ export class SolanaQuantityClient {
 
   async login() {
     if (this.#sessionToken) return;
-    const payload = await this.#request({
-      method: "POST",
-      path: "/login",
-      authenticated: false,
-      body: { username: this.#username, domain: this.#domain, password: this.#password }
+    // Through the shared gate: every DXtrade client in this process uses the
+    // same credentials, so they all lose the session at the same moment and
+    // would otherwise stampede /login and collect a 429.
+    await dxtradeLoginGate.login(`${this.#instrument} execution`, async () => {
+      // Re-check inside the gate. While queued behind another client, this
+      // client's own re-auth may already have completed.
+      if (this.#sessionToken) return;
+      const payload = await this.#request({
+        method: "POST",
+        path: "/login",
+        authenticated: false,
+        body: { username: this.#username, domain: this.#domain, password: this.#password }
+      });
+      if (typeof payload?.sessionToken !== "string" || payload.sessionToken.length < 8) throw new Error("DXtrade SOL login did not return a session token");
+      this.#sessionToken = payload.sessionToken;
     });
-    if (typeof payload?.sessionToken !== "string" || payload.sessionToken.length < 8) throw new Error("DXtrade SOL login did not return a session token");
-    this.#sessionToken = payload.sessionToken;
   }
 
   async logout() {
