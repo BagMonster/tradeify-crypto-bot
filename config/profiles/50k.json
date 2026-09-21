@@ -1,0 +1,17 @@
+{
+  "note": "The live values of the closed $50,000 account, kept so this change deploys with no behaviour change and as the baseline the tests run against. Do not select it for a new account.",
+  "confirmed": true,
+  "accountSize": 50000,
+  "dailyLossLimitUsd": 1500,
+  "maxLossUsd": 3000,
+  "maxNotionalUsd": 100000,
+  "entryBrakeUsd": 600,
+  "cutTiers": [
+    { "thresholdUsd": 500, "fraction": 0.1 },
+    { "thresholdUsd": 750, "fraction": 0.2 },
+    { "thresholdUsd": 1000, "fraction": 0.5 }
+  ],
+  "fullFlattenUsd": 1250,
+  "harvestUsd": 600,
+  "perCoinCapUsd": 150000
+}

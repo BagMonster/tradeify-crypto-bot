@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { loadConfiguration } from "./src/config.js";
 import { createDatabase } from "./src/database.js";
 import { createDevCompanionStore } from "./src/devCompanionStore.js";
@@ -28,13 +27,18 @@ import { createSolanaOwnerService } from "./src/solanaOwnerService.js";
 import { createMultiInstrumentOwnerService } from "./src/multiInstrumentOwnerService.js";
 import { runReconciliationPass } from "./src/runtime/hybridAbsorber.js";
 import { startTelegramBot } from "./src/telegramBot.js";
+import { describeAccountProfile } from "./src/config/accountProfile.js";
 
 const money = (v) => (Number.isFinite(v) ? `${v < 0 ? "-$" : "$"}${Math.abs(v).toFixed(2)}` : "unavailable");
 
 const configuration = await loadConfiguration();
 const { account, environment } = configuration;
 
-const instrumentsFile = JSON.parse(await readFile(new URL("./config/instruments.json", import.meta.url), "utf8"));
+// Account-size numbers (limits, ladder, harvest, per-coin cap) come from the
+// profile named by the ACCOUNT_PROFILE Railway variable, already applied by
+// loadConfiguration(). This is the profile-applied copy of config/instruments.json.
+const instrumentsFile = configuration.instrumentsRaw;
+console.log(describeAccountProfile(configuration.profile));
 const accountRisk = instrumentsFile.accountRisk;
 const enabledInstruments = instrumentsFile.instruments.filter((entry) => entry.enabled === true);
 

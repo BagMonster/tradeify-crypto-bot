@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { loadProfiledConfigFiles } from "../src/config/accountProfile.js";
 import { createRingGrid } from "../src/strategies/ringGrid.js";
 import { buildGridDefinition } from "../src/strategies/ringGridDefinition.js";
 import { createRingGridInstance } from "../src/runtime/ringGridInstance.js";
 
-const raw = JSON.parse(await readFile(new URL("../config/instruments.json", import.meta.url), "utf8"));
+// Profile-applied: account-size numbers (capUsd, ladder) live in config/profiles.
+// "50k" is the live baseline these assertions were written against.
+const { instruments: raw } = await loadProfiledConfigFiles("50k");
 const OPENED_AT = "2026-09-15T00:00:00.000Z";
 const FILLED_AT = "2026-09-15T00:01:00.000Z";
 

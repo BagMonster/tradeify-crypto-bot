@@ -1,0 +1,18 @@
+{
+  "note": "DRAFT: the $10,000 numbers multiplied by ten. Review every value before scaling, then set confirmed to true. The bot refuses to start on this profile until you do.",
+  "confirmed": false,
+  "accountSize": 100000,
+  "dailyLossLimitUsd": 3000,
+  "maxLossUsd": 6000,
+  "maxNotionalUsd": 200000,
+  "entryBrakeUsd": 1200,
+  "cutTiers": [
+    { "thresholdUsd": 1000, "fraction": 0.1 },
+    { "thresholdUsd": 1500, "fraction": 0.2 },
+    { "thresholdUsd": 2000, "fraction": 0.5 }
+  ],
+  "fullFlattenUsd": 2500,
+  "harvestUsd": 750,
+  "exposurePool": { "softUsd": 22000, "hardUsd": 22500 },
+  "perCoinCapUsd": 250000
+}

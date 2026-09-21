@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { loadProfiledConfigFiles } from "../src/config/accountProfile.js";
 import { buildGridDefinition } from "../src/strategies/ringGridDefinition.js";
 import { createSolanaRuntime } from "../src/runtime/solanaRuntime.js";
 import { formatLiveTelegramNotification } from "../src/notifications/liveTelegramNotifications.js";
 
-const raw = JSON.parse(await readFile(new URL("../config/instruments.json", import.meta.url), "utf8"));
+// Profile-applied: account-size numbers (capUsd, ladder) live in config/profiles.
+// "50k" is the live baseline these assertions were written against.
+const { instruments: raw } = await loadProfiledConfigFiles("50k");
 
 test("D-060 fill path enqueues a per-instrument entry alert after the fill is saved", async () => {
   const definition = buildGridDefinition(raw.instruments[0]);

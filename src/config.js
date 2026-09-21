@@ -1,7 +1,8 @@
 import "dotenv/config";
 import { readFile } from "node:fs/promises";
 import { resolveInstrumentProfile } from "./instrumentProfile.js";
-import { loadInstrumentConfig } from "./config/instruments.js";
+import { loadInstrumentConfigObject } from "./config/instruments.js";
+import { loadAccountProfile, applyAccountProfile } from "./config/accountProfile.js";
 
 function requireText(name, value) {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`${name} is required`);
@@ -27,8 +28,16 @@ async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
-export async function loadAccountConfig(path = "config/account.json") {
-  const account = await readJson(path);
+// config/account.json no longer holds the account-size numbers (starting
+// balance, daily loss limit, max loss, notional cap). They come from the account
+// profile selected by ACCOUNT_PROFILE; see src/config/accountProfile.js.
+export async function loadAccountConfig(path = "config/account.json", profileName = process.env.ACCOUNT_PROFILE) {
+  const profile = await loadAccountProfile(profileName);
+  const { account } = applyAccountProfile({ profile, account: await readJson(path), instruments: { accountRisk: {}, instruments: [] } });
+  return validateAccountConfig(account);
+}
+
+export function validateAccountConfig(account) {
   const provider = requireText("account.provider", account.provider);
   const accountType = requireText("account.accountType", account.accountType);
   if (provider !== "tradeify-crypto") throw new Error("account.provider must equal tradeify-crypto");
@@ -176,11 +185,23 @@ export function loadEnvironment() {
 }
 
 export async function loadConfiguration() {
-  const [account, strategy, instruments] = await Promise.all([loadAccountConfig(), loadStrategyConfig(), loadInstrumentConfig()]);
+  // The account profile is applied to both JSON files BEFORE either is
+  // validated, so validation sees exactly what the bot will run with.
+  const profile = await loadAccountProfile(process.env.ACCOUNT_PROFILE);
+  const [accountFile, instrumentsFile, strategy] = await Promise.all([
+    readJson("config/account.json"),
+    readJson("config/instruments.json"),
+    loadStrategyConfig()
+  ]);
+  const applied = applyAccountProfile({ profile, account: accountFile, instruments: instrumentsFile });
+  const account = validateAccountConfig(applied.account);
+  const instruments = loadInstrumentConfigObject(applied.instruments);
   const environment = loadEnvironment();
   if (environment.autoExecute && strategy.execution.autoExecute !== true) {
     throw new Error("AUTO_EXECUTE=true requires config/strategy.json execution.autoExecute=true");
   }
   const instrument = resolveInstrumentProfile(strategy);
-  return { account, strategy, environment, instrument, instruments };
+  // instrumentsRaw is the profile-applied instruments file. index.mjs reads the
+  // ladder (including cutTiers, which validation does not return) from it.
+  return { account, strategy, environment, instrument, instruments, instrumentsRaw: applied.instruments, profile };
 }

@@ -1,28 +1,18 @@
 {
   "instruments": [
-    { "instrument": "SOL/USD", "marketSymbol": "SOLUSDT", "orderPrefix": "SOL", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.05, "deadZoneBands": 1, "activeLevelsPerSide": 10, "growth": 1.5, "innerLevels": 5, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "capUsd": 150000, "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 }, "migrationNote": "D-067: active-side cap $200,000; levels 1-5 single-fill and 6-10 two-fill. Session harvest +$250 enabled." },
-    { "instrument": "DOGE/USD", "marketSymbol": "DOGEUSDT", "orderPrefix": "DOGE", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.03, "deadZoneBands": 2, "activeLevelsPerSide": 12, "growth": 1.5, "innerLevels": 6, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "capUsd": 150000, "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 } },
-    { "instrument": "INJ/USD", "marketSymbol": "INJUSDT", "orderPrefix": "INJ", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.05, "deadZoneBands": 3, "activeLevelsPerSide": 12, "growth": 1.5, "innerLevels": 6, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "capUsd": 150000, "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 } },
-    { "instrument": "AAVE/USD", "marketSymbol": "AAVEUSDT", "orderPrefix": "AAVE", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.045, "deadZoneBands": 3, "activeLevelsPerSide": 12, "growth": 1.5, "innerLevels": 6, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "capUsd": 150000, "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 } },
-    { "instrument": "AVAX/USD", "marketSymbol": "AVAXUSDT", "orderPrefix": "AVAX", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.04, "deadZoneBands": 3, "activeLevelsPerSide": 12, "growth": 1.5, "innerLevels": 6, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "capUsd": 150000, "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 } }
+    { "instrument": "SOL/USD", "marketSymbol": "SOLUSDT", "orderPrefix": "SOL", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.05, "deadZoneBands": 1, "activeLevelsPerSide": 10, "growth": 1.5, "innerLevels": 5, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 }, "migrationNote": "D-067: levels 1-5 single-fill and 6-10 two-fill. Per-coin cap and session harvest amount come from the account profile (config/profiles)." },
+    { "instrument": "DOGE/USD", "marketSymbol": "DOGEUSDT", "orderPrefix": "DOGE", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.03, "deadZoneBands": 2, "activeLevelsPerSide": 12, "growth": 1.5, "innerLevels": 6, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 } },
+    { "instrument": "INJ/USD", "marketSymbol": "INJUSDT", "orderPrefix": "INJ", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.05, "deadZoneBands": 3, "activeLevelsPerSide": 12, "growth": 1.5, "innerLevels": 6, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 } },
+    { "instrument": "AAVE/USD", "marketSymbol": "AAVEUSDT", "orderPrefix": "AAVE", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.045, "deadZoneBands": 3, "activeLevelsPerSide": 12, "growth": 1.5, "innerLevels": 6, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 } },
+    { "instrument": "AVAX/USD", "marketSymbol": "AVAXUSDT", "orderPrefix": "AVAX", "enabled": true, "geometry": { "maDays": 200, "bandPct": 0.04, "deadZoneBands": 3, "activeLevelsPerSide": 12, "growth": 1.5, "innerLevels": 6, "innerPositionsPerRing": 1, "outerPositionsPerRing": 2, "rearmBands": 0.5 }, "sizing": { "lotStep": 0.01, "roundTripCostFloorPct": 0.0018 }, "tranches": { "weights": [1, 2, 3, 4], "denominator": 10 } }
   ],
   "accountRisk": {
-    "entryBrakeUsd": 600,
     "entryBrakeScope": "instrument",
-    "cutTiers": [
-      { "thresholdUsd": 500, "fraction": 0.10 },
-      { "thresholdUsd": 750, "fraction": 0.20 }
-    ],
     "cutCooldownMs": 300000,
-    "partialCutUsd": 1000,
-    "partialCutFraction": 0.5,
     "partialCutAllocation": "proportional-to-loss",
-    "fullFlattenUsd": 1250,
     "flattenHoldsUntilRollover": true,
-    "dailyLossLimitUsd": 1500,
     "rolloverHourUtc": 22,
     "sessionHarvestEnabled": true,
-    "sessionHarvestUsd": 600,
     "sessionHarvestFreshDataGraceMs": 300000
   }
 }
