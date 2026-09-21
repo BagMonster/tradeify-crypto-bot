@@ -163,6 +163,9 @@ export function createRingExecutionGuard({
   // Owner Telegram alerts (liveTelegramNotifications). Optional so tests and
   // older wiring keep working; without it blocked actions still log as before.
   notifications = null,
+  // Account-wide exposure pool (src/risk/exposureGate.js), shared by every book.
+  // Null when the active profile defines no pool: entries then behave as before.
+  exposureGate = null,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   confirmationTimeoutMs = 12_000,
   pollIntervalMs = 750
@@ -283,6 +286,41 @@ export function createRingExecutionGuard({
       });
     }
 
+    // Account-wide exposure pool. Checked after every other entry precondition and
+    // immediately before the order, so a refusal here is the only reason left.
+    let gateTicket = null;
+    if (exposureGate) {
+      const price = Number(intent.observedPrice ?? intent.ringLevel);
+      const notionalUsd = Number(intent.quantity) * price;
+      const decision = exposureGate.requestEntry({ instrument: INSTRUMENT, notionalUsd, orderCode: code });
+      if (!decision.allowed) {
+        await addEvent("WARN", "RING_ENTRY_BLOCKED_EXPOSURE_GATE", {
+          orderCode: code,
+          ringTag: intent.ringTag,
+          reason: decision.reason,
+          notionalUsd: Number.isFinite(notionalUsd) ? Number(notionalUsd.toFixed(2)) : null,
+          exposureUsd: decision.exposureUsd
+        });
+        return Object.freeze({
+          status: "BLOCKED",
+          orderCode: code,
+          reason: `Account exposure pool: ${decision.reason}`
+        });
+      }
+      gateTicket = decision.ticket;
+    }
+
+    let placedStatus = "THREW";
+    try {
+      const placed = await placeEntryOrder(intent, code);
+      placedStatus = placed.status;
+      return placed;
+    } finally {
+      if (gateTicket !== null) exposureGate.settle(gateTicket, { status: placedStatus });
+    }
+  }
+
+  async function placeEntryOrder(intent, code) {
     const result = await adapter.place({
       orderCode: code,
       strategyId: intent.strategyId,

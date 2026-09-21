@@ -28,6 +28,7 @@ import { createMultiInstrumentOwnerService } from "./src/multiInstrumentOwnerSer
 import { runReconciliationPass } from "./src/runtime/hybridAbsorber.js";
 import { startTelegramBot } from "./src/telegramBot.js";
 import { describeAccountProfile } from "./src/config/accountProfile.js";
+import { createExposureGate, formatExposurePoolLine } from "./src/risk/exposureGate.js";
 
 const money = (v) => (Number.isFinite(v) ? `${v < 0 ? "-$" : "$"}${Math.abs(v).toFixed(2)}` : "unavailable");
 
@@ -129,6 +130,33 @@ const accountMonitor = createDxtradeAccountMonitor({
   }
 });
 
+// Account-wide exposure pool: one gate shared by every book, in front of every new
+// entry. Built only when the active account profile defines exposurePool; with no
+// pool (the 50k profile) entries behave exactly as before. See src/risk/exposureGate.js.
+//
+// Exposure is the same broker-notional figure riskSupervisor and /status report. If
+// broker account data is not healthy this throws, and the gate refuses the entry:
+// unknown exposure is never treated as zero.
+function readAccountExposure() {
+  const status = accountMonitor.getSnapshot();
+  if (status?.healthy !== true || !status.snapshot) throw new Error("Broker account data is unavailable");
+  const exposureUsd = enabledInstruments.reduce((sum, cfg) => sum + bookExposure(status.snapshot, cfg.instrument), 0);
+  return { exposureUsd, observedAtMs: Number(status.snapshot.fetchedAtMs) };
+}
+
+const exposureGate = accountRisk.exposurePool
+  ? createExposureGate({
+    softUsd: accountRisk.exposurePool.softUsd,
+    hardUsd: accountRisk.exposurePool.hardUsd,
+    readExposure: readAccountExposure,
+    notifications: liveNotifications,
+    addEvent: database.addEvent
+  })
+  : null;
+console.log(exposureGate
+  ? `Exposure pool: ARMED. No new entries at or above $${accountRisk.exposurePool.softUsd.toLocaleString()} account exposure; no single fill past $${accountRisk.exposurePool.hardUsd.toLocaleString()}.`
+  : "Exposure pool: NOT SET in the active account profile. New entries are not limited by account exposure.");
+
 let maintenanceBusy = false;
 
 async function buildInstrumentStack(cfg) {
@@ -168,7 +196,9 @@ async function buildInstrumentStack(cfg) {
     protectiveOrdersBypassSlippageCap: accountRisk.protectiveOrdersBypassSlippageCap ?? true,
     addEvent: database.addEvent,
     // Blocked-entry/exit and recovery alerts (2026-09-21).
-    notifications: liveNotifications
+    notifications: liveNotifications,
+    // Account-wide exposure pool, shared by every book (null when not configured).
+    exposureGate
   });
 
   const stack = {
@@ -641,6 +671,8 @@ async function flattenEveryBook() {
 }
 
 const service = createMultiInstrumentOwnerService({
+  // Exposure pool usage and state, directly under "combined exposure" in /status.
+  exposurePoolLine: () => formatExposurePoolLine({ gate: exposureGate, readExposure: readAccountExposure }),
   // Surfaces the raw /metrics figures in /status. equity - balance is the account's
   // open P&L; if that gap is non-zero while combined day P&L reads $0.00, the ladder
   // is not reading the broker and the numbers above it cannot be trusted.

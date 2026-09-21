@@ -23,7 +23,10 @@ const KINDS = new Set([
   // Alerting build, 2026-09-20: blocked broker reads and an inert cut tier.
   "EXECUTION_BLOCKED",
   "EXECUTION_RECOVERED",
-  "CUT_TIER_INERT"
+  "CUT_TIER_INERT",
+  // Account-wide exposure pool (src/risk/exposureGate.js), 2026-09-21.
+  "EXPOSURE_GATE_CLOSED",
+  "EXPOSURE_GATE_REOPENED"
 ]);
 
 const PROTECTIVE_REASONS = new Set([
@@ -610,6 +613,42 @@ function formatEvent(event) {
         "Check /status. One alert per episode; it resets when a cut becomes possible again."
       ].join("\n")
     };
+  }
+
+  // ---- Account-wide exposure pool (exposureGate.js) ----------------------------
+
+  if (kind === "EXPOSURE_GATE_CLOSED") {
+    const exposure = finite("exposureUsd", event.exposureUsd);
+    const soft = positive("softUsd", event.softUsd);
+    const hard = positive("hardUsd", event.hardUsd);
+    const lines = [
+      "\u26D4 EXPOSURE CEILING REACHED \u2014 NEW ENTRIES PAUSED",
+      `Account exposure: ${money(exposure)}`,
+      `Soft ceiling: ${money(soft)} (no new entries at or above)`,
+      `Hard ceiling: ${money(hard)} (no single fill may cross)`
+    ];
+    const notional = optionalFinite(event.notionalUsd);
+    if (typeof event.instrument === "string" && notional !== null) {
+      lines.push(`First refused: ${requiredInstrument(event.instrument)} entry of ${money(notional)}`);
+    }
+    lines.push(
+      "Exits, tranches, cuts, the flatten and harvest are not affected.",
+      `Entries resume on their own once exposure falls below ${money(soft)}. One alert per episode.`
+    );
+    return { kind, eventKey, message: lines.join("\n") };
+  }
+
+  if (kind === "EXPOSURE_GATE_REOPENED") {
+    const exposure = finite("exposureUsd", event.exposureUsd);
+    const soft = positive("softUsd", event.softUsd);
+    const refusals = optionalFinite(event.refusals);
+    const lines = [
+      "\u2705 EXPOSURE BELOW CEILING \u2014 ENTRIES RESUMED",
+      `Account exposure: ${money(exposure)} (soft ceiling ${money(soft)})`,
+      `Entries were paused for: ${duration(event.closedForMs)}`
+    ];
+    if (refusals !== null && refusals >= 0) lines.push(`Entries refused while paused: ${Math.trunc(refusals)}`);
+    return { kind, eventKey, message: lines.join("\n") };
   }
 
   throw new TypeError("notification kind is unsupported");
