@@ -12,7 +12,9 @@ const REQUIRED_ENV = Object.freeze({
   DXTRADE_USERNAME: "test-user",
   DXTRADE_DOMAIN: "test-domain",
   DXTRADE_PASSWORD: "test-password",
-  DXTRADE_ACCOUNT_CODE: "test-account"
+  DXTRADE_ACCOUNT_CODE: "test-account",
+  // Account-size numbers come from config/profiles/<ACCOUNT_PROFILE>.json.
+  ACCOUNT_PROFILE: "50k"
 });
 
 function installEnv(overrides = {}) {
