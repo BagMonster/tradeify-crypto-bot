@@ -1,0 +1,18 @@
+{
+  "note": "The $10,000 proving-ground account. Owner decisions 2026-09-20/21. Not yet validated by backtest.",
+  "confirmed": true,
+  "accountSize": 10000,
+  "dailyLossLimitUsd": 300,
+  "maxLossUsd": 600,
+  "maxNotionalUsd": 20000,
+  "entryBrakeUsd": 120,
+  "cutTiers": [
+    { "thresholdUsd": 100, "fraction": 0.1 },
+    { "thresholdUsd": 150, "fraction": 0.2 },
+    { "thresholdUsd": 200, "fraction": 0.5 }
+  ],
+  "fullFlattenUsd": 250,
+  "harvestUsd": 75,
+  "exposurePool": { "softUsd": 2200, "hardUsd": 2250 },
+  "perCoinCapUsd": 25000
+}
