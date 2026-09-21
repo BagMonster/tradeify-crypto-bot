@@ -3,6 +3,14 @@
  *
  * D-060 account ladder plus D-064 session harvest.
  * Harvest is enabled from config/instruments.json (sessionHarvestEnabled).
+ *
+ * 2026-09-21: the D-060 full flatten executes IMMEDIATELY at the threshold.
+ * It previously sat behind a 25-minute owner halt-warning cycle, during which
+ * neither the flatten nor the cut tiers ran (the flatten branch returns before
+ * the tiers). Tradeify closes the account the moment intraday equity touches
+ * the daily limit, and on the $10,000 account the flatten sits only $50 above
+ * it, so a 25-minute wait is not survivable. Owner decision, 2026-09-21.
+ * The owner is told after the fact by the SAFETY_HALT notification below.
  */
 
 import { harvestReason, setTrancheExitsPausedAll } from "./sessionHarvest.js";
@@ -71,7 +79,8 @@ export function createRiskSupervisor({
   setSafetyHalt = async () => {},
   clearSafetyHaltIfReason = async () => false,
   getSafetyHaltState = async () => null,
-  requestHaltWarning = null,
+  // requestHaltWarning is no longer used: the full flatten does not wait on a
+  // warning cycle. index.mjs may still pass it; an unknown property is ignored.
   now = () => Date.now()
 }) {
   if (!config || typeof config !== "object") throw new TypeError("risk config is required");
@@ -534,15 +543,7 @@ export function createRiskSupervisor({
 
       if (combined <= -fullFlattenUsd) {
         if (flattenedToday) return Object.freeze({ action: "ALREADY_FLATTENED", combinedDayPnlUsd: combined });
-        if (typeof requestHaltWarning === "function") {
-          const warning = await requestHaltWarning({
-            key: `D060_ACCOUNT_FULL_FLATTEN:${incomingDayKey}`,
-            reasonCode: "D060_ACCOUNT_FULL_FLATTEN",
-            reason: `Account-day P&L is ${combined.toFixed(2)}, at or below the -${fullFlattenUsd.toFixed(2)} full-flatten threshold.`,
-            correction: "Inspect /status and DXtrade. Send /pausehalt to defer the account flatten for another 25-minute warning cycle."
-          });
-          return Object.freeze({ action: "HALT_WARNING_PENDING", combinedDayPnlUsd: combined, warning });
-        }
+        // Immediate. No warning cycle, no deferral. See the file header.
         return executeFullFlatten({ incomingDayKey, combined, readings });
       }
 
@@ -720,6 +721,9 @@ export function createRiskSupervisor({
     return evaluate({ dayKey: incomingDayKey });
   }
 
+  // Kept for halt-warning cycles persisted before 2026-09-21, which index.mjs's
+  // onDue handler may still fire after a restart. New code never creates one.
+  // executeFullFlatten() is idempotent within a day (flattenedToday).
   async function executeDeferredFullFlatten({ dayKey: incomingDayKey } = {}) {
     if (typeof incomingDayKey !== "string" || incomingDayKey === "") throw new TypeError("executeDeferredFullFlatten requires a dayKey");
     if (incomingDayKey !== dayKey) rollover(incomingDayKey);
