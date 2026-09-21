@@ -38,6 +38,8 @@ export function formatRiskLadderLine(snapshot) {
 
 export function createMultiInstrumentOwnerService({
   brokerAccountLine = null,
+  // Account-wide exposure pool line for /status (supplied by index.mjs).
+  exposurePoolLine = null,
   instrumentConfigs,
   buildOwnerService = createSolanaOwnerService,
   riskSupervisor = null,
@@ -134,6 +136,14 @@ export function createMultiInstrumentOwnerService({
     return blocks.join("\n\n");
   }
 
+  function safePoolLine() {
+    try {
+      return exposurePoolLine() || "  exposure pool: unavailable";
+    } catch {
+      return "  exposure pool: unavailable";
+    }
+  }
+
   function accountSummaryLines() {
     const snapshot = riskSupervisor?.getSnapshot?.() ?? null;
     if (!snapshot) return ["ACCOUNT RISK: supervisor snapshot unavailable"];
@@ -142,6 +152,7 @@ export function createMultiInstrumentOwnerService({
       `  instruments enabled: ${books.length} (${books.map((b) => b.instrument).join(", ")})`,
       `  combined day P&L: ${money(snapshot.dayPnlUsd)}`,
       `  combined exposure: ${money(snapshot.exposureUsd)}`,
+      ...(typeof exposurePoolLine === "function" ? [safePoolLine()] : []),
       `  daily loss limit: ${money(-Math.abs(snapshot.dailyLossLimitUsd ?? 1500))}   margin: ${money(snapshot.marginToLimitUsd)}`,
       formatRiskLadderLine(snapshot)
     ];
