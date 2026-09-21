@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { loadProfiledConfigFiles } from "../src/config/accountProfile.js";
 import { loadInstrumentConfigObject } from "../src/config/instruments.js";
 import { buildGridDefinition } from "../src/strategies/ringGridDefinition.js";
 import { createRingGrid } from "../src/strategies/ringGrid.js";
@@ -10,7 +10,9 @@ import {
   formatInstrumentLevels
 } from "../src/monitoring/instrumentOwnerText.js";
 
-const raw = JSON.parse(await readFile(new URL("../config/instruments.json", import.meta.url), "utf8"));
+// Profile-applied: account-size numbers (capUsd, ladder) live in config/profiles.
+// "50k" is the live baseline these assertions were written against.
+const { instruments: raw } = await loadProfiledConfigFiles("50k");
 const config = loadInstrumentConfigObject(raw);
 
 function book(symbol) {
