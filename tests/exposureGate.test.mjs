@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createExposureGate } from "../src/risk/exposureGate.js";
+import { createExposureGate, formatExposurePoolLine } from "../src/risk/exposureGate.js";
+import { createMultiInstrumentOwnerService } from "../src/multiInstrumentOwnerService.js";
 import { createRingExecutionGuard } from "../src/execution/ringExecutionGuard.js";
 import { formatLiveTelegramNotification } from "../src/notifications/liveTelegramNotifications.js";
 
@@ -204,4 +205,77 @@ test("without a gate configured the guard behaves exactly as before", async () =
   const placed = [];
   const result = await guardWith({ gate: null, placed }).executeIntent(entry(10, 12));
   assert.equal(result.status, "FILLED");
+});
+
+// ---- The /status line ------------------------------------------------------------
+
+
+test("/status says plainly when no pool is configured", () => {
+  assert.match(formatExposurePoolLine({ gate: null }), /not set in this account profile/);
+});
+
+test("/status shows usage, percent of the soft ceiling and the largest entry that fits", () => {
+  const { gate, state } = harness({ broker: 1540 });
+  const line = formatExposurePoolLine({ gate, readExposure: () => ({ exposureUsd: state.broker }) });
+  assert.match(line, /\$1,540\.00 of soft \$2,200\.00 \/ hard \$2,250\.00 \(70%\) · OPEN · largest entry that fits now: \$710\.00/);
+});
+
+test("/status counts entries still awaiting broker confirmation", () => {
+  const { gate, state } = harness({ broker: 1000 });
+  gate.requestEntry({ instrument: "SOL/USD", notionalUsd: 200 });
+  const line = formatExposurePoolLine({ gate, readExposure: () => ({ exposureUsd: state.broker }) });
+  assert.match(line, /\$1,200\.00 \(incl\. \$200\.00 awaiting broker confirmation\)/);
+});
+
+test("/status reads FULL when price alone pushed exposure over the soft ceiling", () => {
+  // No entry has been refused yet, so the gate has no episode. The line must still say FULL.
+  const { gate } = harness({ broker: 0 });
+  const line = formatExposurePoolLine({ gate, readExposure: () => ({ exposureUsd: 2215 }) });
+  assert.match(line, /\$2,215\.00 of soft .* · FULL, new entries refused$/);
+});
+
+test("/status shows how long entries have been paused and how many were refused", () => {
+  const { gate, state } = harness({ broker: 2300 });
+  gate.requestEntry({ instrument: "SOL/USD", notionalUsd: 50 });
+  gate.requestEntry({ instrument: "INJ/USD", notionalUsd: 50 });
+  state.t += 17 * 60_000;
+  const line = formatExposurePoolLine({ gate, readExposure: () => ({ exposureUsd: state.broker }), now: () => state.t });
+  assert.match(line, /FULL, new entries refused · paused 17m, 2 refused/);
+});
+
+test("/status says UNKNOWN, not zero, when broker data is unavailable", () => {
+  const { gate } = harness();
+  const line = formatExposurePoolLine({ gate, readExposure: () => { throw new Error("stale"); } });
+  assert.match(line, /UNKNOWN \(broker account data unavailable\).*new entries refused/);
+});
+
+test("the real /status message carries the pool line under combined exposure", async () => {
+  const { gate, state } = harness({ broker: 1540 });
+  const service = createMultiInstrumentOwnerService({
+    riskSupervisor: {
+      getSnapshot: () => ({
+        dayPnlUsd: 0, exposureUsd: 1540, dailyLossLimitUsd: 300, marginToLimitUsd: 300,
+        entryBrakeUsd: 120, cutTiers: [], partialCutUsd: 200, partialCutFraction: 0.5, fullFlattenUsd: 250,
+        brakedInstruments: [], perInstrument: [], dayKey: "2026-09-21"
+      })
+    },
+    instrumentConfigs: [{ enabled: true, instrument: "SOL/USD", orderPrefix: "SOL" }],
+    buildOwnerService: (cfg) => ({ statusText: async () => cfg.instrument, healthText: async () => cfg.instrument }),
+    exposurePoolLine: () => formatExposurePoolLine({ gate, readExposure: () => ({ exposureUsd: state.broker }) })
+  });
+  const text = await service.statusText();
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => l.includes("combined exposure"));
+  assert.ok(at >= 0, "status has the combined exposure line");
+  assert.match(lines[at + 1], /^  exposure pool: \$1,540\.00 .* OPEN/);
+});
+
+test("a broken pool line cannot break /status", async () => {
+  const service = createMultiInstrumentOwnerService({
+    riskSupervisor: { getSnapshot: () => ({ dayPnlUsd: 0, exposureUsd: 0, brakedInstruments: [], perInstrument: [] }) },
+    instrumentConfigs: [{ enabled: true, instrument: "SOL/USD", orderPrefix: "SOL" }],
+    buildOwnerService: (cfg) => ({ statusText: async () => cfg.instrument }),
+    exposurePoolLine: () => { throw new Error("boom"); }
+  });
+  assert.match(await service.statusText(), /exposure pool: unavailable/);
 });
