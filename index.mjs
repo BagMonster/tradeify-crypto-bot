@@ -162,7 +162,9 @@ async function buildInstrumentStack(cfg) {
     client: quantityClient,
     persistence,
     protectiveOrdersBypassSlippageCap: accountRisk.protectiveOrdersBypassSlippageCap ?? true,
-    addEvent: database.addEvent
+    addEvent: database.addEvent,
+    // Blocked-entry/exit and recovery alerts (2026-09-21).
+    notifications: liveNotifications
   });
 
   const stack = {
