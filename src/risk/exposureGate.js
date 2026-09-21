@@ -239,3 +239,44 @@ export function createExposureGate({
 
   return Object.freeze({ requestEntry, settle, getSnapshot });
 }
+
+function usd(value) {
+  return `$${Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/**
+ * The /status line for the exposure pool.
+ *
+ * State is derived from the live numbers, not from whether an entry has been refused
+ * yet: price moves alone can push exposure over the soft ceiling, and /status should
+ * say FULL then too.
+ *
+ *   gate            the gate (or null when the active profile sets no pool)
+ *   readExposure    the same function the gate uses; may throw when broker data is bad
+ */
+export function formatExposurePoolLine({ gate, readExposure, now = () => Date.now() }) {
+  if (!gate) return "  exposure pool: not set in this account profile (new entries are not limited by account exposure)";
+  const snap = gate.getSnapshot();
+  let brokerUsd = null;
+  try {
+    const value = Number(readExposure?.()?.exposureUsd);
+    brokerUsd = Number.isFinite(value) && value >= 0 ? value : null;
+  } catch {
+    brokerUsd = null;
+  }
+  const limits = `soft ${usd(snap.softUsd)} / hard ${usd(snap.hardUsd)}`;
+  if (brokerUsd === null) {
+    return `  exposure pool: UNKNOWN (broker account data unavailable) · ${limits} · new entries refused`;
+  }
+  const exposure = brokerUsd + snap.reservedUsd;
+  const pending = snap.reservedUsd > 0 ? ` (incl. ${usd(snap.reservedUsd)} awaiting broker confirmation)` : "";
+  const pct = Math.round((exposure / snap.softUsd) * 100);
+  if (exposure >= snap.softUsd) {
+    const since = snap.closed && Number.isFinite(snap.closedSinceMs)
+      ? ` · paused ${Math.max(0, Math.round((now() - snap.closedSinceMs) / 60_000))}m, ${snap.refusalsThisEpisode} refused`
+      : "";
+    return `  exposure pool: ${usd(exposure)}${pending} of ${limits} · FULL, new entries refused${since}`;
+  }
+  const largest = Math.max(0, snap.hardUsd - exposure);
+  return `  exposure pool: ${usd(exposure)}${pending} of ${limits} (${pct}%) · OPEN · largest entry that fits now: ${usd(largest)}`;
+}
