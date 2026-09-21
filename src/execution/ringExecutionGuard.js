@@ -160,6 +160,9 @@ export function createRingExecutionGuard({
   persistence,
   protectiveOrdersBypassSlippageCap = true,
   addEvent = async () => {},
+  // Owner Telegram alerts (liveTelegramNotifications). Optional so tests and
+  // older wiring keep working; without it blocked actions still log as before.
+  notifications = null,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   confirmationTimeoutMs = 12_000,
   pollIntervalMs = 750
@@ -185,6 +188,58 @@ export function createRingExecutionGuard({
 
   const inFlight = new Set();
 
+  // ---- Broker-read outage alerts (2026-09-21) --------------------------------
+  // On the morning of 2026-09-19 dozens of entries and exits were blocked by a
+  // dead DXtrade session. Each wrote an ERROR row and none told the owner; he
+  // found them by scrolling logs. A blocked EXIT matters most: it means the bot
+  // cannot take profit or reduce a position on this book.
+  //
+  // One alert per outage per book, not one per blocked action. The episode opens
+  // on the first blocked entry or exit and closes on the next successful broker
+  // read from ANY path (entry, exit, cut or flatten), which sends a recovery
+  // alert with the duration and how many actions were blocked. Protective cuts
+  // are not alerted here: riskSupervisor already sends PROTECTION_FAILED.
+  //
+  // The eventKey carries the episode start time. The notification store dedups
+  // permanently on eventKey, so a fixed key would fire once, ever.
+  let readOutage = null;   // { startedMs, blockedCount }
+
+  function noteReadFailure(path) {
+    try {
+      if (readOutage !== null) {
+        readOutage.blockedCount += 1;
+        return;
+      }
+      readOutage = { startedMs: Date.now(), blockedCount: 1 };
+      notifications?.enqueue?.({
+        kind: "EXECUTION_BLOCKED",
+        eventKey: `EXEC-BLOCKED:${PREFIX}:${readOutage.startedMs}`,
+        instrument: INSTRUMENT,
+        path,
+        reasonCode: "ACCOUNT_DATA_UNAVAILABLE"
+      });
+    } catch {
+      // Alerting must never interfere with the execution path.
+    }
+  }
+
+  function noteReadSuccess() {
+    if (readOutage === null) return;
+    const episode = readOutage;
+    readOutage = null;
+    try {
+      notifications?.enqueue?.({
+        kind: "EXECUTION_RECOVERED",
+        eventKey: `EXEC-RECOVERED:${PREFIX}:${episode.startedMs}`,
+        instrument: INSTRUMENT,
+        outageMs: Date.now() - episode.startedMs,
+        blockedCount: episode.blockedCount
+      });
+    } catch {
+      // Alerting must never interfere with the execution path.
+    }
+  }
+
   function isEnabled() {
     return autoExecute && strategyAutoExecute;
   }
@@ -205,6 +260,7 @@ export function createRingExecutionGuard({
       await addEvent("ERROR", "RING_ENTRY_BLOCKED_ACCOUNT_DATA_UNAVAILABLE", {
         orderCode: code, ringTag: intent.ringTag, reason: read.reason
       });
+      noteReadFailure("ENTRY");
       return Object.freeze({
         status: "ACCOUNT_DATA_UNAVAILABLE",
         orderCode: code,
@@ -253,6 +309,7 @@ export function createRingExecutionGuard({
       await addEvent("ERROR", "RING_EXIT_BLOCKED_ACCOUNT_DATA_UNAVAILABLE", {
         orderCode: code, ringTag: intent.ringTag, lotId: intent.lotId, reason: read.reason
       });
+      noteReadFailure("EXIT");
       return Object.freeze({
         status: "ACCOUNT_DATA_UNAVAILABLE",
         orderCode: code,
@@ -399,7 +456,9 @@ export function createRingExecutionGuard({
       return Object.freeze({ ok: false, reason: error?.message ?? "DXtrade positions read failed" });
     }
     try {
-      return Object.freeze({ ok: true, legs: mapSolPositions(payload) });
+      const legs = mapSolPositions(payload);
+      noteReadSuccess();
+      return Object.freeze({ ok: true, legs });
     } catch (error) {
       return Object.freeze({ ok: false, reason: error?.message ?? "DXtrade positions payload is invalid" });
     }
