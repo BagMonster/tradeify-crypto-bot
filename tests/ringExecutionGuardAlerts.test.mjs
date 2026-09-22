@@ -115,3 +115,92 @@ test("a throwing notifier cannot break the execution path", async () => {
   });
   assert.equal((await g.executeIntent(entry())).status, "ACCOUNT_DATA_UNAVAILABLE");
 });
+
+// ---- 2026-09-22 incident: a refused entry must not retry forever ----------------------
+//
+// INJ SELL11 was re-sent about twice a second for over an hour. Every attempt came
+// back REJECTED without reaching DXtrade (the adapter replayed a stale ledger row
+// from the closed $50K account), the reason was never recorded, and each attempt
+// reserved $525 of the $2,200 exposure pool.
+
+function rejectingGuard({ enqueued, events, reason = "DXtrade order ended REJECTED" }) {
+  let attempts = 0;
+  const g = createRingExecutionGuard({
+    instrument: "INJ/USD",
+    orderPrefix: "INJGRID",
+    strategyId: "injgrid-ring-grid-v1",
+    lotStep: 0.01,
+    autoExecute: true,
+    strategyAutoExecute: true,
+    adapter: {
+      async place() {
+        attempts += 1;
+        return { confirmed: false, status: "REJECTED", reason };
+      }
+    },
+    client: {
+      async getOpenPositions() { return { positions: [] }; },
+      async placePositionClose() { return {}; },
+      async placePositionPartialClose() { return {}; },
+      async reconcileQuantityOrder() { return { status: "PENDING" }; }
+    },
+    persistence: { async claimOrder() { return {}; }, async getOrder() { return null; } },
+    addEvent: async (level, kind, payload) => { events.push({ level, kind, payload }); },
+    notifications: { enqueue: (event) => enqueued.push(event) }
+  });
+  return { guard: g, attempts: () => attempts };
+}
+
+// The same ring at the same state version always produces the same order code, which
+// is what makes the retry loop possible, so these tests reuse one intent.
+const sameRing = () => ({ type: "ENTRY", stateVersion: 70, tag: "SELL11", ringTag: "SELL11", side: "SELL", quantity: 67.28 });
+
+test("a rejected entry records the broker's reason instead of just the status", async () => {
+  const events = [];
+  const { guard: g } = rejectingGuard({ enqueued: [], events, reason: "Insufficient margin for this order" });
+  const result = await g.executeIntent(sameRing());
+  assert.equal(result.status, "REJECTED");
+  const logged = events.find((e) => e.kind === "RING_ORDER_NOT_CONFIRMED");
+  assert.equal(logged.payload.reason, "Insufficient margin for this order");
+  assert.equal(logged.payload.consecutiveRejections, 1);
+  assert.equal(result.reason, "Insufficient margin for this order");
+});
+
+test("the same ring stops being re-sent after three refusals, and alerts once", async () => {
+  const enqueued = [];
+  const events = [];
+  const { guard: g, attempts } = rejectingGuard({ enqueued, events });
+
+  for (let i = 0; i < 3; i += 1) assert.equal((await g.executeIntent(sameRing())).status, "REJECTED");
+  assert.equal(attempts(), 3);
+
+  // Every later attempt is refused locally: the broker is not called again.
+  for (let i = 0; i < 20; i += 1) {
+    const result = await g.executeIntent(sameRing());
+    assert.equal(result.status, "BLOCKED", "a latched ring must not reach the broker");
+    assert.match(result.reason, /refused this entry/);
+  }
+  assert.equal(attempts(), 3, "no further orders were sent");
+
+  const blocked = enqueued.filter((e) => e.kind === "EXECUTION_BLOCKED");
+  assert.equal(blocked.length, 1, "one alert for the episode, not one per attempt");
+  assert.equal(blocked[0].reasonCode, "ORDER_REJECTED");
+  assert.equal(blocked[0].instrument, "INJ/USD");
+  assert.doesNotThrow(() => formatLiveTelegramNotification(blocked[0]));
+  assert.ok(events.some((e) => e.kind === "RING_ENTRY_REJECT_LATCHED"));
+});
+
+test("the latch is per order code: a new state version starts clean", async () => {
+  const { guard: g, attempts } = rejectingGuard({ enqueued: [], events: [] });
+  for (let i = 0; i < 4; i += 1) await g.executeIntent(sameRing());
+  assert.equal(attempts(), 3);
+  await g.executeIntent({ ...sameRing(), stateVersion: 71 });
+  assert.equal(attempts(), 4, "a different order code is tried again");
+});
+
+test("a latched entry reports BLOCKED, which releases its exposure-pool reservation", async () => {
+  // BLOCKED is in the gate's NEVER_SENT set, so the latch cannot strand pool space.
+  const { guard: g } = rejectingGuard({ enqueued: [], events: [] });
+  for (let i = 0; i < 3; i += 1) await g.executeIntent(sameRing());
+  assert.equal((await g.executeIntent(sameRing())).status, "BLOCKED");
+});
