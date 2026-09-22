@@ -1,0 +1,13 @@
+# Railway config for the DEADMAN WATCHDOG service only.
+# Set this service's "Config file path" to /watchdog/railway.toml in Railway.
+# The trading worker keeps using the root railway.toml; changes here never restart it.
+
+[build]
+watchPatterns = [
+  "watchdog/**",
+  "package.json"
+]
+
+[deploy]
+startCommand = "npm run start:deadman"
+restartPolicyType = "ALWAYS"
