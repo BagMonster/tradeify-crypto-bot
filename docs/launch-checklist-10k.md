@@ -96,8 +96,9 @@ What it clears, and why each must go:
 | `sol_risk_ladder_state` | Each day's starting balance ($47,929) | Trigger a baseline-mismatch halt |
 | `daily_ledger` | Realised P&L per day | Count old losses against the new day |
 | `session_harvest_state`, `halt_warning_cycle`, `hybrid_watermark` | Old account's day and order state | Carry stale state onto the new account |
+| `solana_execution_orders` | The ring order ledger, keyed by order code | **Block every entry on the repeated ring, silently.** Order codes are deterministic (`PREFIX-GRID-<stateVersion>-<tag>-E`) and `ring_grid_state` is kept, so the codes repeat. The adapter reads this table before calling the broker and replays a stored final status, so an old `REJECTED` row makes that ring fail forever without ever reaching DXtrade. This is what happened on 2026-09-22 |
 
-It keeps the ring state (every book is flat; ring sizes are rebuilt from the profile), the order and alert history, events and market data. The script was tested against a real Postgres server with the bot's own tables: it refused while the heartbeat was fresh, archived and cleared when stopped, and the bot then rebuilt its state as $10,000 balance / $9,400 floor.
+It keeps the ring state (every book is flat; ring sizes are rebuilt from the profile), the alert history, events and market data. The script was tested against a real Postgres server with the bot's own tables: it refused while the heartbeat was fresh, archived and cleared when stopped, and the bot then rebuilt its state as $10,000 balance / $9,400 floor.
 
 ### B5. Point the bot at the new account
 
@@ -125,6 +126,7 @@ Trading worker → **Variables**:
 - [ ] `daily loss limit: -$300.00`
 - [ ] Ladder: brake −$120, cuts at −$100 / −$150 / −$200, flatten −$250
 - [ ] `exposure pool: $0.00 of soft $2,200.00 / hard $2,250.00 (0%) · OPEN`
+- [ ] `exposure pool: $0.00 of soft …` with **no** "awaiting broker confirmation" amount. A figure there while every book is flat means entries are failing
 - [ ] `harvest: +75.00 · READY`
 - [ ] Every book: `Cap: $25,000.00`, DXtrade broker net 0.00, virtual net 0.00
 
