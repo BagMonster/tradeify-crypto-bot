@@ -18,11 +18,19 @@
 --        session_harvest_state  harvest status per day
 --        halt_warning_cycle     pending halt countdowns
 --        hybrid_watermark       the reconciler's position in the OLD account's orders
+--        solana_execution_orders  the ring order ledger. MUST be cleared: order codes
+--                               are deterministic (PREFIX-GRID-<stateVersion>-<tag>-E)
+--                               and ring_grid_state is kept, so the codes repeat on the
+--                               new account. The adapter reads this table BEFORE calling
+--                               the broker and replays a stored final status, so an old
+--                               REJECTED row makes the same ring fail forever without
+--                               ever reaching DXtrade. That is what happened on
+--                               2026-09-22: INJ SELL10/11/12 rows rejected on the closed
+--                               $50K account blocked every INJ entry on the new one.
 --
 -- Deliberately KEPT: ring_grid_state (all books flat; ring sizes are rebuilt from the
--- profile; version numbers keep order codes unique), the order ledger and sent-alert
--- history (audit trail; keys stay unique), events, bars, dev-companion tables and
--- bot_liveness.
+-- profile), the sent-alert history (audit trail; keys stay unique), events, bars,
+-- dev-companion tables and bot_liveness.
 --
 -- Safe to re-run: each run archives into its own new schema.
 
@@ -43,7 +51,8 @@ BEGIN
   EXECUTE format('CREATE SCHEMA %I', archive_schema);
   FOREACH tbl IN ARRAY ARRAY[
     'bot_state', 'sol_risk_ladder_state', 'daily_ledger',
-    'session_harvest_state', 'halt_warning_cycle', 'hybrid_watermark'
+    'session_harvest_state', 'halt_warning_cycle', 'hybrid_watermark',
+    'solana_execution_orders'
   ] LOOP
     IF to_regclass('public.' || tbl) IS NULL THEN
       report := report || format('%s: not present, skipped; ', tbl);
