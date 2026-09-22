@@ -29,6 +29,7 @@ import { runReconciliationPass } from "./src/runtime/hybridAbsorber.js";
 import { startTelegramBot } from "./src/telegramBot.js";
 import { describeAccountProfile } from "./src/config/accountProfile.js";
 import { createExposureGate, formatExposurePoolLine } from "./src/risk/exposureGate.js";
+import { createLivenessStore, createLivenessHeartbeat } from "./src/monitoring/livenessStore.js";
 
 const money = (v) => (Number.isFinite(v) ? `${v < 0 ? "-$" : "$"}${Math.abs(v).toFixed(2)}` : "unavailable");
 
@@ -59,6 +60,28 @@ for (const cfg of enabledInstruments) {
 
 const database = createDatabase(environment);
 await database.init(account);
+
+// Deadman switch, bot side. The bot records when a risk evaluation last completed and
+// writes it to Postgres every 30 seconds; watchdog/deadman.mjs, a separate Railway
+// service, reads it and pages the owner directly if it goes stale. See
+// src/monitoring/livenessStore.js.
+const livenessStore = createLivenessStore({ databaseUrl: environment.databaseUrl, databaseSsl: environment.databaseSsl });
+await livenessStore.init();
+const liveness = createLivenessHeartbeat({
+  store: livenessStore,
+  profile: configuration.profile?.name ?? null,
+  // Seconds since each book's last Binance trade. Read lazily: stacks exist by the
+  // time the first flush runs.
+  getFeeds: () => Object.fromEntries(stacks.map((stack) => {
+    const at = Date.parse(stack.lastTrade?.tradeTime ?? "");
+    return [stack.cfg.instrument, Number.isFinite(at) ? Math.max(0, Math.round((Date.now() - at) / 1000)) : null];
+  })),
+  onWriteError: (error, failures) => {
+    if (failures === 1 || failures % 10 === 0) {
+      console.error(`Deadman heartbeat write failed (${failures} in a row): ${error?.message ?? "unknown error"}. The watchdog will report the bot as silent if this continues.`);
+    }
+  }
+});
 await clearLatchedBaselineMismatchHalt(database);
 
 const companionStore = createDevCompanionStore({
@@ -468,6 +491,7 @@ async function applyReconciliationBlocked(stack, result) {
 
 async function processLatestTrade(stack, trade) {
   const preflight = await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
+  liveness.noteEvaluation(preflight);
   if (["FLATTEN", "CUT", "HARVEST_PENDING", "HARVEST_CONFIRMED", "HARVEST_HALTED", "ACCOUNT_DATA_UNAVAILABLE"].includes(preflight.action)) {
     return preflight;
   }
@@ -486,7 +510,7 @@ async function processLatestTrade(stack, trade) {
       await clearNonHarvestHalt(`D049:${stack.cfg.orderPrefix}:${day}:${code}`);
     }
   }
-  await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
+  liveness.noteEvaluation(await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) }));
   await clearNonHarvestHalt(`RUNTIME_ERROR:${stack.cfg.orderPrefix}`);
 }
 
@@ -747,6 +771,7 @@ const telegramBot = await startTelegramBot({
 
 await accountMonitor.start();
 const startupRisk = await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
+liveness.noteEvaluation(startupRisk);
 console.log(`D-064 startup account-day evaluation: ${startupRisk.action}.`);
 const startupRecovery = await service.recoverVerifiedD064AtStartup();
 console.log(`D-064 verified startup recovery: ${startupRecovery.action}.`);
@@ -809,6 +834,15 @@ const heartbeatTimer = setInterval(() => {
   });
 }, HEARTBEAT_CHECK_MS);
 heartbeatTimer.unref?.();
+
+// Deadman heartbeat: copy the latest completed-evaluation time to Postgres. The timer
+// only writes what the evaluation path recorded, so a hung evaluation still reads as
+// stale to the watchdog even though this timer keeps firing.
+const LIVENESS_WRITE_MS = 30 * 1000;
+const livenessTimer = setInterval(() => void liveness.flush(), LIVENESS_WRITE_MS);
+livenessTimer.unref?.();
+void liveness.flush();
+console.log("Deadman heartbeat: writing bot_liveness every 30s for the external watchdog.");
 void heartbeat.checkOnce().catch(() => console.error("Initial heartbeat check failed."));
 
 const HALT_WARNING_CHECK_MS = 30 * 1000;
@@ -945,6 +979,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   console.log(`Received ${signal}; shutting down cleanly.`);
   clearInterval(heartbeatTimer);
+  clearInterval(livenessTimer);
   clearInterval(haltWarningTimer);
   telegramBot.stopDevCompanionDelivery?.();
   for (const stack of stacks) stack.feed.stop();
@@ -962,7 +997,7 @@ async function shutdown(signal) {
         console.error(`DXtrade ${stack.cfg.instrument} execution logout did not complete cleanly.`);
       }
     }
-    await Promise.allSettled([database.close(), persistence.close(), devCompanion.close()]);
+    await Promise.allSettled([database.close(), persistence.close(), devCompanion.close(), livenessStore.close()]);
   }
   process.exit(0);
 }
