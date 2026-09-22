@@ -45,9 +45,19 @@ const DEFAULT_FILLED_RESERVATION_TTL_MS = 60_000;
 // include it.
 const DEFAULT_SNAPSHOT_MARGIN_MS = 1_000;
 
-// Statuses that prove the order never reached the broker. Anything else (FILLED,
-// PENDING, NOT_CONFIRMED, a thrown error) may have filled, so its reservation is held.
-const NEVER_SENT = new Set(["BLOCKED", "ACCOUNT_DATA_UNAVAILABLE", "DUPLICATE_BLOCKED", "BELOW_LOT_STEP"]);
+// Statuses that mean NO exposure was opened, so the reservation is released at once.
+// BLOCKED/ACCOUNT_DATA_UNAVAILABLE/DUPLICATE_BLOCKED/BELOW_LOT_STEP: the order was
+// never sent. REJECTED/CANCELED/EXPIRED/FAILED: the broker refused it, which it
+// states as a final status, so nothing can appear on the book later.
+//
+// 2026-09-22: REJECTED was missing here. Rejected entries were held for the full
+// TTL waiting for a fill that could never arrive, so a retrying ring consumed the
+// pool with failures: $2,100 of a $2,200 pool reserved against $0 of real exposure.
+// PARTIAL stays out deliberately — part of it DID fill.
+const NEVER_SENT = new Set([
+  "BLOCKED", "ACCOUNT_DATA_UNAVAILABLE", "DUPLICATE_BLOCKED", "BELOW_LOT_STEP",
+  "REJECTED", "CANCELED", "EXPIRED", "FAILED"
+]);
 
 function positive(name, value) {
   const n = Number(value);
