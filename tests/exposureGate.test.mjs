@@ -279,3 +279,38 @@ test("a broken pool line cannot break /status", async () => {
   });
   assert.match(await service.statusText(), /exposure pool: unavailable/);
 });
+
+// ---- 2026-09-22 incident: rejections must not consume the pool -----------------------
+
+test("a broker rejection releases its reservation immediately", () => {
+  // INJ SELL11 was re-sent about twice a second against a stale REJECTED ledger row.
+  // Each attempt reserved $525 and the reservation was held for the full TTL waiting
+  // for a fill that could never come, so $2,100 of the $2,200 pool was consumed by
+  // failures while real broker exposure was $0.
+  for (const status of ["REJECTED", "CANCELED", "EXPIRED", "FAILED"]) {
+    const { gate } = harness({ broker: 0 });
+    const d = gate.requestEntry({ instrument: "INJ/USD", notionalUsd: 525.07 });
+    assert.equal(d.allowed, true);
+    assert.equal(gate.getSnapshot().reservedUsd, 525.07);
+    gate.settle(d.ticket, { status });
+    assert.equal(gate.getSnapshot().reservedUsd, 0, `${status} must free the pool at once`);
+    assert.equal(gate.getSnapshot().openReservations, 0);
+  }
+});
+
+test("four rejected entries in a row leave the pool untouched", () => {
+  const { gate } = harness({ broker: 0 });
+  for (let i = 0; i < 4; i += 1) {
+    const d = gate.requestEntry({ instrument: "INJ/USD", notionalUsd: 525.07 });
+    assert.equal(d.allowed, true, `attempt ${i + 1} must not be choked by earlier failures`);
+    gate.settle(d.ticket, { status: "REJECTED" });
+  }
+  assert.equal(gate.getSnapshot().reservedUsd, 0);
+});
+
+test("a partial fill keeps its reservation: part of it really did fill", () => {
+  const { gate } = harness({ broker: 0 });
+  const d = gate.requestEntry({ instrument: "INJ/USD", notionalUsd: 525.07 });
+  gate.settle(d.ticket, { status: "PARTIAL" });
+  assert.equal(gate.getSnapshot().reservedUsd, 525.07);
+});
