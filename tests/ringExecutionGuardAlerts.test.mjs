@@ -204,3 +204,69 @@ test("a latched entry reports BLOCKED, which releases its exposure-pool reservat
   for (let i = 0; i < 3; i += 1) await g.executeIntent(sameRing());
   assert.equal((await g.executeIntent(sameRing())).status, "BLOCKED");
 });
+
+// ---- 2026-09-22, second incident: PENDING is not a refusal ---------------------------
+//
+// The first version of this latch counted any non-fill. Every book then latched on
+// PENDING — an order that DID reach DXtrade and had not finished — which stopped the
+// adapter re-polling it. A pending order can still fill, so the bot must keep
+// watching it. Only a status the broker has settled counts toward the latch.
+
+function statusGuard(statuses, events = []) {
+  let attempts = 0;
+  const g = createRingExecutionGuard({
+    instrument: "DOGE/USD",
+    orderPrefix: "DOGEGRID",
+    strategyId: "dogegrid-ring-grid-v1",
+    lotStep: 0.01,
+    autoExecute: true,
+    strategyAutoExecute: true,
+    adapter: {
+      async place(request) {
+        const status = statuses[Math.min(attempts, statuses.length - 1)];
+        attempts += 1;
+        return status === "FILLED"
+          ? { confirmed: true, status: "FILLED", orderCode: request.orderCode, fillPrice: 0.1, filledQuantity: request.quantity, filledAt: "2026-09-22T18:00:00.000Z" }
+          : { confirmed: false, status };
+      }
+    },
+    client: {
+      async getOpenPositions() { return { positions: [] }; },
+      async placePositionClose() { return {}; },
+      async placePositionPartialClose() { return {}; },
+      async reconcileQuantityOrder() { return { status: "PENDING" }; }
+    },
+    persistence: { async claimOrder() { return {}; }, async getOrder() { return null; } },
+    addEvent: async (level, kind, payload) => { events.push({ level, kind, payload }); },
+    notifications: { enqueue() {} }
+  });
+  return { guard: g, attempts: () => attempts };
+}
+
+const dogeRing = () => ({ type: "ENTRY", stateVersion: 58, tag: "SELL3", ringTag: "SELL3", side: "SELL", quantity: 100 });
+
+test("PENDING never latches a ring: the order is live and must keep being polled", async () => {
+  const events = [];
+  const { guard: g, attempts } = statusGuard(["PENDING"], events);
+  for (let i = 0; i < 10; i += 1) assert.equal((await g.executeIntent(dogeRing())).status, "PENDING");
+  assert.equal(attempts(), 10, "every tick must still reach the adapter");
+  assert.equal(events.filter((e) => e.kind === "RING_ENTRY_REJECT_LATCHED").length, 0);
+  assert.equal(events.find((e) => e.kind === "RING_ORDER_NOT_CONFIRMED").payload.consecutiveRejections, 0);
+});
+
+test("pendings before a refusal do not count toward the latch", async () => {
+  // PENDING, PENDING, then REJECTED forever: latched on the third REFUSAL, not the third attempt.
+  const { guard: g, attempts } = statusGuard(["PENDING", "PENDING", "REJECTED"]);
+  for (let i = 0; i < 5; i += 1) await g.executeIntent(dogeRing());
+  assert.equal(attempts(), 5, "two pendings plus three refusals all reached the broker");
+  assert.equal((await g.executeIntent(dogeRing())).status, "BLOCKED");
+  assert.equal(attempts(), 5);
+});
+
+test("a fill clears an earlier refusal count", async () => {
+  const { guard: g, attempts } = statusGuard(["REJECTED", "REJECTED", "FILLED", "REJECTED"]);
+  for (let i = 0; i < 4; i += 1) await g.executeIntent(dogeRing());
+  // Two refusals, a fill resets the count, so the next refusal is number one again.
+  assert.equal((await g.executeIntent(dogeRing())).status, "REJECTED");
+  assert.equal(attempts(), 5);
+});
