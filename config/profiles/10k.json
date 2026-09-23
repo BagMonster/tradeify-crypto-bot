@@ -13,6 +13,6 @@
   ],
   "fullFlattenUsd": 250,
   "harvestUsd": 75,
-  "exposurePool": { "softUsd": 2200, "hardUsd": 2250 },
+  "exposurePool": { "softUsd": 3000, "hardUsd": 3500 },
   "perCoinCapUsd": 4500
 }
