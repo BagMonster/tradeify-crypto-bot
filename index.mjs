@@ -8,7 +8,7 @@ import { DxtradeExecutionClient } from "./src/execution/dxtradeExecutionClient.j
 import { createPinnedDxtradeFetch } from "./src/execution/pinnedDxtradeFetch.js";
 import { SolanaQuantityClient } from "./src/execution/solanaQuantityClient.js";
 import { createSolanaQuantityAdapter } from "./src/execution/solanaQuantityAdapter.js";
-import { createRingExecutionGuard } from "./src/execution/ringExecutionGuard.js";
+import { createRingExecutionGuard, accountOrderEpoch } from "./src/execution/ringExecutionGuard.js";
 import { createSolanaLiveCanary } from "./src/execution/solanaCanary.js";
 import { createDxtradeAccountMonitor } from "./src/account/dxtradeAccountMonitor.js";
 import { trustedSignedNetFor } from "./src/account/dxtradeSignedNet.js";
@@ -57,6 +57,10 @@ for (const cfg of enabledInstruments) {
   }
   buildGridDefinition(cfg);
 }
+
+// Every client order code carries this, so codes can never collide with those the
+// same DXtrade login already used on a previous account (2026-09-22 incident).
+const orderCodeEpoch = accountOrderEpoch(environment.dxtrade.accountCode);
 
 const database = createDatabase(environment);
 await database.init(account);
@@ -212,6 +216,7 @@ async function buildInstrumentStack(cfg) {
     strategyAutoExecute: cfg.execution?.autoExecute ?? true,
     instrument: cfg.instrument,
     orderPrefix: cfg.orderPrefix,
+    orderCodeEpoch,
     strategyId: definition.strategyId,
     adapter,
     client: quantityClient,
@@ -611,7 +616,8 @@ const liveCanary = createSolanaLiveCanary({
   persistence,
   addEvent: database.addEvent,
   automaticExecutionEnabled: heartbeatStack.execution.isEnabled,
-  minimumHoldSeconds: account.minimumHoldSeconds
+  minimumHoldSeconds: account.minimumHoldSeconds,
+  orderCodeEpoch
 });
 
 // Every DXtrade session in the process, in one place.
