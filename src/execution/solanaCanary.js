@@ -1,8 +1,8 @@
 const STRATEGY_ID = "sol-outer-heavy-v1";
 const INSTRUMENT = "SOL/USD";
 const CANARY_QUANTITY = 0.01;
-const OPEN_CODE = "SOLCANARY-V2-OPEN";
-const CLOSE_CODE = "SOLCANARY-V2-CLOSE";
+const OPEN_CODE_BASE = "SOLCANARY-V2-OPEN";
+const CLOSE_CODE_BASE = "SOLCANARY-V2-CLOSE";
 const FINAL_FAILURES = new Set(["REJECTED", "CANCELED", "EXPIRED", "PARTIAL", "FAILED"]);
 
 function text(name, value, max = 128) {
@@ -37,7 +37,7 @@ function activePositions(payload) {
   return positionRows(payload).filter((position) => Math.abs(positionQuantity(position)) > 1e-12);
 }
 
-async function reconcileClose({ client, persistence, quantity, sleep, timeoutMs }) {
+async function reconcileClose({ client, persistence, quantity, sleep, timeoutMs, closeCode: CLOSE_CODE }) {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     const result = await client.reconcileQuantityOrder({
@@ -74,8 +74,14 @@ export function createSolanaLiveCanary({
   automaticExecutionEnabled,
   minimumHoldSeconds = 25,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  confirmationTimeoutMs = 12_000
+  confirmationTimeoutMs = 12_000,
+  // DXtrade remembers client order codes per login, so a fixed canary code can only
+  // ever be used once per login, not once per account (2026-09-22: HTTP 409 "Entity
+  // already exists at server"). The epoch comes from the account code.
+  orderCodeEpoch = ""
 }) {
+  const OPEN_CODE = `${orderCodeEpoch}${OPEN_CODE_BASE}`;
+  const CLOSE_CODE = `${orderCodeEpoch}${CLOSE_CODE_BASE}`;
   if (typeof adapter?.place !== "function") throw new TypeError("SOL canary requires the quantity adapter");
   if (typeof client?.getOpenPositions !== "function" || typeof client?.placePositionClose !== "function" || typeof client?.reconcileQuantityOrder !== "function") {
     throw new TypeError("SOL canary requires DXtrade position and reconciliation methods");
@@ -238,6 +244,7 @@ export function createSolanaLiveCanary({
         closed = Object.freeze({ confirmed: false, status: closeRow.status });
       } else {
         closed = await reconcileClose({
+          closeCode: CLOSE_CODE,
           client,
           persistence,
           quantity: closeQuantity,
