@@ -251,7 +251,11 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
               fill_price=COALESCE($3,fill_price),
               filled_quantity=COALESCE($4,filled_quantity),
               filled_at=COALESCE($5,filled_at),
-              last_error=$6,
+              -- An error message is preserved unless a new one is supplied: the
+              -- reconcile loop marks PENDING with no details every poll, and an
+              -- unconditional write there erased why a submission failed (2026-09-22).
+              -- A fill clears it, because the order succeeded in the end.
+              last_error=CASE WHEN $2 = 'FILLED' THEN NULL ELSE COALESCE($6,last_error) END,
               updated_at=NOW()
         WHERE order_code=$1
         RETURNING *`,
