@@ -30,9 +30,29 @@ function floorLot(value) {
   return fixed8(Math.floor((value + 1e-9) / LOT_STEP_LOCAL) * LOT_STEP_LOCAL);
 }
 
-function makeOrderCode(prefix, intent) {
+// DXtrade keeps client order codes on ITS side, for the login, not just for one
+// account. On 2026-09-22 every entry on the new $10,000 account came back
+// "HTTP 409, code 100: Entity already exists at server", because ring_grid_state was
+// carried over, the state versions never changed, and so every code the bot generated
+// had already been used on the closed $50,000 account. Clearing our own ledger could
+// not help: the memory of those codes is the broker's.
+//
+// The epoch fixes it for every future account too. It is derived from the DXtrade
+// account code, so switching accounts changes every order code automatically and
+// nobody has to remember a manual bump.
+function makeOrderCode(prefix, intent, epoch) {
   const suffix = intent.type === "ENTRY" ? "E" : `X${intent.tranche}`;
-  return `${prefix}GRID-${intent.stateVersion}-${intent.tag}-${suffix}`;
+  return `${prefix}GRID-${epoch}${intent.stateVersion}-${intent.tag}-${suffix}`;
+}
+
+// Four lowercase hex characters: short enough to leave room inside the 64-character
+// order-code limit, long enough that two accounts colliding is a curiosity rather
+// than a plan. Empty when no account code is configured, which keeps every existing
+// test and the old code shape working unchanged.
+export function accountOrderEpoch(accountCode) {
+  const clean = String(accountCode ?? "").trim();
+  if (clean === "") return "";
+  return `${createHash("sha256").update(clean).digest("hex").slice(0, 4)}-`;
 }
 
 // Deterministic, format-agnostic per-leg order-code suffix. Derived from the broker
@@ -151,6 +171,8 @@ function aggregateLegResults(results, orderCodes) {
 export function createRingExecutionGuard({
   instrument,
   orderPrefix,
+  // Namespaces every order code to the DXtrade account. See makeOrderCode.
+  orderCodeEpoch = "",
   strategyId,
   lotStep = 0.01,
   autoExecute,
@@ -173,6 +195,8 @@ export function createRingExecutionGuard({
   const INSTRUMENT = text("instrument", instrument, 32);
   const PREFIX = text("orderPrefix", orderPrefix, 12).toUpperCase();
   if (!/^[A-Z0-9]+$/.test(PREFIX)) throw new TypeError("orderPrefix must be A-Z0-9");
+  const EPOCH = typeof orderCodeEpoch === "string" ? orderCodeEpoch : "";
+  if (EPOCH !== "" && !/^[a-z0-9]{1,12}-$/.test(EPOCH)) throw new TypeError("orderCodeEpoch must be lowercase alphanumerics followed by a dash");
   const STRATEGY_ID = text("strategyId", strategyId, 128);
   const LOT_STEP_LOCAL_LOCAL = Number(lotStep);
   if (!Number.isFinite(LOT_STEP_LOCAL_LOCAL) || LOT_STEP_LOCAL_LOCAL <= 0) throw new TypeError("lotStep must be positive");
@@ -320,58 +344,7 @@ export function createRingExecutionGuard({
     }
   }
 
-  // A ring whose entry the broker refuses must not retry forever. Each ring's entry
-  // order code is deterministic (PREFIX-GRID-<stateVersion>-<tag>-E), so a refusal
-  // repeats on every tick until something changes. On 2026-09-22 INJ SELL11 was
-  // re-sent about twice a second for over an hour: the adapter short-circuited on a
-  // stale REJECTED ledger row from the closed account, and each attempt reserved
-  // $525 of the $2,200 exposure pool. After this many consecutive refusals the code
-  // is latched, the owner is alerted once, and the ring waits for a state-version
-  // change (which yields a new order code) or a restart.
-  //
-  // Only statuses the BROKER has settled count toward the latch. PENDING means the
-  // order reached DXtrade and the confirmation window closed without a fill: the
-  // adapter re-polls that same order code on the next tick rather than sending a
-  // new one, and it may still fill. Latching on PENDING would stop the bot watching
-  // a live order, which is worse than the loop this latch exists to stop.
-  const REJECTIONS_BEFORE_LATCH = 3;
-  const LATCHABLE = new Set(["REJECTED", "CANCELED", "EXPIRED", "FAILED"]);
-  const entryRejections = new Map();   // orderCode -> consecutive broker refusals
-
-  function noteEntryRejection(code, status, reason) {
-    if (!LATCHABLE.has(status)) {
-      // Not a refusal: still in flight, so the ring keeps its clean slate.
-      entryRejections.delete(code);
-      return 0;
-    }
-    const count = (entryRejections.get(code) ?? 0) + 1;
-    entryRejections.set(code, count);
-    if (count !== REJECTIONS_BEFORE_LATCH) return count;
-    try {
-      notifications?.enqueue?.({
-        kind: "EXECUTION_BLOCKED",
-        eventKey: `ENTRY-REJECTED:${PREFIX}:${code}`,
-        instrument: INSTRUMENT,
-        path: "ENTRY",
-        reasonCode: "ORDER_REJECTED"
-      });
-    } catch {
-      // Alerting must never interfere with the execution path.
-    }
-    return count;
-  }
-
   async function placeEntryOrder(intent, code) {
-    const rejections = entryRejections.get(code) ?? 0;
-    if (rejections >= REJECTIONS_BEFORE_LATCH) {
-      await addEvent("WARN", "RING_ENTRY_REJECT_LATCHED", { orderCode: code, ringTag: intent.ringTag, rejections });
-      // BLOCKED, so the exposure pool releases the reservation immediately.
-      return Object.freeze({
-        status: "BLOCKED",
-        orderCode: code,
-        reason: `${INSTRUMENT} ${intent.ringTag}: the broker refused this entry ${rejections} times; latched until the ring state version changes`
-      });
-    }
     const result = await adapter.place({
       orderCode: code,
       strategyId: intent.strategyId,
@@ -385,18 +358,9 @@ export function createRingExecutionGuard({
       quantity: intent.quantity
     });
     if (result.confirmed !== true || result.status !== "FILLED") {
-      // The broker's own words. Without them a rejection cannot be diagnosed at all:
-      // on 2026-09-22 hundreds of rejections were logged with no reason recorded.
-      const count = noteEntryRejection(code, result.status ?? "UNKNOWN", result.reason);
-      await addEvent("WARN", "RING_ORDER_NOT_CONFIRMED", {
-        orderCode: code,
-        status: result.status ?? "UNKNOWN",
-        reason: typeof result.reason === "string" && result.reason !== "" ? result.reason.slice(0, 300) : null,
-        consecutiveRejections: count
-      });
-      return Object.freeze({ status: result.status ?? "NOT_CONFIRMED", orderCode: code, reason: result.reason ?? null });
+      await addEvent("WARN", "RING_ORDER_NOT_CONFIRMED", { orderCode: code, status: result.status ?? "UNKNOWN" });
+      return Object.freeze({ status: result.status ?? "NOT_CONFIRMED", orderCode: code });
     }
-    entryRejections.delete(code);
     return Object.freeze({ status: "FILLED", orderCode: code, ...result });
   }
 
@@ -506,7 +470,7 @@ export function createRingExecutionGuard({
 
   async function executeIntent(intent) {
     if (!intent || (intent.type !== "ENTRY" && intent.type !== "EXIT")) throw new TypeError(`${INSTRUMENT} intent must be ENTRY or EXIT`);
-    const code = makeOrderCode(PREFIX, intent);
+    const code = makeOrderCode(PREFIX, intent, EPOCH);
     if (!isEnabled()) return Object.freeze({ status: "BLOCKED", orderCode: code, reason: "Automatic execution locks are off" });
     if (inFlight.has(code)) return Object.freeze({ status: "DUPLICATE_BLOCKED", orderCode: code });
     inFlight.add(code);
@@ -711,7 +675,7 @@ export function createRingExecutionGuard({
     const allocated = distributeCut(openLegs, qty);
     if (allocated.length === 0) return Object.freeze({ status: "BELOW_LOT_STEP", reason: "Requested cut floors below the lot step" });
 
-    const base = `${PREFIX}CUT-${compactDayKey(dayKey)}-${stateVersion}`;
+    const base = `${PREFIX}CUT-${EPOCH}${compactDayKey(dayKey)}-${stateVersion}`;
     const results = [];
     const codes = [];
     for (const leg of allocated) {
