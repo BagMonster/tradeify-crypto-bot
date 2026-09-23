@@ -170,7 +170,7 @@ export function haltReleaseHint(reason, instrument = null) {
     return `/rematch ${code}  (needs virtual and broker nets to agree first)`;
   }
   if (text.includes("harvest could not confirm every book flat")) {
-    return "close any remaining broker positions, then /harvestrecover";
+    return "verify every book is fresh and flat (virtual 0, broker 0, lots 0), then /harvestrecover";
   }
   if (text.includes("foreign position") || text.includes("position metrics")) {
     return "clear the unexpected broker position in DXtrade, then /pausehalt if it is still counting down";

@@ -199,7 +199,7 @@ function formatEvent(event) {
         reason,
         freshnessFailure
           ? "Correction: wait for /status to show fresh DXtrade data and matching virtual/broker nets, then send /harvestrecover and confirm its 6-digit code."
-          : "Correction: inspect /status and DXtrade positions. Do not use /resume to bypass this halt; resolve the broker flat-confirmation problem first."
+          : "Correction: when /status shows every book fresh and flat (virtual 0, broker 0, lots 0), send /harvestrecover and confirm its 6-digit code. Do not use /resume to bypass this halt."
       ].join("\n")
     };
   }

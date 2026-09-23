@@ -57,8 +57,20 @@ test("D-064 remains pending for an idempotent broker confirmation and blocks nor
   assert.equal(sol.calls.some(([kind, on]) => kind === "brake" && on === true), true);
 });
 
-test("D-064 terminal harvest failure is durable and fail-closed", async () => {
+test("D-064 retries an unverified or non-flat protective flatten while remaining fail-closed", async () => {
   const sol = book("SOL/USD", "NOT_FLAT");
+  const halts = [];
+  const supervisor = createRiskSupervisor({ config, instruments: [sol], harvestStore: memoryHarvestStore(), getCombinedDayPnlUsd: () => 250, setSafetyHalt: async (reason) => halts.push(reason) });
+  const result = await supervisor.evaluate({ dayKey: "2026-09-09" });
+  assert.equal(result.action, "HARVEST_PENDING");
+  assert.equal(supervisor.getSnapshot().harvest.status, "PENDING");
+  assert.equal(supervisor.getSnapshot().trancheExitsPaused, true);
+  assert.equal(sol.calls.some(([kind, on]) => kind === "brake" && on === true), true);
+  assert.equal(halts.length, 0);
+});
+
+test("D-064 durable execution failure remains fail-closed", async () => {
+  const sol = book("SOL/USD", "REJECTED");
   const halts = [];
   const supervisor = createRiskSupervisor({ config, instruments: [sol], harvestStore: memoryHarvestStore(), getCombinedDayPnlUsd: () => 250, setSafetyHalt: async (reason) => halts.push(reason) });
   const result = await supervisor.evaluate({ dayKey: "2026-09-09" });
@@ -125,7 +137,29 @@ test("D-064 recovery clears only its own fresh-data halt after a fresh read and 
   assert.equal(supervisor.getSnapshot().harvest.status, "READY");
 });
 
-test("D-064 recovery cannot clear a terminal harvest halt or skip book verification", async () => {
+test("D-064 verified-flat recovery confirms the original harvest without re-triggering it", async () => {
+  const store = memoryHarvestStore();
+  const reason = "D-064 harvest could not confirm every book flat; owner review required";
+  await store.save({ dayKey: "2026-09-09", status: "HALTED", triggerPnlUsd: 250.82, confirmedAt: null, haltReason: reason });
+  const sol = book("SOL/USD");
+  const supervisor = createRiskSupervisor({
+    config,
+    instruments: [sol],
+    harvestStore: store,
+    getCombinedDayPnlUsd: () => 74.87,
+    clearSafetyHaltIfReason: async (value) => value === reason,
+    getSafetyHaltState: async () => ({ safety_halt: true, halt_reason: reason }),
+    now: () => Date.parse("2026-09-09T12:00:00.000Z")
+  });
+  const result = await supervisor.recoverHarvest({ dayKey: "2026-09-09", booksVerified: true, recoveryKind: "VERIFIED_FLAT" });
+  assert.equal(result.action, "HARVEST_CONFIRMED");
+  assert.equal(supervisor.getSnapshot().harvest.status, "CONFIRMED");
+  assert.equal(supervisor.getSnapshot().harvest.triggerPnlUsd, 250.82);
+  assert.equal(supervisor.getSnapshot().trancheExitsPaused, true);
+  assert.equal(sol.calls.some(([kind, on]) => kind === "brake" && on === false), true);
+});
+
+test("D-064 recovery requires the correct recovery kind and book verification", async () => {
   const store = memoryHarvestStore();
   await store.save({ dayKey: "2026-09-09", status: "HALTED", triggerPnlUsd: 250, confirmedAt: null, haltReason: "D-064 harvest could not confirm every book flat; owner review required" });
   const supervisor = createRiskSupervisor({ config, instruments: [book("SOL/USD")], harvestStore: store, getCombinedDayPnlUsd: () => 0 });

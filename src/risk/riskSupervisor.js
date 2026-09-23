@@ -17,6 +17,24 @@ import { harvestReason, setTrancheExitsPausedAll } from "./sessionHarvest.js";
 
 const DEFAULT_HARVEST_FRESH_DATA_GRACE_MS = 5 * 60 * 1000;
 const DEFAULT_CUT_COOLDOWN_MS = 5 * 60 * 1000;
+const HARVEST_FLAT_CONFIRMATION_HALT = "D-064 harvest could not confirm every book flat; owner review required";
+
+// A protective flatten can be accepted by DXtrade before its follow-up read
+// sees the empty book.  These outcomes are therefore not proof that the
+// harvest failed; they mean the bot must remain fail-closed and try the
+// idempotent flatten again on the next risk evaluation.  A definite execution
+// failure (for example REJECTED, BLOCKED or THREW) is still a durable halt.
+const HARVEST_RETRYABLE_FLATTEN_STATUSES = new Set([
+  "PENDING", "SUBMITTED", "CLAIMED", "NOT_VERIFIED", "NOT_FLAT", "ACCOUNT_DATA_UNAVAILABLE"
+]);
+
+function isFreshDataHarvestHalt(reason) {
+  return typeof reason === "string" && reason.startsWith("D-064 harvest cannot verify fresh broker account data for ");
+}
+
+function isFlatConfirmationHarvestHalt(reason) {
+  return reason === HARVEST_FLAT_CONFIRMATION_HALT;
+}
 
 const REQUIRED_CONFIG = Object.freeze([
   "entryBrakeUsd",
@@ -394,10 +412,13 @@ export function createRiskSupervisor({
         results.push({ instrument: reading.instrument, result: { status: "THREW", reason: error?.message ?? "harvest flatten threw" } });
       }
     }
-    const terminal = results.filter((r) => !["FILLED", "ALREADY_FLAT", "PENDING", "SUBMITTED", "CLAIMED"].includes(r.result?.status));
-    const pendingResults = results.filter((r) => ["PENDING", "SUBMITTED", "CLAIMED"].includes(r.result?.status));
+    const terminal = results.filter((r) => {
+      const status = r.result?.status;
+      return status !== "FILLED" && status !== "ALREADY_FLAT" && !HARVEST_RETRYABLE_FLATTEN_STATUSES.has(status);
+    });
+    const pendingResults = results.filter((r) => HARVEST_RETRYABLE_FLATTEN_STATUSES.has(r.result?.status));
     if (terminal.length > 0) {
-      const reason = `D-064 harvest could not confirm every book flat; owner review required`;
+      const reason = HARVEST_FLAT_CONFIRMATION_HALT;
       const halted = await haltHarvest({
         incomingDayKey,
         combinedDayPnlUsd: combined,
@@ -685,28 +706,23 @@ export function createRiskSupervisor({
     }
   }
 
-  async function recoverHarvest({ dayKey: incomingDayKey, booksVerified = false } = {}) {
+  async function recoverHarvest({ dayKey: incomingDayKey, booksVerified = false, recoveryKind = "FRESH_DATA" } = {}) {
     if (!sessionHarvestEnabled) return Object.freeze({ action: "HARVEST_DISABLED" });
     if (typeof incomingDayKey !== "string" || incomingDayKey === "") throw new TypeError("recoverHarvest requires a dayKey");
     if (booksVerified !== true) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED" });
+    if (recoveryKind !== "FRESH_DATA" && recoveryKind !== "VERIFIED_FLAT") {
+      return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED" });
+    }
     if (incomingDayKey !== dayKey) rollover(incomingDayKey);
     const prior = await loadHarvest(incomingDayKey);
     if (prior.status !== "HALTED") return Object.freeze({ action: "HARVEST_NOT_HALTED", harvest: prior });
-    // A failed flatten or any other D-064 halt is manual-review only. This path
-    // exists solely for the false initial-read halt that can occur while startup
-    // snapshots are still cold.
-    if (typeof prior.haltReason !== "string" || !prior.haltReason.startsWith("D-064 harvest cannot verify fresh broker account data for ")) {
+    const freshDataRecovery = recoveryKind === "FRESH_DATA" && isFreshDataHarvestHalt(prior.haltReason);
+    const verifiedFlatRecovery = recoveryKind === "VERIFIED_FLAT" && isFlatConfirmationHarvestHalt(prior.haltReason);
+    if (!freshDataRecovery && !verifiedFlatRecovery) {
       return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
     }
     const readings = readBooks();
     if (readings.some((reading) => reading.readFailed)) return Object.freeze({ action: "ACCOUNT_DATA_UNAVAILABLE", harvest: prior });
-    let combined;
-    try {
-      const supplied = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
-      combined = fixed2(Number.isFinite(supplied) ? supplied : readings.reduce((sum, reading) => sum + reading.dayPnlUsd, 0));
-    } catch {
-      return Object.freeze({ action: "ACCOUNT_DATA_UNAVAILABLE", harvest: prior });
-    }
     const safety = await getSafetyHaltState();
     if (safety?.safety_halt === true) {
       // Compare and clear atomically: recovery cannot erase a newer, unrelated
@@ -714,6 +730,44 @@ export function createRiskSupervisor({
       if (safety.halt_reason !== prior.haltReason) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
       const cleared = await clearSafetyHaltIfReason(prior.haltReason);
       if (!cleared) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
+    }
+    if (verifiedFlatRecovery) {
+      // The harvest has already flattened every book.  Do not reset to READY
+      // and re-test today's P&L: realised P&L can fall below the threshold
+      // between the flatten and this verification.  Confirm the original
+      // harvest instead, retain its trigger, release only harvest entry brakes,
+      // and keep ordinary tranche exits paused until the account-day reset.
+      const confirmed = await saveHarvest({
+        dayKey: incomingDayKey,
+        status: "CONFIRMED",
+        triggerPnlUsd: prior.triggerPnlUsd,
+        confirmedAt: new Date(now()).toISOString(),
+        haltReason: null
+      });
+      applyHarvestGates();
+      for (const book of instruments) if (!stickyBrake(book.instrument)) applyEntryBrake(book, false);
+      await addEvent("WARN", "D064_HARVEST_RECOVERED_CONFIRMED", {
+        dayKey: incomingDayKey,
+        triggerPnlUsd: prior.triggerPnlUsd,
+        recoveryKind
+      });
+      notifications?.enqueue?.({
+        kind: "HARVEST_CONFIRMED",
+        eventKey: `D064-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`,
+        combinedDayPnlUsd: prior.triggerPnlUsd,
+        thresholdUsd: sessionHarvestThreshold,
+        confirmedAt: confirmed.confirmedAt
+      });
+      hasSuccessfulRead = true;
+      return Object.freeze({ action: "HARVEST_CONFIRMED", harvest: confirmed });
+    }
+
+    let combined;
+    try {
+      const supplied = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
+      combined = fixed2(Number.isFinite(supplied) ? supplied : readings.reduce((sum, reading) => sum + reading.dayPnlUsd, 0));
+    } catch {
+      return Object.freeze({ action: "ACCOUNT_DATA_UNAVAILABLE", harvest: prior });
     }
     await saveHarvest({ dayKey: incomingDayKey, status: "READY", triggerPnlUsd: null, confirmedAt: null, haltReason: null });
     applyHarvestGates();
