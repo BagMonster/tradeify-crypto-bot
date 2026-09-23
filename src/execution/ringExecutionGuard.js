@@ -328,10 +328,22 @@ export function createRingExecutionGuard({
   // $525 of the $2,200 exposure pool. After this many consecutive refusals the code
   // is latched, the owner is alerted once, and the ring waits for a state-version
   // change (which yields a new order code) or a restart.
+  //
+  // Only statuses the BROKER has settled count toward the latch. PENDING means the
+  // order reached DXtrade and the confirmation window closed without a fill: the
+  // adapter re-polls that same order code on the next tick rather than sending a
+  // new one, and it may still fill. Latching on PENDING would stop the bot watching
+  // a live order, which is worse than the loop this latch exists to stop.
   const REJECTIONS_BEFORE_LATCH = 3;
-  const entryRejections = new Map();   // orderCode -> consecutive non-fill results
+  const LATCHABLE = new Set(["REJECTED", "CANCELED", "EXPIRED", "FAILED"]);
+  const entryRejections = new Map();   // orderCode -> consecutive broker refusals
 
   function noteEntryRejection(code, status, reason) {
+    if (!LATCHABLE.has(status)) {
+      // Not a refusal: still in flight, so the ring keeps its clean slate.
+      entryRejections.delete(code);
+      return 0;
+    }
     const count = (entryRejections.get(code) ?? 0) + 1;
     entryRejections.set(code, count);
     if (count !== REJECTIONS_BEFORE_LATCH) return count;
@@ -375,7 +387,7 @@ export function createRingExecutionGuard({
     if (result.confirmed !== true || result.status !== "FILLED") {
       // The broker's own words. Without them a rejection cannot be diagnosed at all:
       // on 2026-09-22 hundreds of rejections were logged with no reason recorded.
-      const count = noteEntryRejection(code, result.status, result.reason);
+      const count = noteEntryRejection(code, result.status ?? "UNKNOWN", result.reason);
       await addEvent("WARN", "RING_ORDER_NOT_CONFIRMED", {
         orderCode: code,
         status: result.status ?? "UNKNOWN",
