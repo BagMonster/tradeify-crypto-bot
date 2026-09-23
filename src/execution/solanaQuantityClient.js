@@ -283,19 +283,37 @@ export class SolanaQuantityClient {
 
   async placeMarketQuantityOrder({ orderCode, orderSide, quantity }) {
     await this.login();
-    return this.#request({
-      method: "POST",
-      path: `/accounts/${encodeURIComponent(this.#accountCode)}/orders`,
-      body: {
-        orderCode: text("orderCode", orderCode, 64),
-        type: "MARKET",
-        instrument: this.#instrument,
-        quantity: positive("quantity", quantity),
-        positionEffect: "OPEN",
-        side: side(orderSide),
-        tif: "GTC"
+    const path = `/accounts/${encodeURIComponent(this.#accountCode)}/orders`;
+    const body = {
+      orderCode: text("orderCode", orderCode, 64),
+      type: "MARKET",
+      instrument: this.#instrument,
+      quantity: positive("quantity", quantity),
+      positionEffect: "OPEN",
+      side: side(orderSide),
+      tif: "GTC"
+    };
+    const payload = await this.#request({ method: "POST", path, body });
+    // 2026-09-22 diagnostic. Entries were returning HTTP 2xx with no orderId, the
+    // ledger recorded broker_order_id NULL, the order never appeared in DXtrade's
+    // order history, and nothing anywhere recorded what the broker actually
+    // answered. A submission that creates no order is the most serious silent
+    // failure this client can have, so it says so, with the exact request and the
+    // exact response. Neither contains a credential: the session token travels in
+    // the Authorization header, which is not logged.
+    if (payload?.orderId == null) {
+      let printable;
+      try {
+        printable = JSON.stringify(payload);
+      } catch {
+        printable = "<unserialisable>";
       }
-    });
+      console.warn(
+        `DXtrade ${this.#instrument} order POST ${path} returned no orderId. ` +
+        `Request: ${JSON.stringify(body)} Response: ${printable === undefined ? "<empty body>" : printable.slice(0, 1000)}`
+      );
+    }
+    return payload;
   }
 
   // D-049 partial de-risk path. Unlike a full linked-position close, this request
