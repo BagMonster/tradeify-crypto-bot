@@ -234,6 +234,13 @@ export function createExposureGate({
   }
 
   function getSnapshot() {
+    // 2026-09-22. prune() used to run only inside requestEntry, so between entries
+    // /status kept showing the reservation of an order that had already filled —
+    // $103.68 of AVAX counted twice, once as broker exposure and once as "awaiting
+    // broker confirmation", for minutes. The gate's own decisions were always correct
+    // (it prunes before every one); only the display was stale. Pruning here with no
+    // snapshot time releases on the TTL alone, which is the conservative direction.
+    prune(NaN);
     return Object.freeze({
       softUsd: soft,
       hardUsd: hard,
