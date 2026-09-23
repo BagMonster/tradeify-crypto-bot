@@ -59,7 +59,20 @@ export function reconcileSolQuantityOrder(payload, { orderCode, requestedQuantit
   const code = text("orderCode", orderCode, 64);
   const requested = positive("requestedQuantity", requestedQuantity);
   const matches = parseOrders(payload).filter((row) => row?.clientOrderId === code);
-  if (matches.length === 0) return Object.freeze({ status: "PENDING" });
+  if (matches.length === 0) {
+    // 2026-09-22. This returned a bare PENDING, so "DXtrade has never heard of this
+    // order" was indistinguishable from "it is working at the broker". The adapter
+    // looked for the words "not found in dxtrade history" in a reason field this
+    // path never set, so an order that was never accepted stayed PENDING for good
+    // and its order code was blocked from ever being retried. The flag is explicit
+    // now; no caller has to match on prose.
+    return Object.freeze({
+      status: "PENDING",
+      orderCode: code,
+      brokerHasNoRecord: true,
+      reason: "Order not found in DXtrade history"
+    });
+  }
   if (matches.length !== 1) throw new Error("DXtrade returned duplicate SOL order-history rows");
   const order = matches[0];
   const status = text("DXtrade order status", order.status, 32).toUpperCase();

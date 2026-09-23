@@ -101,3 +101,33 @@ test("a successful submission records the broker order id and does not log a fai
   assert.deepEqual(logged, []);
   assert.equal(rows.get("INJGRID-70-SELL11-E").brokerOrderId, 17783879);
 });
+
+// ---- The order DXtrade never accepted -------------------------------------------------
+//
+// If the broker has no record of an order code, that is not "still working". Before
+// this was explicit, such a row stayed PENDING forever and blocked its own order code:
+// every later tick polled the ghost instead of submitting anything, which is why the
+// canary and four rings went quiet for hours on 2026-09-22.
+
+test("an order DXtrade has no record of ends FAILED, not PENDING forever", async () => {
+  const { adapter, marks } = harness({
+    place: async () => ({ orderId: 998877 }),
+    reconcile: async () => ({ status: "PENDING", orderCode: "INJGRID-70-SELL11-E", brokerHasNoRecord: true, reason: "Order not found in DXtrade history" })
+  });
+  const result = await adapter.place(entry());
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.brokerHasNoRecord, true);
+  const mark = marks.find((m) => m.status === "FAILED");
+  assert.ok(mark, "the row is terminal, so the order code is not blocked for good");
+  assert.match(mark.lastError, /never accepted/);
+});
+
+test("an order that IS at the broker but unfinished stays PENDING", async () => {
+  const { adapter, marks } = harness({
+    place: async () => ({ orderId: 998877 }),
+    reconcile: async () => ({ status: "PENDING", orderCode: "INJGRID-70-SELL11-E" })
+  });
+  const result = await adapter.place(entry());
+  assert.equal(result.status, "PENDING", "a working order must not be written off");
+  assert.equal(marks.find((m) => m.status === "FAILED"), undefined);
+});
