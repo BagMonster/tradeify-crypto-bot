@@ -161,8 +161,32 @@ export function createSolanaQuantityAdapter({
           quantity: request.quantity
         });
         row = await persistence.markSubmitted(request.orderCode, response?.orderId ?? null);
-      } catch {
-        await persistence.markStatus(request.orderCode, "PENDING", { lastError: "DXtrade SOL submission outcome is uncertain" });
+      } catch (error) {
+        // 2026-09-22. This was a bare `catch {}`: the broker's own words for why a
+        // submission failed were discarded, and the reconcile pass below then wrote
+        // last_error = NULL on its next poll, erasing even the generic note. Orders
+        // that never reached DXtrade were indistinguishable from orders working at
+        // the broker, for hours. The message goes to the log first, because that is
+        // the one place nothing later overwrites.
+        const status = Number.isFinite(error?.status) ? error.status : null;
+        const message = typeof error?.message === "string" && error.message !== "" ? error.message : "unknown error";
+        console.error(
+          `DXtrade ${request.instrument} order submission FAILED for ${request.orderCode}` +
+          `${status === null ? "" : ` (HTTP ${status})`}: ${message}`
+        );
+        // A 4xx other than 429 is the broker refusing the request outright: the order
+        // was never created, so it is FAILED, not "uncertain". Leaving it PENDING made
+        // the ring poll an order that does not exist and can never resolve, which is
+        // what kept every book stuck this evening. A timeout, a 5xx or a 429 really is
+        // uncertain, so those stay PENDING and are reconciled against the broker.
+        const refused = status !== null && status >= 400 && status < 500 && status !== 429;
+        await persistence.markStatus(request.orderCode, refused ? "FAILED" : "PENDING", {
+          lastError: `${refused ? "DXtrade refused the order" : "DXtrade submission outcome is uncertain"}` +
+            `${status === null ? "" : ` (HTTP ${status})`}: ${message}`
+        });
+        if (refused) {
+          return Object.freeze({ confirmed: false, status: "FAILED", orderCode: request.orderCode, reason: message });
+        }
       }
     }
     return reconcile(request);
