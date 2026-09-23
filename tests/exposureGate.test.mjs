@@ -314,3 +314,26 @@ test("a partial fill keeps its reservation: part of it really did fill", () => {
   gate.settle(d.ticket, { status: "PARTIAL" });
   assert.equal(gate.getSnapshot().reservedUsd, 525.07);
 });
+
+test("/status does not keep showing a reservation whose order already filled", () => {
+  // The AVAX entry confirmed at 02:40:47 was still in the pool line minutes later,
+  // double-counted against the broker exposure that already included it.
+  const { gate, state } = harness({ broker: 0 });
+  const d = gate.requestEntry({ instrument: "AVAX/USD", notionalUsd: 103.68 });
+  gate.settle(d.ticket, { status: "FILLED" });
+  assert.equal(gate.getSnapshot().reservedUsd, 103.68, "while it is in flight it is counted");
+
+  // The broker now reports the fill, and time passes beyond the reservation TTL.
+  state.broker = 103.68;
+  state.t += 61_000;
+  assert.equal(gate.getSnapshot().reservedUsd, 0, "a filled reservation must not linger in the display");
+  assert.equal(gate.getSnapshot().openReservations, 0);
+});
+
+test("an in-flight reservation is still shown before the TTL", () => {
+  const { gate, state } = harness({ broker: 0 });
+  const d = gate.requestEntry({ instrument: "INJ/USD", notionalUsd: 525.04 });
+  gate.settle(d.ticket, { status: "FILLED" });
+  state.t += 5_000;
+  assert.equal(gate.getSnapshot().reservedUsd, 525.04, "five seconds in, the broker may not show it yet");
+});
