@@ -62,8 +62,10 @@ export function createSolanaQuantityAdapter({
       // left PENDING forever. A row that stays non-terminal blocks its order code
       // permanently, because the throw below prevents the state version from
       // advancing and the frozen version keeps regenerating the same code.
-      const brokerHasNoRecord = typeof result.reason === "string" &&
-        result.reason.toLowerCase().includes("not found in dxtrade history");
+      // The client says so explicitly now. The prose match is kept for any caller
+      // or stub that still reports it the old way.
+      const brokerHasNoRecord = result.brokerHasNoRecord === true ||
+        (typeof result.reason === "string" && result.reason.toLowerCase().includes("not found in dxtrade history"));
       await persistence.markStatus(request.orderCode, "PENDING");
       if (Date.now() >= deadline) {
         if (brokerHasNoRecord) {
