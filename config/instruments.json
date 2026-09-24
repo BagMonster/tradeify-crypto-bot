@@ -8,7 +8,7 @@
   ],
   "accountRisk": {
     "entryBrakeScope": "instrument",
-    "cutCooldownMs": 300000,
+    "cutCooldownMs": 900000,
     "partialCutAllocation": "proportional-to-loss",
     "flattenHoldsUntilRollover": true,
     "rolloverHourUtc": 22,
