@@ -30,6 +30,7 @@ import { startTelegramBot } from "./src/telegramBot.js";
 import { describeAccountProfile } from "./src/config/accountProfile.js";
 import { createExposureGate, formatExposurePoolLine } from "./src/risk/exposureGate.js";
 import { createLivenessStore, createLivenessHeartbeat } from "./src/monitoring/livenessStore.js";
+import { createDailyDustCleanupCoordinator } from "./src/risk/dailyDustCleanup.js";
 
 const money = (v) => (Number.isFinite(v) ? `${v < 0 ? "-$" : "$"}${Math.abs(v).toFixed(2)}` : "unavailable");
 
@@ -283,6 +284,34 @@ async function buildInstrumentStack(cfg) {
 const stacks = [];
 for (const cfg of enabledInstruments) stacks.push(await buildInstrumentStack(cfg));
 const stackByInstrument = new Map(stacks.map((s) => [s.cfg.instrument, s]));
+const startupDustCleanupDayKey = accountDayKey(Date.now());
+
+const dailyDustCleanup = createDailyDustCleanupCoordinator({
+  accountRisk,
+  books: stacks.map((stack) => Object.freeze({
+    instrument: stack.cfg.instrument,
+    isExecutionEnabled: () => stack.execution.isEnabled(),
+    isMarketReady: () => Number.isFinite(Number(stack.lastTrade?.price)) &&
+      stack.feedState.connected === true && stack.feedState.stale !== true,
+    runDustCleanup: (args) => stack.runtime.executeDustCleanup({ ...args, markPrice: stack.lastTrade?.price })
+  })),
+  store: database,
+  addEvent: database.addEvent,
+  notifications: liveNotifications
+});
+
+async function runDailyDustCleanup({ immediate = false } = {}) {
+  if (maintenanceBusy || stacks.some((stack) => stack.draining)) return Object.freeze({ action: "BUSY" });
+  maintenanceBusy = true;
+  try {
+    return await dailyDustCleanup.run({ immediate });
+  } finally {
+    maintenanceBusy = false;
+    for (const stack of stacks) {
+      if (stack.pendingTrade && !stack.runtimeErrorLatched) void drainLatestTrades(stack);
+    }
+  }
+}
 
 // The account ladder reads the BROKER, not the strategy's per-tick cache.
 //
@@ -783,6 +812,27 @@ const startupRecovery = await service.recoverVerifiedD064AtStartup();
 console.log(`D-064 verified startup recovery: ${startupRecovery.action}.`);
 for (const stack of stacks) stack.feed.start();
 
+// Run once for the account day in which this deployment starts, as requested by
+// the owner. If feeds have not become fresh yet it returns WAITING and the minute
+// timer retries. On following account days only the 22:03 UTC schedule is eligible.
+void runDailyDustCleanup({ immediate: true })
+  .then((result) => console.log(`Daily dust cleanup startup check: ${result.action}.`))
+  .catch((error) => console.error(`Daily dust cleanup startup check failed: ${error.message}`));
+
+const DAILY_DUST_CLEANUP_CHECK_MS = 60_000;
+const dailyDustCleanupTimer = setInterval(() => {
+  const immediate = accountDayKey(Date.now()) === startupDustCleanupDayKey;
+  void runDailyDustCleanup({ immediate })
+    .then((result) => {
+      if (!["NOT_DUE", "ALREADY_COMPLETED", "BUSY"].includes(result.action)) {
+        console.log(`Daily dust cleanup check: ${result.action}.`);
+      }
+    })
+    .catch((error) => console.error(`Daily dust cleanup check failed: ${error.message}`));
+}, DAILY_DUST_CLEANUP_CHECK_MS);
+dailyDustCleanupTimer.unref?.();
+console.log(`Daily ring dust cleanup armed: deploy-day catch-up, then ${String(dailyDustCleanup.scheduledMinuteUtc).padStart(2, "0")} minutes after the 22:00 UTC account rollover.`);
+
 // Daily DXtrade session rotation.
 //
 // This is a canary, not the fix - reactive re-auth inside the clients is the
@@ -987,6 +1037,7 @@ async function shutdown(signal) {
   clearInterval(heartbeatTimer);
   clearInterval(livenessTimer);
   clearInterval(haltWarningTimer);
+  clearInterval(dailyDustCleanupTimer);
   telegramBot.stopDevCompanionDelivery?.();
   for (const stack of stacks) stack.feed.stop();
   accountMonitor.stop();
