@@ -88,6 +88,9 @@ export function reconcileSolQuantityOrder(payload, { orderCode, requestedQuantit
   const fillPrice = [finiteOrNull(leg.averagePrice), finiteOrNull(lastExecution?.averagePrice), finiteOrNull(lastExecution?.lastPrice)]
     .find((n) => n != null && n > 0) ?? null;
   const fillTime = lastExecution?.transactionTime ?? order.transactionTime ?? null;
+  const positionCode = leg.positionCode == null || String(leg.positionCode).trim() === ""
+    ? null
+    : String(leg.positionCode).trim();
 
   if (status === "COMPLETED" && finalStatus && complete) {
     if (!(fillPrice > 0) || typeof fillTime !== "string" || !Number.isFinite(Date.parse(fillTime))) {
@@ -97,6 +100,7 @@ export function reconcileSolQuantityOrder(payload, { orderCode, requestedQuantit
       status: "FILLED",
       orderCode: code,
       brokerOrderId: order.orderId == null ? null : String(order.orderId),
+      positionCode,
       fillPrice,
       filledQuantity,
       filledAt: new Date(Date.parse(fillTime)).toISOString()
