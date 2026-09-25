@@ -136,9 +136,14 @@ export function createDailyDustCleanupCoordinator({
       const state = await store.saveDailyDustCleanupState({ dayKey, autoLossUsd: usedLossUsd, completedAt: new Date(nowMs).toISOString() });
       const payload = { dayKey, lossBudgetUsd, autoLossUsd: usedLossUsd, scan, closed, deferred, failed, immediate };
       await addEvent(failed.length > 0 ? "WARN" : "INFO", "DAILY_DUST_CLEANUP_COMPLETED", payload);
+      // The coordinator may be deliberately re-run for the same account day
+      // after a startup pass found no fresh market data or an owner clears its
+      // completion marker. A day-only key would suppress that later, materially
+      // different result as a duplicate Telegram notification.
+      const completionKey = state.completedAt.replace(/[-:.TZ]/g, "");
       notifications?.enqueue?.({
         kind: "DUST_CLEANUP_SUMMARY",
-        eventKey: `DUST-CLEANUP:${dayKey}`,
+        eventKey: `DUST-CLEANUP:${dayKey}:${completionKey}`,
         dayKey,
         candidateCount: scan.reduce((sum, entry) => sum + entry.candidateCount, 0),
         excludedCurrentAccountDay: scan.reduce((sum, entry) => sum + entry.excluded.currentAccountDay, 0),
@@ -149,7 +154,8 @@ export function createDailyDustCleanupCoordinator({
         deferredCount: deferred.length,
         failedCount: failed.length,
         autoLossUsd: usedLossUsd,
-        lossBudgetUsd
+        lossBudgetUsd,
+        closed
       });
       return Object.freeze({ action: "COMPLETED", dayKey, state, lossBudgetUsd, autoLossUsd: usedLossUsd, scan: Object.freeze(scan), closed: Object.freeze(closed), deferred: Object.freeze(deferred), failed: Object.freeze(failed) });
     } finally {
