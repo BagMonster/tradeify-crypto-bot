@@ -123,10 +123,27 @@ export function createRingGridInstance({
         deferred.push({ ...candidate, estimatedPnlUsd, reason: "LOSS_BUDGET" });
         continue;
       }
+      let positionCode = candidate.positionCode;
+      if (positionCode === null) {
+        if (typeof execution.resolveLegacyDustTicket !== "function") {
+          failed.push({ ...candidate, status: "LEGACY_TICKET_LINK_UNAVAILABLE" });
+          continue;
+        }
+        const linked = await execution.resolveLegacyDustTicket({
+          lotId: candidate.lotId,
+          virtualSide: candidate.virtualSide,
+          quantity: candidate.remainingUnits
+        });
+        if (linked.status !== "LINKED") {
+          failed.push({ ...candidate, status: linked.status, reason: linked.reason ?? null });
+          continue;
+        }
+        positionCode = linked.positionCode;
+      }
       const result = await execution.executeDustCleanup({
         stateVersion: state.version,
         dayKey,
-        positionCode: candidate.positionCode,
+        positionCode,
         quantity: candidate.remainingUnits,
         virtualSide: candidate.virtualSide,
         reason: "daily dust cleanup"
@@ -137,13 +154,16 @@ export function createRingGridInstance({
       }
       const filledQuantity = Number(result.filledQuantity);
       const realized = realizedPnlUsd({ virtualSide: candidate.virtualSide, entryPrice: candidate.entryPrice, fillPrice: result.fillPrice, quantity: filledQuantity });
-      const close = { ...candidate, orderCode: result.orderCode, fillPrice: result.fillPrice, filledQuantity, filledAt: result.filledAt, realizedPnlUsd: realized };
+      const close = { ...candidate, positionCode, orderCode: result.orderCode, fillPrice: result.fillPrice, filledQuantity, filledAt: result.filledAt, realizedPnlUsd: realized };
       // The loss allowance is durable before this confirmed broker close can
       // permit another losing dust ticket. A state-save failure after this point
       // is conservative: it may require reconciliation, but cannot over-spend
       // the day's automatic-loss allowance after a restart.
       await onConfirmedClose(close);
-      state = await store.save(state.version, grid.reduceLotByPositionCode(state, candidate.positionCode, filledQuantity));
+      const next = candidate.needsLegacyTicketLink === true
+        ? grid.reduceLegacyLotById(state, candidate.lotId, filledQuantity)
+        : grid.reduceLotByPositionCode(state, positionCode, filledQuantity);
+      state = await store.save(state.version, next);
       if (realized < 0) availableLossUsd = Math.max(0, Number((availableLossUsd + realized).toFixed(8)));
       closed.push(close);
     }
