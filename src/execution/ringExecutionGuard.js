@@ -554,7 +554,12 @@ export function createRingExecutionGuard({
           filledQuantity: result.filledQuantity,
           filledAt: result.filledAt
         });
-        await addEvent("WARN", actionType === "PROTECTIVE_CUT" ? "RING_D049_PARTIAL_CUT_LEG_CONFIRMED" : "RING_PROTECTIVE_FLATTEN_LEG_CONFIRMED", {
+        const confirmedKind = actionType === "PROTECTIVE_CUT"
+          ? "RING_D049_PARTIAL_CUT_LEG_CONFIRMED"
+          : actionType === "DUST_CLEANUP"
+            ? "RING_DUST_CLEANUP_LEG_CONFIRMED"
+            : "RING_PROTECTIVE_FLATTEN_LEG_CONFIRMED";
+        await addEvent("WARN", confirmedKind, {
           reason,
           orderCode: code,
           legPositionCode,
@@ -609,7 +614,12 @@ export function createRingExecutionGuard({
     }
 
     if (row.status === "CLAIMED") {
-      await addEvent("WARN", actionType === "PROTECTIVE_CUT" ? "RING_D049_PARTIAL_CUT_SUBMITTING" : "RING_PROTECTIVE_FLATTEN_SUBMITTING", {
+      const submittingKind = actionType === "PROTECTIVE_CUT"
+        ? "RING_D049_PARTIAL_CUT_SUBMITTING"
+        : actionType === "DUST_CLEANUP"
+          ? "RING_DUST_CLEANUP_SUBMITTING"
+          : "RING_PROTECTIVE_FLATTEN_SUBMITTING";
+      await addEvent("WARN", submittingKind, {
         orderCode: code,
         reason,
         legPositionCode: leg.positionCode,
@@ -798,5 +808,52 @@ export function createRingExecutionGuard({
     return aggregate;
   }
 
-  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten });
+  // Closes exactly one bot-owned residual ticket. Unlike a protective cut this
+  // never aggregates or allocates across positions: the caller gives the
+  // positionCode recorded on the virtual ring lot and we refuse if DXtrade no
+  // longer reports precisely that ticket and quantity.
+  async function executeDustCleanup({ stateVersion, dayKey, positionCode: wantedPositionCode, quantity, virtualSide, reason = "daily dust cleanup" }) {
+    if (!Number.isSafeInteger(stateVersion) || stateVersion < 0) throw new TypeError("stateVersion is invalid");
+    const wanted = text("dust cleanup positionCode", wantedPositionCode, 128);
+    const qty = positive("dust cleanup quantity", quantity);
+    if (virtualSide !== "BUY" && virtualSide !== "SELL") throw new TypeError("dust cleanup virtualSide is invalid");
+    if (!isEnabled()) return Object.freeze({ status: "BLOCKED", reason: "Automatic execution locks are off" });
+
+    const read = await readAllSolPositions();
+    if (!read.ok) {
+      await addEvent("ERROR", "RING_DUST_CLEANUP_ACCOUNT_DATA_UNAVAILABLE", { positionCode: wanted, reason: read.reason });
+      return Object.freeze({ status: "ACCOUNT_DATA_UNAVAILABLE", reason: read.reason });
+    }
+    const leg = read.legs.find((candidate) => candidate.positionCode === wanted);
+    if (!leg) return Object.freeze({ status: "BROKER_POSITION_MISSING", positionCode: wanted });
+    if (leg.closeSide !== (virtualSide === "BUY" ? "SELL" : "BUY")) {
+      await addEvent("ERROR", "RING_DUST_CLEANUP_SIDE_MISMATCH", { positionCode: wanted, virtualSide, brokerDirection: leg.direction });
+      return Object.freeze({ status: "SIDE_MISMATCH", positionCode: wanted });
+    }
+    if (Math.abs(leg.quantity - qty) > 1e-8) {
+      await addEvent("WARN", "RING_DUST_CLEANUP_POSITION_CHANGED", { positionCode: wanted, requestedQuantity: qty, brokerQuantity: leg.quantity });
+      return Object.freeze({ status: "POSITION_CHANGED", positionCode: wanted, brokerQuantity: leg.quantity });
+    }
+
+    const code = `${PREFIX}DUST-${EPOCH}${compactDayKey(dayKey)}-${stateVersion}-${legSuffix(wanted)}`;
+    const result = await closeOneLeg({
+      code,
+      leg,
+      quantity: qty,
+      actionType: "DUST_CLEANUP",
+      reason: text("dust cleanup reason", reason, 300),
+      slippagePolicy: "DUST_FULL_CLOSE",
+      stateVersion,
+      full: true
+    });
+    await addEvent(result.status === "FILLED" ? "WARN" : "ERROR", "RING_DUST_CLEANUP_RESULT", {
+      orderCode: code,
+      positionCode: wanted,
+      status: result.status,
+      filledQuantity: result.filledQuantity ?? 0
+    });
+    return result;
+  }
+
+  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, executeDustCleanup });
 }
