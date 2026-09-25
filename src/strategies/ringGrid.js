@@ -241,9 +241,11 @@ export function createRingGrid(config) {
   // Protective cuts intentionally shrink originalUnits because the remaining
   // tranche plan must shrink too. For dust, use the immutable entry intent when
   // present, and derive legacy intent from the ring's USD allocation instead.
-  // Manual/adopted inventory is never considered. A missing broker ticket is
-  // also never guessed: it is counted in the scan so the owner can see why a
-  // scheduled pass was a no-op, but it cannot become an automatic close.
+  // Manual/adopted inventory is never considered. Older bot lots can lack the
+  // broker ticket id because that id was not persisted at the time they opened.
+  // They remain candidates, but the runtime must first prove their exact broker
+  // ticket from the lot's own persisted ENTRY order. It must never infer a
+  // ticket from side, quantity, or price alone.
   function dustCleanupScan(state, { openedBeforeMs, maxRemainingFraction }) {
     const normalized = normalizeState(state);
     const cutoff = Number(openedBeforeMs);
@@ -262,10 +264,6 @@ export function createRingGrid(config) {
         excluded.currentAccountDay += 1;
         continue;
       }
-      if (lot.positionCode === null) {
-        excluded.missingPositionCode += 1;
-        continue;
-      }
       const intendedUnits = lot.intendedUnits ?? floorLotOrZero(ring.usd / lot.entryPrice);
       if (intendedUnits < def.lotStep - 1e-12) {
         excluded.noIntendedUnits += 1;
@@ -276,7 +274,7 @@ export function createRingGrid(config) {
         excluded.aboveMaximumFraction += 1;
         continue;
       }
-      candidates.push(Object.freeze({ lotId: lot.id, ringTag: ring.tag, virtualSide: lot.side, positionCode: lot.positionCode, entryPrice: lot.entryPrice, remainingUnits: lot.remainingUnits, intendedUnits, remainingFraction, openedAt: lot.openedAt }));
+      candidates.push(Object.freeze({ lotId: lot.id, ringTag: ring.tag, virtualSide: lot.side, positionCode: lot.positionCode, needsLegacyTicketLink: lot.positionCode === null, entryPrice: lot.entryPrice, remainingUnits: lot.remainingUnits, intendedUnits, remainingFraction, openedAt: lot.openedAt }));
     }
     return Object.freeze({ candidates: Object.freeze(candidates), excluded: Object.freeze(excluded) });
   }
@@ -372,5 +370,25 @@ export function createRingGrid(config) {
     throw new Error("no virtual or adopted lot carries that positionCode");
   }
 
-  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, adoptedExposureUsd, observeRearm, nextMovingAverageExitAction, nextExitAction, applySkippedExit, entryCandidates, dustCleanupScan, dustCleanupCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten, adoptPosition, findLotByPositionCode, reduceLotByPositionCode });
+  // Used only after the dust-cleanup executor has proven an older no-ticket lot
+  // against its own ENTRY order and the current broker ticket. This deliberately
+  // targets one immutable lot id; it does not use the legacy side-based fallback
+  // above, which would be unsafe when several residual tickets share a side.
+  function reduceLegacyLotById(state, lotId, units) {
+    const next = mutable(state);
+    const wanted = String(lotId);
+    const reduction = positive("units", units);
+    for (const ring of next.rings) {
+      const index = ring.lots.findIndex((lot) => lot.id === wanted && lot.positionCode === null);
+      if (index < 0) continue;
+      const lot = ring.lots[index];
+      if (reduction > lot.remainingUnits + 1e-8) throw new Error("reduction exceeds legacy virtual lot remaining units");
+      lot.remainingUnits = fixed8(lot.remainingUnits - reduction);
+      if (lot.remainingUnits <= 1e-8) { ring.lots.splice(index, 1); ring.armed = true; }
+      return increment(next);
+    }
+    throw new Error("no legacy virtual lot carries that lotId");
+  }
+
+  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, adoptedExposureUsd, observeRearm, nextMovingAverageExitAction, nextExitAction, applySkippedExit, entryCandidates, dustCleanupScan, dustCleanupCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten, adoptPosition, findLotByPositionCode, reduceLotByPositionCode, reduceLegacyLotById });
 }

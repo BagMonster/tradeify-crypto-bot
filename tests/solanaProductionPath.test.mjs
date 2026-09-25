@@ -87,7 +87,7 @@ test("SOL quantity client sends explicit OPEN position effect and reconciles con
         status: "COMPLETED",
         finalStatus: true,
         transactionTime: "2026-08-24T01:00:00.500Z",
-        legs: [{ filledQuantity: 0.06, remainingQuantity: 0, averagePrice: 99.5 }],
+        legs: [{ filledQuantity: 0.06, remainingQuantity: 0, averagePrice: 99.5, positionCode: "position-sol-entry-1" }],
         executions: [{ lastQuantity: 0.06, lastPrice: 99.5, transactionTime: "2026-08-24T01:00:00.500Z" }]
       }]
     })
@@ -119,6 +119,7 @@ test("SOL quantity client sends explicit OPEN position effect and reconciles con
   assert.equal(fill.status, "FILLED");
   assert.equal(fill.filledQuantity, 0.06);
   assert.equal(fill.fillPrice, 99.5);
+  assert.equal(fill.positionCode, "position-sol-entry-1");
 });
 
 test("SOL position close uses CLOSE effect and position code without an explicit quantity", async () => {

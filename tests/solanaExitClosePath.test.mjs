@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createSolanaExecutionGuard } from "../src/execution/solanaExecutionGuard.js";
+import { createRingExecutionGuard } from "../src/execution/ringExecutionGuard.js";
 
 function persistenceMap() {
   const orders = new Map();
@@ -51,7 +52,7 @@ function clientStub({ positions, onPartial, onClose, onPlaceMarket, afterClosePo
   };
 }
 
-function guardFor({ client, adapterPlace }) {
+function guardFor({ client, adapterPlace, persistence = persistenceMap() }) {
   return createSolanaExecutionGuard({
     autoExecute: true,
     strategyAutoExecute: true,
@@ -70,9 +71,65 @@ function guardFor({ client, adapterPlace }) {
       }
     },
     client,
-    persistence: persistenceMap()
+    persistence
   });
 }
+
+function legacyGuardFor({ client, persistence }) {
+  return createRingExecutionGuard({
+    instrument: "SOL/USD",
+    orderPrefix: "SOL",
+    strategyId: "sol-outer-heavy-v1",
+    autoExecute: true,
+    strategyAutoExecute: true,
+    adapter: { place: async () => { throw new Error("not expected"); } },
+    client,
+    persistence
+  });
+}
+
+test("legacy dust ticket link requires one matching bot entry and exact live ticket", async () => {
+  const guard = legacyGuardFor({
+    persistence: {
+      ...persistenceMap(),
+      async getUniqueFilledEntryOrder(input) {
+        assert.deepEqual(input, { strategyId: "sol-outer-heavy-v1", instrument: "SOL/USD", lotId: "SELL3-V44" });
+        return { orderCode: "SOLGRID-acde-44-SELL3-E", requestedQuantity: 0.7, side: "SELL" };
+      }
+    },
+    client: {
+      getOpenPositions: async () => ({ positions: [{ symbol: "SOL/USD", quantity: -0.07, side: "SELL", positionCode: "broker-legacy-1" }] }),
+      placeMarketQuantityOrder: async () => ({ orderId: "open" }),
+      placePositionPartialClose: async () => ({ orderId: "partial" }),
+      placePositionClose: async () => ({ orderId: "close" }),
+      reconcileQuantityOrder: async ({ orderCode, requestedQuantity }) => {
+        assert.equal(orderCode, "SOLGRID-acde-44-SELL3-E");
+        assert.equal(requestedQuantity, 0.7);
+        return { status: "FILLED", positionCode: "broker-legacy-1", fillPrice: 10, filledQuantity: 0.7, filledAt: "2026-09-25T22:03:00.000Z" };
+      }
+    }
+  });
+  const result = await guard.resolveLegacyDustTicket({ lotId: "SELL3-V44", virtualSide: "SELL", quantity: 0.07 });
+  assert.deepEqual(result, { status: "LINKED", positionCode: "broker-legacy-1" });
+});
+
+test("legacy dust ticket link refuses a quantity mismatch", async () => {
+  const guard = legacyGuardFor({
+    persistence: {
+      ...persistenceMap(),
+      async getUniqueFilledEntryOrder() { return { orderCode: "SOLGRID-acde-44-SELL3-E", requestedQuantity: 0.7, side: "SELL" }; }
+    },
+    client: {
+      getOpenPositions: async () => ({ positions: [{ symbol: "SOL/USD", quantity: -0.08, side: "SELL", positionCode: "broker-legacy-1" }] }),
+      placeMarketQuantityOrder: async () => ({ orderId: "open" }),
+      placePositionPartialClose: async () => ({ orderId: "partial" }),
+      placePositionClose: async () => ({ orderId: "close" }),
+      reconcileQuantityOrder: async () => ({ status: "FILLED", positionCode: "broker-legacy-1", fillPrice: 10, filledQuantity: 0.7, filledAt: "2026-09-25T22:03:00.000Z" })
+    }
+  });
+  const result = await guard.resolveLegacyDustTicket({ lotId: "SELL3-V44", virtualSide: "SELL", quantity: 0.07 });
+  assert.equal(result.status, "LEGACY_TICKET_MISMATCH");
+});
 
 test("tranche EXIT on a short lot uses partial close by position code and does not OPEN", async () => {
   const partials = [];
