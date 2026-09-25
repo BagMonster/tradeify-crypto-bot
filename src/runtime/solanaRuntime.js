@@ -198,6 +198,10 @@ function createD060Runtime({
     return instance.flatten({ reason, dayKey });
   }
 
+  async function executeDustCleanup({ dayKey, openedBeforeMs, maxRemainingFraction, remainingLossBudgetUsd, markPrice, onConfirmedClose }) {
+    return instance.cleanupDust({ dayKey, openedBeforeMs, maxRemainingFraction, remainingLossBudgetUsd, markPrice, onConfirmedClose });
+  }
+
   function getRiskLadderState() {
     return riskSupervisor?.getSnapshot?.() ?? null;
   }
@@ -213,6 +217,7 @@ function createD060Runtime({
     attachRiskSupervisor,
     executeProtectiveCut,
     executeProtectiveFlatten,
+    executeDustCleanup,
     definition: grid.definition
   });
 }
