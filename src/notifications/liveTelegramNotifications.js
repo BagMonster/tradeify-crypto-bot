@@ -26,7 +26,8 @@ const KINDS = new Set([
   "CUT_TIER_INERT",
   // Account-wide exposure pool (src/risk/exposureGate.js), 2026-09-21.
   "EXPOSURE_GATE_CLOSED",
-  "EXPOSURE_GATE_REOPENED"
+  "EXPOSURE_GATE_REOPENED",
+  "DUST_CLEANUP_SUMMARY"
 ]);
 
 const PROTECTIVE_REASONS = new Set([
@@ -648,6 +649,25 @@ function formatEvent(event) {
       `Entries were paused for: ${duration(event.closedForMs)}`
     ];
     if (refusals !== null && refusals >= 0) lines.push(`Entries refused while paused: ${Math.trunc(refusals)}`);
+    return { kind, eventKey, message: lines.join("\n") };
+  }
+
+  if (kind === "DUST_CLEANUP_SUMMARY") {
+    const dayKey = safeText("dust cleanup dayKey", event.dayKey, { max: 10, pattern: /^\d{4}-\d{2}-\d{2}$/ });
+    const closedCount = Math.max(0, Math.trunc(nonNegative("dust cleanup closedCount", event.closedCount)));
+    const deferredCount = Math.max(0, Math.trunc(nonNegative("dust cleanup deferredCount", event.deferredCount)));
+    const failedCount = Math.max(0, Math.trunc(nonNegative("dust cleanup failedCount", event.failedCount)));
+    const autoLossUsd = nonNegative("dust cleanup autoLossUsd", event.autoLossUsd);
+    const lossBudgetUsd = positive("dust cleanup lossBudgetUsd", event.lossBudgetUsd);
+    const lines = [
+      "🧹 DAILY RING DUST CLEANUP",
+      `Account day: ${dayKey}`,
+      `Closed automatically: ${closedCount} bot-owned residual ticket${closedCount === 1 ? "" : "s"}`,
+      `Auto-close realised loss today: ${money(autoLossUsd)} of ${money(lossBudgetUsd)} limit`
+    ];
+    if (deferredCount > 0) lines.push(`Review required: ${deferredCount} losing residual ticket${deferredCount === 1 ? "" : "s"} exceeded the remaining loss allowance; no order was sent.`);
+    if (failedCount > 0) lines.push(`Not closed: ${failedCount} ticket${failedCount === 1 ? "" : "s"} changed or could not be confirmed. Check /status and Railway logs.`);
+    lines.push("New-account-day and manual/adopted positions were excluded. Released rings wait for a fresh later price crossing before re-entry.");
     return { kind, eventKey, message: lines.join("\n") };
   }
 
