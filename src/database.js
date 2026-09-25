@@ -222,6 +222,14 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
       )
     `);
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS daily_dust_cleanup (
+        day_key TEXT PRIMARY KEY CHECK (day_key ~ '^\\d{4}-\\d{2}-\\d{2}$'),
+        auto_loss_usd NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (auto_loss_usd >= 0),
+        completed_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS halt_warning_cycle (
         id SMALLINT PRIMARY KEY CHECK (id = 1),
         cycle_key TEXT NOT NULL,
@@ -640,6 +648,45 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     return Object.freeze({ dayKey: row.day_key, status: row.status, triggerPnlUsd: row.trigger_pnl_usd == null ? null : toFiniteNumber("session harvest trigger P&L", row.trigger_pnl_usd), confirmedAt: row.confirmed_at == null ? null : toDate("session harvest confirmation", row.confirmed_at).toISOString(), haltReason: row.halt_reason });
   }
 
+  function normalizeDailyDustCleanupState(row, dayKey) {
+    const key = requiredText("daily dust cleanup day key", row?.day_key ?? dayKey, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("daily dust cleanup day key is invalid");
+    return Object.freeze({
+      dayKey: key,
+      autoLossUsd: toFiniteNumber("daily dust cleanup auto loss", row?.auto_loss_usd ?? 0),
+      completedAt: row?.completed_at == null ? null : toDate("daily dust cleanup completion", row.completed_at).toISOString()
+    });
+  }
+
+  async function getDailyDustCleanupState(dayKey) {
+    const key = requiredText("daily dust cleanup day key", dayKey, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("daily dust cleanup day key is invalid");
+    const result = await pool.query("SELECT day_key, auto_loss_usd, completed_at FROM daily_dust_cleanup WHERE day_key=$1", [key]);
+    if (result.rowCount === 0) return normalizeDailyDustCleanupState(null, key);
+    if (result.rowCount !== 1) throw new Error("daily dust cleanup state lookup returned an invalid row count");
+    return normalizeDailyDustCleanupState(result.rows[0], key);
+  }
+
+  async function saveDailyDustCleanupState(input) {
+    const key = requiredText("daily dust cleanup day key", input?.dayKey, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("daily dust cleanup day key is invalid");
+    const autoLossUsd = toFiniteNumber("daily dust cleanup auto loss", input?.autoLossUsd);
+    if (autoLossUsd < 0) throw new Error("daily dust cleanup auto loss must be non-negative");
+    const completedAt = input?.completedAt == null ? null : toDate("daily dust cleanup completion", input.completedAt).toISOString();
+    const result = await pool.query(
+      `INSERT INTO daily_dust_cleanup (day_key, auto_loss_usd, completed_at)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (day_key) DO UPDATE SET
+         auto_loss_usd=GREATEST(daily_dust_cleanup.auto_loss_usd, EXCLUDED.auto_loss_usd),
+         completed_at=COALESCE(daily_dust_cleanup.completed_at, EXCLUDED.completed_at),
+         updated_at=NOW()
+       RETURNING day_key, auto_loss_usd, completed_at`,
+      [key, autoLossUsd, completedAt]
+    );
+    if (result.rowCount !== 1) throw new Error("daily dust cleanup state save failed");
+    return normalizeDailyDustCleanupState(result.rows[0], key);
+  }
+
   async function writeBar(queryable, bar) {
     const result = await queryable.query(
       `INSERT INTO bars (
@@ -875,6 +922,8 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     addEvent,
     getSessionHarvestState,
     saveSessionHarvestState,
+    getDailyDustCleanupState,
+    saveDailyDustCleanupState,
     upsertBar,
     upsertBars,
     getBars,

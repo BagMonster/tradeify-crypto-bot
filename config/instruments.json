@@ -13,6 +13,11 @@
     "flattenHoldsUntilRollover": true,
     "rolloverHourUtc": 22,
     "sessionHarvestEnabled": true,
-    "sessionHarvestFreshDataGraceMs": 300000
+    "sessionHarvestFreshDataGraceMs": 300000,
+    "dustCleanup": {
+      "maxRemainingFraction": 0.1,
+      "lossBudgetFraction": 0.02,
+      "minuteUtc": 3
+    }
   }
 }

@@ -6,6 +6,14 @@ function positive(name, value) {
   return n;
 }
 
+function realizedPnlUsd({ virtualSide, entryPrice, fillPrice, quantity }) {
+  const entry = positive("dust entry price", entryPrice);
+  const fill = positive("dust fill price", fillPrice);
+  const units = positive("dust quantity", quantity);
+  const pnl = virtualSide === "BUY" ? (fill - entry) * units : (entry - fill) * units;
+  return Number(pnl.toFixed(8));
+}
+
 function canonicalTrade(trade, marketSymbol) {
   if (!trade || trade.source !== "binance" || trade.symbol !== marketSymbol) throw new TypeError(`ring instance accepts only Binance ${marketSymbol} trades`);
   const tradeTime = typeof trade.tradeTime === "string" ? trade.tradeTime : "";
@@ -82,6 +90,59 @@ export function createRingGridInstance({
     const next = grid.resetAfterProtectiveFlatten(state, { fillPrice: result.fillPrice, filledAt: result.filledAt });
     await store.save(state.version, next);
     return result;
+  }
+
+  async function cleanupDust({ dayKey, openedBeforeMs, maxRemainingFraction, remainingLossBudgetUsd, markPrice, onConfirmedClose = async () => {} }) {
+    if (typeof execution.executeDustCleanup !== "function") throw new Error("execution does not support dust cleanup");
+    if (typeof onConfirmedClose !== "function") throw new TypeError("onConfirmedClose must be a function");
+    const markBudget = Number(remainingLossBudgetUsd);
+    if (!Number.isFinite(markBudget) || markBudget < 0) throw new TypeError("remainingLossBudgetUsd is invalid");
+    let state = await load();
+    const candidates = grid.dustCleanupCandidates(state, { openedBeforeMs, maxRemainingFraction });
+    const closed = [];
+    const deferred = [];
+    const failed = [];
+    let availableLossUsd = markBudget;
+    for (const candidate of candidates) {
+      // The current live Binance mark is only a preflight estimate. The daily
+      // budget is decremented from the confirmed DXtrade close fill below.
+      // cleanupDust is called by the runtime wrapper with the current market
+      // price, but retaining this guard keeps a stale process from guessing.
+      if (!Number.isFinite(Number(markPrice)) || Number(markPrice) <= 0) {
+        failed.push({ ...candidate, status: "MARK_UNAVAILABLE" });
+        continue;
+      }
+      const estimatedPnlUsd = realizedPnlUsd({ virtualSide: candidate.virtualSide, entryPrice: candidate.entryPrice, fillPrice: Number(markPrice), quantity: candidate.remainingUnits });
+      if (estimatedPnlUsd < 0 && -estimatedPnlUsd > availableLossUsd + 1e-8) {
+        deferred.push({ ...candidate, estimatedPnlUsd, reason: "LOSS_BUDGET" });
+        continue;
+      }
+      const result = await execution.executeDustCleanup({
+        stateVersion: state.version,
+        dayKey,
+        positionCode: candidate.positionCode,
+        quantity: candidate.remainingUnits,
+        virtualSide: candidate.virtualSide,
+        reason: "daily dust cleanup"
+      });
+      if (result.status !== "FILLED") {
+        failed.push({ ...candidate, status: result.status, reason: result.reason ?? null });
+        continue;
+      }
+      const filledQuantity = Number(result.filledQuantity);
+      const realized = realizedPnlUsd({ virtualSide: candidate.virtualSide, entryPrice: candidate.entryPrice, fillPrice: result.fillPrice, quantity: filledQuantity });
+      const close = { ...candidate, orderCode: result.orderCode, fillPrice: result.fillPrice, filledQuantity, filledAt: result.filledAt, realizedPnlUsd: realized };
+      // The loss allowance is durable before this confirmed broker close can
+      // permit another losing dust ticket. A state-save failure after this point
+      // is conservative: it may require reconciliation, but cannot over-spend
+      // the day's automatic-loss allowance after a restart.
+      await onConfirmedClose(close);
+      state = await store.save(state.version, grid.reduceLotByPositionCode(state, candidate.positionCode, filledQuantity));
+      if (realized < 0) availableLossUsd = Math.max(0, Number((availableLossUsd + realized).toFixed(8)));
+      closed.push(close);
+    }
+    currentState = state;
+    return Object.freeze({ closed: Object.freeze(closed), deferred: Object.freeze(deferred), failed: Object.freeze(failed) });
   }
 
   function exitsPaused() {
@@ -185,6 +246,7 @@ export function createRingGridInstance({
     setTrancheExitsPaused,
     cut,
     flatten,
+    cleanupDust,
     getEntryBrake: () => entryBrake,
     getTrancheExitsPaused: () => exitsPaused(),
     getState: () => currentState
