@@ -241,23 +241,47 @@ export function createRingGrid(config) {
   // Protective cuts intentionally shrink originalUnits because the remaining
   // tranche plan must shrink too. For dust, use the immutable entry intent when
   // present, and derive legacy intent from the ring's USD allocation instead.
-  // Manual/adopted inventory and unmatchable broker tickets are excluded here.
-  function dustCleanupCandidates(state, { openedBeforeMs, maxRemainingFraction }) {
+  // Manual/adopted inventory is never considered. A missing broker ticket is
+  // also never guessed: it is counted in the scan so the owner can see why a
+  // scheduled pass was a no-op, but it cannot become an automatic close.
+  function dustCleanupScan(state, { openedBeforeMs, maxRemainingFraction }) {
     const normalized = normalizeState(state);
     const cutoff = Number(openedBeforeMs);
     const fraction = Number(maxRemainingFraction);
     if (!Number.isFinite(cutoff)) throw new TypeError("openedBeforeMs is invalid");
     if (!(fraction > 0 && fraction <= 1)) throw new TypeError("maxRemainingFraction is invalid");
     const candidates = [];
+    const excluded = {
+      currentAccountDay: 0,
+      missingPositionCode: 0,
+      noIntendedUnits: 0,
+      aboveMaximumFraction: 0
+    };
     for (const ring of normalized.rings) for (const lot of ring.lots) {
-      if (lot.positionCode === null || Date.parse(lot.openedAt) >= cutoff) continue;
+      if (Date.parse(lot.openedAt) >= cutoff) {
+        excluded.currentAccountDay += 1;
+        continue;
+      }
+      if (lot.positionCode === null) {
+        excluded.missingPositionCode += 1;
+        continue;
+      }
       const intendedUnits = lot.intendedUnits ?? floorLotOrZero(ring.usd / lot.entryPrice);
-      if (intendedUnits < def.lotStep - 1e-12) continue;
+      if (intendedUnits < def.lotStep - 1e-12) {
+        excluded.noIntendedUnits += 1;
+        continue;
+      }
       const remainingFraction = lot.remainingUnits / intendedUnits;
-      if (remainingFraction > fraction + 1e-10) continue;
+      if (remainingFraction > fraction + 1e-10) {
+        excluded.aboveMaximumFraction += 1;
+        continue;
+      }
       candidates.push(Object.freeze({ lotId: lot.id, ringTag: ring.tag, virtualSide: lot.side, positionCode: lot.positionCode, entryPrice: lot.entryPrice, remainingUnits: lot.remainingUnits, intendedUnits, remainingFraction, openedAt: lot.openedAt }));
     }
-    return Object.freeze(candidates);
+    return Object.freeze({ candidates: Object.freeze(candidates), excluded: Object.freeze(excluded) });
+  }
+  function dustCleanupCandidates(state, options) {
+    return dustCleanupScan(state, options).candidates;
   }
   function applyConfirmedEntry(state, intent, fill) {
     if (intent?.type !== "ENTRY") throw new TypeError("intent must be ENTRY"); const next = mutable(state); if (intent.stateVersion !== next.version) throw new Error("entry intent state version is stale"); const ring = next.rings.find((candidate) => candidate.tag === intent.ringTag); if (!ring || !ring.armed || ring.lots.length >= ring.capacity || !entryGateAllows(normalizeState(next), ring)) throw new Error("entry ring is unavailable"); const confirmed = validatedFill(fill, intent.quantity); ring.lots.push({ id: intent.lotId, side: ring.side, ringTag: ring.tag, entryPrice: confirmed.fillPrice, originalUnits: confirmed.filledQuantity, intendedUnits: intent.quantity, remainingUnits: confirmed.filledQuantity, done: 0, normalExitTranches: 0, openedAt: confirmed.filledAt, positionCode: confirmed.positionCode ?? null }); ring.armed = false; next.lastFillAt = confirmed.filledAt; next.lastFillSide = intent.side; next.lastFillPrice = confirmed.fillPrice; return increment(next);
@@ -348,5 +372,5 @@ export function createRingGrid(config) {
     throw new Error("no virtual or adopted lot carries that positionCode");
   }
 
-  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, adoptedExposureUsd, observeRearm, nextMovingAverageExitAction, nextExitAction, applySkippedExit, entryCandidates, dustCleanupCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten, adoptPosition, findLotByPositionCode, reduceLotByPositionCode });
+  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, adoptedExposureUsd, observeRearm, nextMovingAverageExitAction, nextExitAction, applySkippedExit, entryCandidates, dustCleanupScan, dustCleanupCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten, adoptPosition, findLotByPositionCode, reduceLotByPositionCode });
 }
