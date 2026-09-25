@@ -808,6 +808,58 @@ export function createRingExecutionGuard({
     return aggregate;
   }
 
+  // Ring lots opened before positionCode was persisted cannot be paired to a
+  // broker ticket by quantity, side, or entry price: any of those could also
+  // describe a manual ticket. Recover only through the bot's own immutable
+  // ENTRY ledger row, then require that history's position code to identify a
+  // currently-open ticket with exactly the legacy lot's remaining quantity.
+  async function resolveLegacyDustTicket({ lotId, virtualSide, quantity }) {
+    const legacyLotId = text("legacy dust lotId", lotId, 64);
+    const qty = positive("legacy dust quantity", quantity);
+    if (virtualSide !== "BUY" && virtualSide !== "SELL") throw new TypeError("legacy dust virtualSide is invalid");
+    if (typeof persistence.getUniqueFilledEntryOrder !== "function") {
+      return Object.freeze({ status: "LEGACY_ENTRY_NOT_RECORDED", reason: "The original bot entry is unavailable" });
+    }
+    let entry;
+    try {
+      entry = await persistence.getUniqueFilledEntryOrder({ strategyId: STRATEGY_ID, instrument: INSTRUMENT, lotId: legacyLotId });
+    } catch {
+      return Object.freeze({ status: "LEGACY_ENTRY_AMBIGUOUS", reason: "The original bot entry is not unique" });
+    }
+    if (!entry || entry.side !== virtualSide) {
+      return Object.freeze({ status: "LEGACY_ENTRY_NOT_RECORDED", reason: "No matching bot entry was recorded for this lot" });
+    }
+    let historical;
+    try {
+      historical = await client.reconcileQuantityOrder({ orderCode: entry.orderCode, requestedQuantity: entry.requestedQuantity });
+    } catch {
+      return Object.freeze({ status: "LEGACY_ENTRY_HISTORY_UNAVAILABLE", reason: "DXtrade could not verify the original bot entry" });
+    }
+    if (historical.status !== "FILLED" || typeof historical.positionCode !== "string" || historical.positionCode.trim() === "") {
+      return Object.freeze({ status: "LEGACY_ENTRY_TICKET_UNAVAILABLE", reason: "DXtrade history does not provide an exact entry ticket" });
+    }
+    const wanted = historical.positionCode.trim();
+    const read = await readAllSolPositions();
+    if (!read.ok) {
+      await addEvent("ERROR", "RING_DUST_CLEANUP_ACCOUNT_DATA_UNAVAILABLE", { lotId: legacyLotId, reason: read.reason });
+      return Object.freeze({ status: "ACCOUNT_DATA_UNAVAILABLE", reason: read.reason });
+    }
+    const leg = read.legs.find((candidate) => candidate.positionCode === wanted);
+    const expectedDirection = virtualSide === "BUY" ? "LONG" : "SHORT";
+    if (!leg || leg.direction !== expectedDirection || Math.abs(leg.quantity - qty) > 1e-8) {
+      await addEvent("WARN", "RING_DUST_CLEANUP_LEGACY_TICKET_MISMATCH", {
+        lotId: legacyLotId,
+        positionCode: wanted,
+        expectedDirection,
+        expectedQuantity: qty,
+        brokerDirection: leg?.direction ?? null,
+        brokerQuantity: leg?.quantity ?? null
+      });
+      return Object.freeze({ status: "LEGACY_TICKET_MISMATCH", reason: "The verified entry ticket no longer exactly matches the residual lot" });
+    }
+    return Object.freeze({ status: "LINKED", positionCode: wanted });
+  }
+
   // Closes exactly one bot-owned residual ticket. Unlike a protective cut this
   // never aggregates or allocates across positions: the caller gives the
   // positionCode recorded on the virtual ring lot and we refuse if DXtrade no
@@ -855,5 +907,5 @@ export function createRingExecutionGuard({
     return result;
   }
 
-  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, executeDustCleanup });
+  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, resolveLegacyDustTicket, executeDustCleanup });
 }
