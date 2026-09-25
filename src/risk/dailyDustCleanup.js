@@ -105,6 +105,7 @@ export function createDailyDustCleanupCoordinator({
       const closed = [];
       const deferred = [];
       const failed = [];
+      const scan = [];
       for (const book of books) {
         const result = await book.runDustCleanup({
           dayKey,
@@ -116,6 +117,16 @@ export function createDailyDustCleanupCoordinator({
             await store.saveDailyDustCleanupState({ dayKey, autoLossUsd: usedLossUsd, completedAt: null });
           }
         });
+        scan.push(Object.freeze({
+          instrument: book.instrument,
+          candidateCount: Array.isArray(result.candidates) ? result.candidates.length : 0,
+          excluded: Object.freeze({
+            currentAccountDay: Number(result.excluded?.currentAccountDay ?? 0),
+            missingPositionCode: Number(result.excluded?.missingPositionCode ?? 0),
+            noIntendedUnits: Number(result.excluded?.noIntendedUnits ?? 0),
+            aboveMaximumFraction: Number(result.excluded?.aboveMaximumFraction ?? 0)
+          })
+        }));
         for (const fill of result.closed) {
           closed.push({ instrument: book.instrument, ...fill });
         }
@@ -123,21 +134,24 @@ export function createDailyDustCleanupCoordinator({
         failed.push(...result.failed.map((entry) => ({ instrument: book.instrument, ...entry })));
       }
       const state = await store.saveDailyDustCleanupState({ dayKey, autoLossUsd: usedLossUsd, completedAt: new Date(nowMs).toISOString() });
-      const payload = { dayKey, lossBudgetUsd, autoLossUsd: usedLossUsd, closed, deferred, failed, immediate };
+      const payload = { dayKey, lossBudgetUsd, autoLossUsd: usedLossUsd, scan, closed, deferred, failed, immediate };
       await addEvent(failed.length > 0 ? "WARN" : "INFO", "DAILY_DUST_CLEANUP_COMPLETED", payload);
-      if (closed.length > 0 || deferred.length > 0 || failed.length > 0) {
-        notifications?.enqueue?.({
-          kind: "DUST_CLEANUP_SUMMARY",
-          eventKey: `DUST-CLEANUP:${dayKey}`,
-          dayKey,
-          closedCount: closed.length,
-          deferredCount: deferred.length,
-          failedCount: failed.length,
-          autoLossUsd: usedLossUsd,
-          lossBudgetUsd
-        });
-      }
-      return Object.freeze({ action: "COMPLETED", dayKey, state, lossBudgetUsd, autoLossUsd: usedLossUsd, closed: Object.freeze(closed), deferred: Object.freeze(deferred), failed: Object.freeze(failed) });
+      notifications?.enqueue?.({
+        kind: "DUST_CLEANUP_SUMMARY",
+        eventKey: `DUST-CLEANUP:${dayKey}`,
+        dayKey,
+        candidateCount: scan.reduce((sum, entry) => sum + entry.candidateCount, 0),
+        excludedCurrentAccountDay: scan.reduce((sum, entry) => sum + entry.excluded.currentAccountDay, 0),
+        excludedMissingPositionCode: scan.reduce((sum, entry) => sum + entry.excluded.missingPositionCode, 0),
+        excludedNoIntendedUnits: scan.reduce((sum, entry) => sum + entry.excluded.noIntendedUnits, 0),
+        excludedAboveMaximumFraction: scan.reduce((sum, entry) => sum + entry.excluded.aboveMaximumFraction, 0),
+        closedCount: closed.length,
+        deferredCount: deferred.length,
+        failedCount: failed.length,
+        autoLossUsd: usedLossUsd,
+        lossBudgetUsd
+      });
+      return Object.freeze({ action: "COMPLETED", dayKey, state, lossBudgetUsd, autoLossUsd: usedLossUsd, scan: Object.freeze(scan), closed: Object.freeze(closed), deferred: Object.freeze(deferred), failed: Object.freeze(failed) });
     } finally {
       running = false;
     }
