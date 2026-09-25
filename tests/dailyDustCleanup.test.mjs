@@ -4,6 +4,7 @@ import { loadProfiledConfigFiles } from "../src/config/accountProfile.js";
 import { buildGridDefinition } from "../src/strategies/ringGridDefinition.js";
 import { createRingGrid } from "../src/strategies/ringGrid.js";
 import { createRingGridInstance } from "../src/runtime/ringGridInstance.js";
+import { formatLiveTelegramNotification } from "../src/notifications/liveTelegramNotifications.js";
 import {
   accountDayStartMs,
   createDailyDustCleanupCoordinator,
@@ -21,7 +22,7 @@ test("daily dust cleanup uses the 22:00 UTC account day and the shallowest cut t
   assert.equal(dustLossBudgetUsd([{ thresholdUsd: 1000 }, { thresholdUsd: 2000 }]), 20);
 });
 
-test("dust candidate selection excludes current-account-day, manual, and larger lots", () => {
+test("dust scan explains exclusions while selecting only exact old bot tickets", () => {
   const grid = createRingGrid(buildGridDefinition(raw.instruments.find((entry) => entry.instrument === "SOL/USD")));
   const cutoff = accountDayStartMs("2026-09-25");
   const state = structuredClone(grid.createInitialState());
@@ -38,6 +39,13 @@ test("dust candidate selection excludes current-account-day, manual, and larger 
   state.adopted.push({ id: "manual", adopted: true, side: "BUY", positionCode: "manual", entryPrice: 100, originalUnits: 1, remainingUnits: 1, done: 0, openedAt: "2026-09-24T21:00:00.000Z", ma: 100 });
   const candidates = grid.dustCleanupCandidates(grid.normalizeState(state), { openedBeforeMs: cutoff, maxRemainingFraction: 0.10 });
   assert.deepEqual(candidates.map((candidate) => candidate.positionCode), ["old-dust"]);
+  const scan = grid.dustCleanupScan(grid.normalizeState(state), { openedBeforeMs: cutoff, maxRemainingFraction: 0.10 });
+  assert.deepEqual(scan.excluded, {
+    currentAccountDay: 1,
+    missingPositionCode: 0,
+    noIntendedUnits: 0,
+    aboveMaximumFraction: 1
+  });
 });
 
 test("coordinator persists confirmed loss after every close and completes once", async () => {
@@ -67,6 +75,70 @@ test("coordinator persists confirmed loss after every close and completes once",
   assert.equal(saves.length, 2);
   assert.equal(saves.at(-1).completedAt, "2026-09-25T22:03:00.000Z");
   assert.equal((await coordinator.run()).action, "ALREADY_COMPLETED");
+});
+
+test("coordinator sends a completed no-op summary with exclusion counts", async () => {
+  let state = { dayKey: "2026-09-26", autoLossUsd: 0, completedAt: null };
+  const notifications = [];
+  const coordinator = createDailyDustCleanupCoordinator({
+    accountRisk: { cutTiers: [{ thresholdUsd: 100, fraction: 0.1 }] },
+    books: [{
+      instrument: "SOL/USD",
+      isExecutionEnabled: () => true,
+      isMarketReady: () => true,
+      async runDustCleanup() {
+        return {
+          candidates: [],
+          excluded: { currentAccountDay: 3, missingPositionCode: 2, noIntendedUnits: 0, aboveMaximumFraction: 1 },
+          closed: [], deferred: [], failed: []
+        };
+      }
+    }],
+    store: {
+      async getDailyDustCleanupState() { return state; },
+      async saveDailyDustCleanupState(next) { state = { ...next }; return state; }
+    },
+    notifications: { enqueue(event) { notifications.push(event); } },
+    now: () => Date.parse("2026-09-25T22:03:00.000Z")
+  });
+  const result = await coordinator.run();
+  assert.equal(result.action, "COMPLETED");
+  assert.deepEqual(notifications, [{
+    kind: "DUST_CLEANUP_SUMMARY",
+    eventKey: "DUST-CLEANUP:2026-09-26",
+    dayKey: "2026-09-26",
+    candidateCount: 0,
+    excludedCurrentAccountDay: 3,
+    excludedMissingPositionCode: 2,
+    excludedNoIntendedUnits: 0,
+    excludedAboveMaximumFraction: 1,
+    closedCount: 0,
+    deferredCount: 0,
+    failedCount: 0,
+    autoLossUsd: 0,
+    lossBudgetUsd: 2
+  }]);
+});
+
+test("dust cleanup notification makes a no-op and its exclusions visible", () => {
+  const rendered = formatLiveTelegramNotification({
+    kind: "DUST_CLEANUP_SUMMARY",
+    eventKey: "DUST-CLEANUP:2026-09-26",
+    dayKey: "2026-09-26",
+    candidateCount: 0,
+    excludedCurrentAccountDay: 3,
+    excludedMissingPositionCode: 2,
+    excludedNoIntendedUnits: 0,
+    excludedAboveMaximumFraction: 1,
+    closedCount: 0,
+    deferredCount: 0,
+    failedCount: 0,
+    autoLossUsd: 0,
+    lossBudgetUsd: 2
+  });
+  assert.match(rendered.message, /Eligible bot-owned residual tickets: 0/);
+  assert.match(rendered.message, /3 opened this account day/);
+  assert.match(rendered.message, /2 without an exact broker ticket ID/);
 });
 
 test("runtime releases a dust ring only after an exact confirmed broker close", async () => {

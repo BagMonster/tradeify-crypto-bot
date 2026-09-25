@@ -98,7 +98,13 @@ export function createRingGridInstance({
     const markBudget = Number(remainingLossBudgetUsd);
     if (!Number.isFinite(markBudget) || markBudget < 0) throw new TypeError("remainingLossBudgetUsd is invalid");
     let state = await load();
-    const candidates = grid.dustCleanupCandidates(state, { openedBeforeMs, maxRemainingFraction });
+    const scan = grid.dustCleanupScan
+      ? grid.dustCleanupScan(state, { openedBeforeMs, maxRemainingFraction })
+      : Object.freeze({
+          candidates: grid.dustCleanupCandidates(state, { openedBeforeMs, maxRemainingFraction }),
+          excluded: Object.freeze({ currentAccountDay: 0, missingPositionCode: 0, noIntendedUnits: 0, aboveMaximumFraction: 0 })
+        });
+    const candidates = scan.candidates;
     const closed = [];
     const deferred = [];
     const failed = [];
@@ -142,7 +148,13 @@ export function createRingGridInstance({
       closed.push(close);
     }
     currentState = state;
-    return Object.freeze({ closed: Object.freeze(closed), deferred: Object.freeze(deferred), failed: Object.freeze(failed) });
+    return Object.freeze({
+      candidates: Object.freeze(candidates),
+      excluded: scan.excluded,
+      closed: Object.freeze(closed),
+      deferred: Object.freeze(deferred),
+      failed: Object.freeze(failed)
+    });
   }
 
   function exitsPaused() {
