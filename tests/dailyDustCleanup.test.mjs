@@ -109,7 +109,7 @@ test("coordinator sends a completed no-op summary with exclusion counts", async 
   assert.equal(result.action, "COMPLETED");
   assert.deepEqual(notifications, [{
     kind: "DUST_CLEANUP_SUMMARY",
-    eventKey: "DUST-CLEANUP:2026-09-26",
+    eventKey: "DUST-CLEANUP:2026-09-26:20260925220300000",
     dayKey: "2026-09-26",
     candidateCount: 0,
     excludedCurrentAccountDay: 3,
@@ -120,14 +120,15 @@ test("coordinator sends a completed no-op summary with exclusion counts", async 
     deferredCount: 0,
     failedCount: 0,
     autoLossUsd: 0,
-    lossBudgetUsd: 2
+    lossBudgetUsd: 2,
+    closed: []
   }]);
 });
 
 test("dust cleanup notification makes a no-op and its exclusions visible", () => {
   const rendered = formatLiveTelegramNotification({
     kind: "DUST_CLEANUP_SUMMARY",
-    eventKey: "DUST-CLEANUP:2026-09-26",
+    eventKey: "DUST-CLEANUP:2026-09-26:20260925T220300000Z",
     dayKey: "2026-09-26",
     candidateCount: 0,
     excludedCurrentAccountDay: 3,
@@ -143,6 +144,31 @@ test("dust cleanup notification makes a no-op and its exclusions visible", () =>
   assert.match(rendered.message, /Eligible bot-owned residual tickets: 0/);
   assert.match(rendered.message, /3 opened this account day/);
   assert.match(rendered.message, /2 without an exact broker ticket ID/);
+});
+
+test("dust cleanup notification lists each confirmed ring close", () => {
+  const rendered = formatLiveTelegramNotification({
+    kind: "DUST_CLEANUP_SUMMARY",
+    eventKey: "DUST-CLEANUP:2026-09-25:20260925T041500000Z",
+    dayKey: "2026-09-25",
+    candidateCount: 2,
+    excludedCurrentAccountDay: 0,
+    excludedMissingPositionCode: 0,
+    excludedNoIntendedUnits: 0,
+    excludedAboveMaximumFraction: 0,
+    closedCount: 2,
+    deferredCount: 0,
+    failedCount: 0,
+    autoLossUsd: 0.73,
+    lossBudgetUsd: 2,
+    closed: [
+      { instrument: "SOL/USD", ringTag: "SELL6", filledQuantity: 0.04, realizedPnlUsd: -0.12 },
+      { instrument: "INJ/USD", ringTag: "SELL3", filledQuantity: 0.07, realizedPnlUsd: 0.03 }
+    ]
+  });
+  assert.match(rendered.message, /Confirmed closes:/);
+  assert.match(rendered.message, /SOL\/USD SELL6 · 0.04 SOL · −\$0\.12/);
+  assert.match(rendered.message, /INJ\/USD SELL3 · 0.07 INJ · \+\$0\.03/);
 });
 
 test("runtime releases a dust ring only after an exact confirmed broker close", async () => {

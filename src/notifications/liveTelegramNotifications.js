@@ -677,6 +677,20 @@ function formatEvent(event) {
     if (excludedNoIntendedUnits > 0) excluded.push(`${excludedNoIntendedUnits} without a usable original-size record`);
     if (excludedAboveMaximumFraction > 0) excluded.push(`${excludedAboveMaximumFraction} above the 10% size limit`);
     if (excluded.length > 0) lines.push(`Excluded: ${excluded.join("; ")}.`);
+    if (Array.isArray(event.closed) && event.closed.length > 0) {
+      const details = event.closed.slice(0, 20).map((close) => {
+        try {
+          const closeInstrument = requiredInstrument(close?.instrument);
+          const closeRing = ringTag(close?.ringTag);
+          const closeQuantity = quantity(positive("dust cleanup filledQuantity", close?.filledQuantity), closeInstrument);
+          const closePnl = signedMoney(close?.realizedPnlUsd);
+          return `• ${closeInstrument} ${closeRing} · ${closeQuantity} · ${closePnl}`;
+        } catch {
+          return "• One confirmed ticket detail was unavailable; see Railway logs.";
+        }
+      });
+      lines.push("Confirmed closes:", ...details);
+    }
     if (deferredCount > 0) lines.push(`Review required: ${deferredCount} losing residual ticket${deferredCount === 1 ? "" : "s"} exceeded the remaining loss allowance; no order was sent.`);
     if (failedCount > 0) lines.push(`Not closed: ${failedCount} ticket${failedCount === 1 ? "" : "s"} changed or could not be confirmed. Check /status and Railway logs.`);
     lines.push("New-account-day and manual/adopted positions were excluded. Released rings wait for a fresh later price crossing before re-entry.");
