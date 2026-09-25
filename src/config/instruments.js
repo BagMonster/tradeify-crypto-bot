@@ -127,7 +127,12 @@ function validateAccountRisk(input) {
   const sessionHarvestFreshDataGraceMs = risk.sessionHarvestFreshDataGraceMs == null
     ? 300_000
     : integer("accountRisk.sessionHarvestFreshDataGraceMs", risk.sessionHarvestFreshDataGraceMs, 1_000);
-  return Object.freeze({ entryBrakeUsd, entryBrakeScope: risk.entryBrakeScope, partialCutUsd, partialCutFraction, partialCutAllocation: risk.partialCutAllocation, fullFlattenUsd, flattenHoldsUntilRollover: true, dailyLossLimitUsd, rolloverHourUtc, sessionHarvestEnabled, sessionHarvestUsd, sessionHarvestFreshDataGraceMs });
+  const dustInput = risk.dustCleanup == null ? {} : object("accountRisk.dustCleanup", risk.dustCleanup);
+  const maxRemainingFraction = dustInput.maxRemainingFraction == null ? 0.10 : positive("accountRisk.dustCleanup.maxRemainingFraction", dustInput.maxRemainingFraction);
+  const lossBudgetFraction = dustInput.lossBudgetFraction == null ? 0.02 : positive("accountRisk.dustCleanup.lossBudgetFraction", dustInput.lossBudgetFraction);
+  const minuteUtc = dustInput.minuteUtc == null ? 3 : integer("accountRisk.dustCleanup.minuteUtc", dustInput.minuteUtc, 0);
+  if (maxRemainingFraction > 1 || lossBudgetFraction >= 1 || minuteUtc > 59) throw new Error("accountRisk.dustCleanup is invalid");
+  return Object.freeze({ entryBrakeUsd, entryBrakeScope: risk.entryBrakeScope, partialCutUsd, partialCutFraction, partialCutAllocation: risk.partialCutAllocation, fullFlattenUsd, flattenHoldsUntilRollover: true, dailyLossLimitUsd, rolloverHourUtc, sessionHarvestEnabled, sessionHarvestUsd, sessionHarvestFreshDataGraceMs, dustCleanup: Object.freeze({ maxRemainingFraction, lossBudgetFraction, minuteUtc }) });
 }
 
 export function loadInstrumentConfigObject(input) {
