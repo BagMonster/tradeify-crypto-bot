@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS solana_execution_orders (
 const EXECUTION_ACTION_CONSTRAINT = `
 ALTER TABLE solana_execution_orders DROP CONSTRAINT IF EXISTS solana_execution_orders_action_type_check;
 ALTER TABLE solana_execution_orders ADD CONSTRAINT solana_execution_orders_action_type_check
-CHECK (action_type IN ('ENTRY','EXIT','PROTECTIVE_FLAT','PROTECTIVE_CUT','HEARTBEAT_OPEN','HEARTBEAT_CLOSE','CANARY_OPEN','CANARY_CLOSE'))
+CHECK (action_type IN ('ENTRY','EXIT','PROTECTIVE_FLAT','PROTECTIVE_CUT','DUST_CLEANUP','HEARTBEAT_OPEN','HEARTBEAT_CLOSE','CANARY_OPEN','CANARY_CLOSE'))
 `;
 
 const TELEGRAM_NOTIFICATION_SCHEMA = `
@@ -192,13 +192,33 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     return normalizeOrder(result.rows[0]);
   }
 
+  // A legacy dust lot has no stored broker position code, but its immutable
+  // ring lot id is also recorded on the bot's original ENTRY order. Do not pick
+  // an arbitrary match: ambiguity is a safety failure, not an excuse to close
+  // a possibly manual ticket.
+  async function getUniqueFilledEntryOrder({ strategyId, instrument, lotId }) {
+    const strategy = text("strategyId", strategyId, 128);
+    const market = text("instrument", instrument, 64);
+    const lot = text("lotId", lotId, 64);
+    const result = await query(
+      `SELECT * FROM solana_execution_orders
+        WHERE strategy_id=$1 AND instrument=$2 AND lot_id=$3
+          AND action_type='ENTRY' AND status='FILLED'
+        ORDER BY created_at ASC`,
+      [strategy, market, lot]
+    );
+    if (result.rowCount === 0) return null;
+    if (result.rowCount !== 1) throw new Error("legacy dust entry lookup is ambiguous");
+    return normalizeOrder(result.rows[0]);
+  }
+
   async function claimOrder(input) {
     const code = text("orderCode", input.orderCode, 64);
     const strategyId = text("strategyId", input.strategyId, 128);
     const instrument = text("instrument", input.instrument, 64);
     const stateVersion = version(input.stateVersion);
     const actionType = text("actionType", input.actionType, 32);
-    if (!["ENTRY","EXIT","PROTECTIVE_FLAT","PROTECTIVE_CUT","HEARTBEAT_OPEN","HEARTBEAT_CLOSE","CANARY_OPEN","CANARY_CLOSE"].includes(actionType)) {
+    if (!["ENTRY","EXIT","PROTECTIVE_FLAT","PROTECTIVE_CUT","DUST_CLEANUP","HEARTBEAT_OPEN","HEARTBEAT_CLOSE","CANARY_OPEN","CANARY_CLOSE"].includes(actionType)) {
       throw new TypeError("actionType is invalid");
     }
     const side = text("side", input.side, 8).toUpperCase();
@@ -434,6 +454,7 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     state,
     createStateStore,
     getOrder,
+    getUniqueFilledEntryOrder,
     claimOrder,
     markSubmitted,
     markStatus,
