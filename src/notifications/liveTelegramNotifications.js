@@ -654,6 +654,11 @@ function formatEvent(event) {
 
   if (kind === "DUST_CLEANUP_SUMMARY") {
     const dayKey = safeText("dust cleanup dayKey", event.dayKey, { max: 10, pattern: /^\d{4}-\d{2}-\d{2}$/ });
+    const candidateCount = Math.max(0, Math.trunc(nonNegative("dust cleanup candidateCount", event.candidateCount ?? 0)));
+    const excludedCurrentAccountDay = Math.max(0, Math.trunc(nonNegative("dust cleanup current-account-day exclusions", event.excludedCurrentAccountDay ?? 0)));
+    const excludedMissingPositionCode = Math.max(0, Math.trunc(nonNegative("dust cleanup missing-position-code exclusions", event.excludedMissingPositionCode ?? 0)));
+    const excludedNoIntendedUnits = Math.max(0, Math.trunc(nonNegative("dust cleanup no-intent exclusions", event.excludedNoIntendedUnits ?? 0)));
+    const excludedAboveMaximumFraction = Math.max(0, Math.trunc(nonNegative("dust cleanup above-fraction exclusions", event.excludedAboveMaximumFraction ?? 0)));
     const closedCount = Math.max(0, Math.trunc(nonNegative("dust cleanup closedCount", event.closedCount)));
     const deferredCount = Math.max(0, Math.trunc(nonNegative("dust cleanup deferredCount", event.deferredCount)));
     const failedCount = Math.max(0, Math.trunc(nonNegative("dust cleanup failedCount", event.failedCount)));
@@ -662,9 +667,16 @@ function formatEvent(event) {
     const lines = [
       "🧹 DAILY RING DUST CLEANUP",
       `Account day: ${dayKey}`,
+      `Eligible bot-owned residual tickets: ${candidateCount}`,
       `Closed automatically: ${closedCount} bot-owned residual ticket${closedCount === 1 ? "" : "s"}`,
       `Auto-close realised loss today: ${money(autoLossUsd)} of ${money(lossBudgetUsd)} limit`
     ];
+    const excluded = [];
+    if (excludedCurrentAccountDay > 0) excluded.push(`${excludedCurrentAccountDay} opened this account day`);
+    if (excludedMissingPositionCode > 0) excluded.push(`${excludedMissingPositionCode} without an exact broker ticket ID`);
+    if (excludedNoIntendedUnits > 0) excluded.push(`${excludedNoIntendedUnits} without a usable original-size record`);
+    if (excludedAboveMaximumFraction > 0) excluded.push(`${excludedAboveMaximumFraction} above the 10% size limit`);
+    if (excluded.length > 0) lines.push(`Excluded: ${excluded.join("; ")}.`);
     if (deferredCount > 0) lines.push(`Review required: ${deferredCount} losing residual ticket${deferredCount === 1 ? "" : "s"} exceeded the remaining loss allowance; no order was sent.`);
     if (failedCount > 0) lines.push(`Not closed: ${failedCount} ticket${failedCount === 1 ? "" : "s"} changed or could not be confirmed. Check /status and Railway logs.`);
     lines.push("New-account-day and manual/adopted positions were excluded. Released rings wait for a fresh later price crossing before re-entry.");
