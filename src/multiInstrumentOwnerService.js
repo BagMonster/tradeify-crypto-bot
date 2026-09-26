@@ -1,5 +1,5 @@
 import { createSolanaOwnerService } from "./solanaOwnerService.js";
-import { createRuntimeHaltRerunHandlers } from "./state/runtimeHaltRerun.js";
+import { createRuntimeHaltRerunHandlers, virtualInventoryRecoveryPlan } from "./state/runtimeHaltRerun.js";
 import { accountDayKey } from "./risk/dailyRiskLadder.js";
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 
@@ -77,7 +77,19 @@ export function createMultiInstrumentOwnerService({
         rows.push(Object.freeze({ instrument: book.instrument, ok: false, match: false, virtualNet: null, brokerNet: null, openLots: 0, error: "inspectForRerun is not available" }));
         continue;
       }
-      rows.push(await book.service.inspectForRerun());
+      try {
+        rows.push(await book.service.inspectForRerun());
+      } catch (error) {
+        rows.push(Object.freeze({
+          instrument: book.instrument,
+          ok: false,
+          match: false,
+          virtualNet: null,
+          brokerNet: null,
+          openLots: 0,
+          error: error?.message ?? "book inspection failed"
+        }));
+      }
     }
     return rows;
   }
@@ -240,8 +252,9 @@ export function createMultiInstrumentOwnerService({
     inspectBooks,
 
     async statusText(arg) {
-      const per = await fanOut("statusText", arg);
-      return `${accountSummaryLines().join("\n")}\n\n${per}`;
+      const [per, rows] = await Promise.all([fanOut("statusText", arg), inspectBooks()]);
+      const recovery = virtualInventoryRecoveryPlan(rows);
+      return `${accountSummaryLines().join("\n")}${recovery ? `\n\n${recovery}` : ""}\n\n${per}`;
     },
     async healthText(arg) {
       // The execution probe goes FIRST and on its own line. On 2026-09-19
