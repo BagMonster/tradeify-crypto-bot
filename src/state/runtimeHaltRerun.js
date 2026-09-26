@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 
 export const RUNTIME_HALT_REASON_TAIL = "production runtime error; owner review required";
 export const RUNTIME_HALT_REASON_MARKER = "production runtime error";
+const NET_TOLERANCE = 1e-8;
 
 export function isRuntimeErrorHalt(reason) {
   if (typeof reason !== "string") return false;
@@ -38,6 +39,57 @@ export function summarizeBookRows(rows) {
     const mark = row.match === true ? "MATCH" : "MISMATCH";
     return `  ${row.instrument}: virtual ${formatNet(row.virtualNet)}  broker ${formatNet(row.brokerNet)}  lots ${row.openLots}  ${mark}`;
   }).join("\n");
+}
+
+function instrumentCode(instrument) {
+  return typeof instrument === "string" && instrument.includes("/")
+    ? instrument.split("/")[0]
+    : "<INSTRUMENT>";
+}
+
+function isFlatBrokerWithVirtualInventory(row) {
+  if (row?.ok !== true || row?.match === true) return false;
+  const virtualNet = Number(row?.virtualNet);
+  const brokerNet = Number(row?.brokerNet);
+  const openLots = Number(row?.openLots);
+  return Number.isFinite(brokerNet) && Math.abs(brokerNet) <= NET_TOLERANCE &&
+    ((Number.isFinite(virtualNet) && Math.abs(virtualNet) > NET_TOLERANCE) ||
+      (Number.isInteger(openLots) && openLots > 0));
+}
+
+/**
+ * Mismatches that have an exact, safe owner recovery: the broker is flat but
+ * the bot still has virtual inventory. `/reconcile <instrument>` intentionally
+ * clears only that virtual inventory after a fresh flat-broker check; it never
+ * places a DXtrade order.
+ */
+export function flatBrokerVirtualInventoryRows(rows = []) {
+  return rows.filter(isFlatBrokerWithVirtualInventory);
+}
+
+export function virtualInventoryRecoveryPlan(rows = []) {
+  const recoverable = flatBrokerVirtualInventoryRows(rows);
+  if (recoverable.length === 0) return "";
+
+  const lines = [
+    "VIRTUAL INVENTORY RECONCILIATION REQUIRED",
+    ""
+  ];
+  for (const row of recoverable) {
+    const code = instrumentCode(row.instrument);
+    lines.push(
+      `${row.instrument}: DXtrade is flat, but ${row.openLots} virtual lot${row.openLots === 1 ? "" : "s"} remain (virtual ${formatNet(row.virtualNet)}).`,
+      `1. Send /reconcile ${code}`,
+      `2. Send /confirmreconcile CODE ${code} using the returned six-digit code.`,
+      "   This clears only the stale virtual lots and rearms their rings; it places no DXtrade order.",
+      ""
+    );
+  }
+  lines.push(
+    "After every listed book shows virtual 0.00, broker 0.00, and 0 lots, send /rerun again.",
+    "If /rerun returns a code, confirm it with /confirmrerun CODE."
+  );
+  return lines.join("\n");
 }
 
 export function createRuntimeHaltRerunHandlers({
@@ -78,13 +130,14 @@ export function createRuntimeHaltRerunHandlers({
   }
 
   function booksDisagreeMessage(rows) {
+    const recovery = virtualInventoryRecoveryPlan(rows);
     return [
       "RE-RUN REFUSED — A BOOK DOES NOT MATCH",
       "",
       summarizeBookRows(rows),
       "",
       "Re-run keeps every virtual lot. It does not invent a fill and does not flatten DXtrade.",
-      "Fix the mismatched book first."
+      recovery || "Fix the mismatched book first."
     ].join("\n");
   }
 

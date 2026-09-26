@@ -97,6 +97,22 @@ test("refuses when a book disagrees", async () => {
   assert.match(result.message, /DOES NOT MATCH/);
 });
 
+test("gives the exact reconcile then rerun path for a flat broker with stale virtual lots", async () => {
+  const { handlers } = makeHandlers({
+    books: [
+      { instrument: "SOL/USD", ok: true, match: true, virtualNet: -1.54, brokerNet: -1.54, openLots: 2 },
+      { instrument: "INJ/USD", ok: true, match: false, virtualNet: -0.14, brokerNet: 0, openLots: 2 }
+    ]
+  });
+  const result = await handlers.requestRerun();
+  assert.equal(result.code, null);
+  assert.match(result.message, /VIRTUAL INVENTORY RECONCILIATION REQUIRED/);
+  assert.match(result.message, /INJ\/USD: DXtrade is flat, but 2 virtual lots remain/);
+  assert.match(result.message, /1\. Send \/reconcile INJ/);
+  assert.match(result.message, /2\. Send \/confirmreconcile CODE INJ/);
+  assert.match(result.message, /send \/rerun again/);
+});
+
 test("issues a code when every book matches a runtime halt", async () => {
   const { handlers, events } = makeHandlers();
   const result = await handlers.requestRerun();
