@@ -88,6 +88,51 @@ test("DOGE status does not inherit SOL labels or the 20-ring SOL notebook", () =
   assert.doesNotMatch(text, /Virtual net SOL/);
 });
 
+test("status gives the exact virtual reconcile path when DXtrade is flat", () => {
+  const { definition, grid, state } = book("INJ/USD");
+  const stale = structuredClone(state);
+  const ring = stale.rings.find((candidate) => candidate.tag === "SELL1");
+  ring.lots.push({
+    id: "SELL1-V1",
+    side: "SELL",
+    ringTag: "SELL1",
+    entryPrice: 7.5,
+    originalUnits: 0.14,
+    intendedUnits: 1.4,
+    remainingUnits: 0.14,
+    done: 0,
+    normalExitTranches: 0,
+    openedAt: "2026-09-26T00:00:00.000Z",
+    positionCode: "123"
+  });
+  ring.armed = false;
+  const text = formatInstrumentStatus({
+    definition,
+    grid,
+    gridState: stale,
+    maState: { ma: 4.6364, completedThrough: "2026-09-26T00:00:00.000Z" },
+    environment: { appMode: "live", autoExecute: true },
+    execution: { isEnabled: () => true },
+    botState: { operator_killed: false, safety_halt: true, halt_reason: "INJ/USD diverged from the DXtrade book; production runtime error; owner review required" },
+    accountMonitor: {
+      getSnapshot: () => ({
+        healthy: true,
+        fresh: true,
+        ageMs: 5,
+        snapshot: {
+          signedNetReadOk: true,
+          positionSource: "open-positions",
+          signedNetByInstrument: { "INJ/USD": { netUnits: 0, ticketCount: 0 } }
+        }
+      })
+    }
+  });
+  assert.match(text, /Recovery needed: DXtrade is flat but this book retains 1 virtual lot/);
+  assert.match(text, /1\. \/reconcile INJ/);
+  assert.match(text, /2\. \/confirmreconcile CODE INJ/);
+  assert.match(text, /3\. When this book shows virtual 0\.00, broker 0\.00, and 0 lots, send \/rerun again/);
+});
+
 test("health and levels name the instrument they describe", () => {
   const { definition, state } = book("INJ/USD");
   const health = formatInstrumentHealth({
