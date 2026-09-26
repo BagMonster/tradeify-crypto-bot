@@ -109,6 +109,7 @@ export function formatInstrumentStatus({
   const armed = gridState?.rings.filter((ring) => ring.armed).length ?? 0;
   const mark = Number(maState?.ma);
   const net = gridState && grid ? grid.expectedNetUnits(gridState) : 0;
+  const brokerNet = trustedSignedNetFor(accountMonitor?.getSnapshot?.(), instrument);
   const gross = gridState && grid && Number.isFinite(mark)
     ? grid.grossVirtualExposureUsd(gridState, mark)
     : 0;
@@ -149,7 +150,19 @@ export function formatInstrumentStatus({
   }
   if (botState?.safety_halt) {
     lines.push(`Safety halt: ${botState.halt_reason ?? "Manual review required"}`);
-    lines.push(`  → release with: ${haltReleaseHint(botState.halt_reason, instrument)}`);
+    const flatBrokerWithVirtualInventory = Number.isFinite(brokerNet) && Math.abs(brokerNet) <= 1e-8 &&
+      ((Number.isFinite(net) && Math.abs(net) > 1e-8) || openLots > 0);
+    if (flatBrokerWithVirtualInventory) {
+      const code = instrument.split("/")[0];
+      lines.push(
+        `Recovery needed: DXtrade is flat but this book retains ${openLots} virtual lot${openLots === 1 ? "" : "s"}.`,
+        `  → 1. /reconcile ${code}`,
+        `  → 2. /confirmreconcile CODE ${code}`,
+        "  → 3. When this book shows virtual 0.00, broker 0.00, and 0 lots, send /rerun again."
+      );
+    } else {
+      lines.push(`  → release with: ${haltReleaseHint(botState.halt_reason, instrument)}`);
+    }
   }
   lines.push("", ...brokerBookLines(accountMonitor, instrument));
   return lines.join("\n");
