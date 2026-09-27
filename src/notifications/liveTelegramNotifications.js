@@ -12,6 +12,7 @@ const KINDS = new Set([
   "HARVEST_PENDING",
   "HARVEST_CONFIRMED",
   "HARVEST_HALTED",
+  "HARVEST_DEFERRED",
   "HARVEST_FRESHNESS_GRACE",
   "HARVEST_RESET",
   "HALT_WARNING",
@@ -193,6 +194,24 @@ function formatEvent(event) {
       return { kind, eventKey, message: ["D-068 ROLLOVER HARVEST CONFIRMED", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Profit target: +${money(event.thresholdUsd)}`, "A proportional $33 profit portion was closed across the account; remaining inventory stays open.", "New touch-cross entries may run. Ordinary tranche exits are disabled until 22:00 UTC.", `Confirmed: ${timestamp(confirmedAt)}`].join("\n") };
     }
     return { kind, eventKey, message: ["D-064 HARVEST CONFIRMED", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Threshold: +${money(event.thresholdUsd)}`, "Every enabled broker book is flat.", "New touch-cross entries may run. Ordinary tranche exits are disabled until 22:00 UTC.", `Confirmed: ${timestamp(confirmedAt)}`].join("\n") };
+  }
+  if (kind === "HARVEST_DEFERRED") {
+    if (event.mode !== "ROLLOVER_PARTIAL") throw new TypeError("deferred harvest mode is invalid");
+    const thresholdUsd = positive("thresholdUsd", event.thresholdUsd);
+    const pending = Array.isArray(event.pending) ? event.pending : [];
+    const tickets = [...new Set(pending
+      .map((entry) => `${headingInstrument(entry?.instrument)} ${displayText(entry?.status, { max: 48, fallback: "UNCONFIRMED" })}`))]
+      .filter((entry) => !entry.startsWith("UNKNOWN"));
+    return {
+      kind,
+      eventKey,
+      message: [
+        "⚠️ D-068 ROLLOVER HARVEST DEFERRED",
+        `No partial close was confirmed for the +${money(thresholdUsd)} account-wide target.`,
+        tickets.length > 0 ? `Ticket check: ${tickets.join(", ")}.` : "Ticket confirmation was unavailable.",
+        "No positions were changed. Normal entries and exits remain available; the bot will reconsider every account ticket on a later evaluation."
+      ].join("\n")
+    };
   }
   if (kind === "HARVEST_HALTED") {
     if (event.mode === "ROLLOVER_PARTIAL") {

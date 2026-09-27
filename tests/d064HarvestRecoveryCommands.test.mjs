@@ -4,6 +4,7 @@ import { createMultiInstrumentOwnerService } from "../src/multiInstrumentOwnerSe
 
 const D064_READ_HALT = "D-064 harvest cannot verify fresh broker account data for SOL/USD, DOGE/USD";
 const D064_FLAT_HALT = "D-064 harvest could not confirm every book flat; owner review required";
+const D068_NO_FILL_HALT = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
 
 function databaseStub(haltReason = D064_READ_HALT) {
   const state = {
@@ -48,12 +49,12 @@ function serviceFor({ rows, database, supervisor }) {
   });
 }
 
-function supervisorStub(haltReason = D064_READ_HALT) {
+function supervisorStub(haltReason = D064_READ_HALT, harvest = {}) {
   const snapshot = {
     dayKey: "2026-09-09",
     dayPnlUsd: 0,
     exposureUsd: 0,
-    harvest: { status: "HALTED", haltReason },
+    harvest: { status: "HALTED", haltReason, ...harvest },
     perInstrument: []
   };
   let recovery = null;
@@ -133,6 +134,24 @@ test("D-064 flat-confirmation recovery passes the verified-flat mode only after 
   assert.match(request.code, /^\d{6}$/);
   await service.confirmHarvestRecovery(request.code);
   assert.equal(supervisor.recovery.recoveryKind, "VERIFIED_FLAT");
+});
+
+test("D-068 no-fill recovery is available only for a halted plan with no confirmed closes", async () => {
+  const database = databaseStub(D068_NO_FILL_HALT);
+  const supervisor = supervisorStub(D068_NO_FILL_HALT, {
+    mode: "ROLLOVER_PARTIAL",
+    plan: { allocations: [{ instrument: "SOL/USD", lotId: "ticket" }], completed: [] }
+  });
+  const rows = [
+    { instrument: "SOL/USD", ok: true, match: true, virtualNet: -7, brokerNet: -7, openLots: 3 },
+    { instrument: "DOGE/USD", ok: true, match: true, virtualNet: -2, brokerNet: -2, openLots: 1 }
+  ];
+  const service = serviceFor({ database, supervisor, rows });
+  const request = await service.requestHarvestRecovery();
+  assert.match(request.message, /D-068 NO-FILL RECOVERY/);
+  const message = await service.confirmHarvestRecovery(request.code);
+  assert.match(message, /recovery applied/);
+  assert.equal(supervisor.recovery.recoveryKind, "ROLLOVER_NO_FILL");
 });
 
 test("verified startup recovery clears only the matching, reconciled D-064 freshness halt", async () => {

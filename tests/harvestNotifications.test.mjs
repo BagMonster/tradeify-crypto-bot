@@ -17,6 +17,19 @@ test("D-064 harvest notifications are accepted and describe each operator state"
   assert.match(reset.message, /RESET/);
 });
 
+test("D-068 position-change deferral warns without describing a safety halt", () => {
+  const deferred = formatLiveTelegramNotification({
+    kind: "HARVEST_DEFERRED",
+    mode: "ROLLOVER_PARTIAL",
+    eventKey: "D068-DEFERRED:20260927",
+    thresholdUsd: 33,
+    pending: [{ instrument: "DOGE/USD", status: "POSITION_CHANGED" }]
+  });
+  assert.match(deferred.message, /D-068 ROLLOVER HARVEST DEFERRED/);
+  assert.match(deferred.message, /No positions were changed/);
+  assert.doesNotMatch(deferred.message, /SAFETY HALT/);
+});
+
 test("non-harvest halt warning identifies the correction and the owner deferral command", () => {
   const warning = formatLiveTelegramNotification({
     kind: "HALT_WARNING",

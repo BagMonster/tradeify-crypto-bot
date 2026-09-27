@@ -233,3 +233,77 @@ test("D-068 waits for startup market marks without creating a durable harvest ha
   assert.equal(supervisor.getSnapshot().harvest.status, "READY");
   assert.deepEqual(halts, []);
 });
+
+test("D-068 does not harvest when winners exceed $33 but the account-wide ticket P&L does not", async () => {
+  const closes = [];
+  const sol = book("SOL/USD");
+  sol.getRolloverHarvestCandidates = async () => [
+    { instrument: "SOL/USD", lotId: "winner", ringTag: null, positionCode: "DX-WINNER", virtualSide: "BUY", entryPrice: 100, markPrice: 110, remainingUnits: 5, lotStep: 0.01 },
+    { instrument: "SOL/USD", lotId: "loser", ringTag: null, positionCode: "DX-LOSER", virtualSide: "BUY", entryPrice: 100, markPrice: 90, remainingUnits: 2, lotStep: 0.01 }
+  ];
+  sol.executeRolloverHarvest = async () => { closes.push("unexpected"); return { closed: [], pending: [] }; };
+  const supervisor = createRiskSupervisor({
+    config: { ...config, sessionHarvestUsd: 33 },
+    instruments: [sol],
+    harvestStore: memoryHarvestStore(),
+    getCombinedDayPnlUsd: () => -3.65
+  });
+  const result = await supervisor.evaluate({ dayKey: "2026-09-27" });
+  assert.equal(result.action, "NONE");
+  assert.equal(supervisor.getSnapshot().harvest.status, "READY");
+  assert.deepEqual(closes, []);
+});
+
+test("D-068 defers an unsubmitted changed ticket with a warning and leaves normal trading available", async () => {
+  const events = [];
+  const notifications = [];
+  const halts = [];
+  const sol = book("SOL/USD");
+  sol.getRolloverHarvestCandidates = async () => [{
+    instrument: "SOL/USD", lotId: "ticket", ringTag: null, positionCode: "DX-TICKET", virtualSide: "BUY",
+    entryPrice: 100, markPrice: 110, remainingUnits: 4, lotStep: 0.01
+  }];
+  sol.executeRolloverHarvest = async () => ({ closed: [], pending: [{ instrument: "SOL/USD", lotId: "ticket", status: "POSITION_CHANGED" }] });
+  const supervisor = createRiskSupervisor({
+    config: { ...config, sessionHarvestUsd: 33 },
+    instruments: [sol],
+    harvestStore: memoryHarvestStore(),
+    getCombinedDayPnlUsd: () => 4,
+    setSafetyHalt: async (reason) => halts.push(reason),
+    addEvent: async (level, type, payload) => events.push({ level, type, payload }),
+    notifications: { enqueue: (event) => notifications.push(event) }
+  });
+  const result = await supervisor.evaluate({ dayKey: "2026-09-27" });
+  assert.equal(result.action, "HARVEST_DEFERRED");
+  assert.equal(supervisor.getSnapshot().harvest.status, "READY");
+  assert.deepEqual(halts, []);
+  assert.equal(events.some((event) => event.type === "D068_ROLLOVER_HARVEST_DEFERRED"), true);
+  assert.equal(notifications.at(-1).kind, "HARVEST_DEFERRED");
+  assert.equal(sol.calls.some(([kind, on]) => kind === "brake" && on === false), true);
+});
+
+test("D-068 no-fill recovery clears only the exact halted partial plan after book verification", async () => {
+  const store = memoryHarvestStore();
+  const reason = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
+  await store.save({
+    dayKey: "2026-09-27",
+    status: "HALTED",
+    mode: "ROLLOVER_PARTIAL",
+    plan: { allocations: [{ instrument: "SOL/USD", lotId: "ticket" }], completed: [] },
+    triggerPnlUsd: -3.65,
+    confirmedAt: null,
+    haltReason: reason
+  });
+  const sol = book("SOL/USD");
+  const supervisor = createRiskSupervisor({
+    config: { ...config, sessionHarvestUsd: 33 },
+    instruments: [sol],
+    harvestStore: store,
+    getCombinedDayPnlUsd: () => -3.65,
+    getSafetyHaltState: async () => ({ safety_halt: true, halt_reason: reason }),
+    clearSafetyHaltIfReason: async (value) => value === reason
+  });
+  const result = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_NO_FILL" });
+  assert.equal(result.action, "NONE");
+  assert.equal(supervisor.getSnapshot().harvest.status, "READY");
+});

@@ -185,6 +185,9 @@ export function haltReleaseHint(reason, instrument = null) {
   if (text.includes("harvest could not confirm every book flat")) {
     return "verify every book is fresh and flat (virtual 0, broker 0, lots 0), then /harvestrecover";
   }
+  if (text.includes("d-068 rollover harvest could not confirm its planned profit closes")) {
+    return "verify every book is fresh and matches DXtrade, then /harvestrecover";
+  }
   if (text.includes("foreign position") || text.includes("position metrics")) {
     return "clear the unexpected broker position in DXtrade, then /pausehalt if it is still counting down";
   }
