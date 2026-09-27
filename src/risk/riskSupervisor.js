@@ -19,6 +19,7 @@ import { buildProportionalRolloverHarvestPlan } from "./rolloverHarvest.js";
 const DEFAULT_HARVEST_FRESH_DATA_GRACE_MS = 5 * 60 * 1000;
 const DEFAULT_CUT_COOLDOWN_MS = 15 * 60 * 1000;
 const HARVEST_FLAT_CONFIRMATION_HALT = "D-064 harvest could not confirm every book flat; owner review required";
+const D068_ROLLOVER_CONFIRMATION_HALT = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
 
 // A protective flatten can be accepted by DXtrade before its follow-up read
 // sees the empty book.  These outcomes are therefore not proof that the
@@ -38,6 +39,12 @@ function isFreshDataHarvestHalt(reason) {
 
 function isFlatConfirmationHarvestHalt(reason) {
   return reason === HARVEST_FLAT_CONFIRMATION_HALT;
+}
+
+function isRolloverNoFillHarvestHalt(harvest) {
+  return harvest?.mode === "ROLLOVER_PARTIAL" &&
+    harvest?.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
+    (!Array.isArray(harvest?.plan?.completed) || harvest.plan.completed.length === 0);
 }
 
 const REQUIRED_CONFIG = Object.freeze([
@@ -501,7 +508,8 @@ export function createRiskSupervisor({
         dayKey: incomingDayKey,
         combinedDayPnlUsd: combined,
         threshold: sessionHarvestThreshold,
-        totalCarriedProfitUsd: plan.totalUnrealisedPnlUsd,
+        netCarriedPnlUsd: plan.totalUnrealisedPnlUsd,
+        totalProfitablePnlUsd: plan.totalProfitablePnlUsd,
         plannedProfitUsd: plan.plannedUsd,
         allocations: rolloverPlanEntries(plan)
       });
@@ -537,16 +545,40 @@ export function createRiskSupervisor({
     }
     const pendingResults = results.flatMap((item) => item.result.pending.map((entry) => ({ instrument: item.instrument, ...entry })));
     if (pendingResults.length > 0) {
-      const terminal = pendingResults.some((entry) => !HARVEST_RETRYABLE_FLATTEN_STATUSES.has(entry.status));
-      if (terminal) {
-        const halted = await haltHarvest({
-          incomingDayKey,
-          combinedDayPnlUsd: combined,
-          reason: "D-068 rollover harvest could not confirm its planned profit closes; owner review required",
-          details: { pending: pendingResults }
+      // D-068 is an optional proportional profit take, not a protective
+      // close.  Before any close is confirmed, a changed/missing/rejected
+      // ticket must leave the account untouched and return normal operation
+      // with an operator-visible warning.  A new account-wide snapshot will
+      // be considered on the next evaluation; no ticket is excluded.
+      if (completed.size === 0) {
+        const ready = await saveHarvest({
+          dayKey: incomingDayKey,
+          status: "READY",
+          mode: "FULL",
+          plan: null,
+          triggerPnlUsd: null,
+          confirmedAt: null,
+          haltReason: null
         });
-        return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: halted });
+        applyHarvestGates();
+        await addEvent("WARN", "D068_ROLLOVER_HARVEST_DEFERRED", {
+          dayKey: incomingDayKey,
+          combinedDayPnlUsd: combined,
+          threshold: sessionHarvestThreshold,
+          pending: pendingResults
+        });
+        notifications?.enqueue?.({
+          kind: "HARVEST_DEFERRED",
+          mode: "ROLLOVER_PARTIAL",
+          eventKey: `D068-DEFERRED:${incomingDayKey.replaceAll("-", "")}`,
+          thresholdUsd: sessionHarvestThreshold,
+          pending: pendingResults
+        });
+        return Object.freeze({ action: "HARVEST_DEFERRED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: ready });
       }
+      // Some closes have already been broker-confirmed.  Retain their durable
+      // plan and retry the remaining idempotent work without turning this
+      // optional harvest into a safety halt.
       return Object.freeze({ action: "HARVEST_PENDING", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: harvestState });
     }
     const confirmed = await saveHarvest({
@@ -564,7 +596,8 @@ export function createRiskSupervisor({
       dayKey: incomingDayKey,
       combinedDayPnlUsd: combined,
       threshold: sessionHarvestThreshold,
-      totalCarriedProfitUsd: plan.totalUnrealisedPnlUsd,
+      netCarriedPnlUsd: plan.totalUnrealisedPnlUsd,
+      totalProfitablePnlUsd: plan.totalProfitablePnlUsd,
       plannedProfitUsd: plan.plannedUsd,
       closes: results.flatMap((item) => item.result.closed)
     });
@@ -847,7 +880,7 @@ export function createRiskSupervisor({
     if (!sessionHarvestEnabled) return Object.freeze({ action: "HARVEST_DISABLED" });
     if (typeof incomingDayKey !== "string" || incomingDayKey === "") throw new TypeError("recoverHarvest requires a dayKey");
     if (booksVerified !== true) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED" });
-    if (recoveryKind !== "FRESH_DATA" && recoveryKind !== "VERIFIED_FLAT") {
+    if (recoveryKind !== "FRESH_DATA" && recoveryKind !== "VERIFIED_FLAT" && recoveryKind !== "ROLLOVER_NO_FILL") {
       return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED" });
     }
     if (incomingDayKey !== dayKey) rollover(incomingDayKey);
@@ -855,7 +888,8 @@ export function createRiskSupervisor({
     if (prior.status !== "HALTED") return Object.freeze({ action: "HARVEST_NOT_HALTED", harvest: prior });
     const freshDataRecovery = recoveryKind === "FRESH_DATA" && isFreshDataHarvestHalt(prior.haltReason);
     const verifiedFlatRecovery = recoveryKind === "VERIFIED_FLAT" && isFlatConfirmationHarvestHalt(prior.haltReason);
-    if (!freshDataRecovery && !verifiedFlatRecovery) {
+    const rolloverNoFillRecovery = recoveryKind === "ROLLOVER_NO_FILL" && isRolloverNoFillHarvestHalt(prior);
+    if (!freshDataRecovery && !verifiedFlatRecovery && !rolloverNoFillRecovery) {
       return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
     }
     const readings = readBooks();

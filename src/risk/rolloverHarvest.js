@@ -25,7 +25,11 @@ export function buildProportionalRolloverHarvestPlan({ thresholdUsd, candidates 
   const threshold = positive("rollover harvest threshold", thresholdUsd);
   if (!Array.isArray(candidates)) throw new TypeError("rollover harvest candidates are required");
 
-  const eligible = candidates.map((candidate) => {
+  // Eligibility is account-wide: losses remain in this collection so a group
+  // of winners cannot trigger a rollover harvest while the account as a whole
+  // is below the configured profit threshold.  Only the profitable subset is
+  // used later to distribute a harvest that has already qualified.
+  const positions = candidates.map((candidate) => {
     if (!candidate || typeof candidate !== "object") throw new TypeError("rollover harvest candidate is invalid");
     if (typeof candidate.instrument !== "string" || candidate.instrument.trim() === "") throw new TypeError("rollover harvest candidate instrument is invalid");
     if (typeof candidate.lotId !== "string" || candidate.lotId.trim() === "") throw new TypeError("rollover harvest candidate lotId is invalid");
@@ -49,15 +53,25 @@ export function buildProportionalRolloverHarvestPlan({ thresholdUsd, candidates 
       unrealisedPnlUsd,
       profitPerUnitUsd: unrealisedPnlUsd / remainingUnits
     });
-  }).filter((candidate) => candidate.unrealisedPnlUsd > 1e-8);
+  });
 
-  const totalUnrealisedPnlUsd = fixed8(eligible.reduce((sum, candidate) => sum + candidate.unrealisedPnlUsd, 0));
+  const eligible = positions.filter((candidate) => candidate.unrealisedPnlUsd > 1e-8);
+  const totalUnrealisedPnlUsd = fixed8(positions.reduce((sum, candidate) => sum + candidate.unrealisedPnlUsd, 0));
+  const totalProfitablePnlUsd = fixed8(eligible.reduce((sum, candidate) => sum + candidate.unrealisedPnlUsd, 0));
+
   if (totalUnrealisedPnlUsd + 1e-8 < threshold) {
-    return Object.freeze({ eligible: Object.freeze(eligible), totalUnrealisedPnlUsd, targetUsd: threshold, allocations: Object.freeze([]) });
+    return Object.freeze({
+      positions: Object.freeze(positions),
+      eligible: Object.freeze(eligible),
+      totalUnrealisedPnlUsd,
+      totalProfitablePnlUsd,
+      targetUsd: threshold,
+      allocations: Object.freeze([])
+    });
   }
 
   const allocations = eligible.map((candidate) => {
-    const targetProfitUsd = threshold * (candidate.unrealisedPnlUsd / totalUnrealisedPnlUsd);
+    const targetProfitUsd = threshold * (candidate.unrealisedPnlUsd / totalProfitablePnlUsd);
     const quantity = Math.min(candidate.remainingUnits, floorToStep(targetProfitUsd / candidate.profitPerUnitUsd, candidate.lotStep));
     return { ...candidate, targetProfitUsd, quantity, estimatedProfitUsd: fixed8(quantity * candidate.profitPerUnitUsd) };
   });
@@ -83,8 +97,10 @@ export function buildProportionalRolloverHarvestPlan({ thresholdUsd, candidates 
   }
 
   return Object.freeze({
+    positions: Object.freeze(positions),
     eligible: Object.freeze(eligible),
     totalUnrealisedPnlUsd,
+    totalProfitablePnlUsd,
     targetUsd: threshold,
     plannedUsd,
     allocations: Object.freeze(allocations

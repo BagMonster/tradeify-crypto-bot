@@ -5,13 +5,13 @@ import { createRingGrid } from "../src/strategies/ringGrid.js";
 import { buildGridDefinition } from "../src/strategies/ringGridDefinition.js";
 import { createRingGridInstance } from "../src/runtime/ringGridInstance.js";
 
-function candidate({ lotId, entryPrice, markPrice, units }) {
+function candidate({ lotId, entryPrice, markPrice, units, virtualSide = "BUY" }) {
   return {
     instrument: "SOL/USD",
     lotId,
     ringTag: "BUY1",
     positionCode: `DX-${lotId}`,
-    virtualSide: "BUY",
+    virtualSide,
     entryPrice,
     markPrice,
     remainingUnits: units,
@@ -44,6 +44,36 @@ test("rollover harvest includes a current-account-day ticket in the account-wide
   assert.equal(plan.totalUnrealisedPnlUsd, 40);
   assert.equal(plan.allocations.length, 1);
   assert.equal(plan.allocations[0].positionCode, "DX-new");
+});
+
+test("rollover harvest requires net profit across every ticket before allocating winners", () => {
+  const plan = buildProportionalRolloverHarvestPlan({
+    dayKey: "2026-09-25",
+    thresholdUsd: 33,
+    candidates: [
+      candidate({ lotId: "winner", entryPrice: 100, markPrice: 110, units: 5 }), // +$50
+      candidate({ lotId: "loser", entryPrice: 100, markPrice: 90, units: 2 })    // -$20
+    ]
+  });
+  assert.equal(plan.totalProfitablePnlUsd, 50);
+  assert.equal(plan.totalUnrealisedPnlUsd, 30);
+  assert.equal(plan.allocations.length, 0);
+});
+
+test("rollover harvest allocates only profitable tickets after every ticket clears the net threshold", () => {
+  const plan = buildProportionalRolloverHarvestPlan({
+    dayKey: "2026-09-25",
+    thresholdUsd: 33,
+    candidates: [
+      candidate({ lotId: "winner", entryPrice: 100, markPrice: 110, units: 6 }), // +$60
+      candidate({ lotId: "loser", entryPrice: 100, markPrice: 90, units: 2 })    // -$20
+    ]
+  });
+  assert.equal(plan.totalProfitablePnlUsd, 60);
+  assert.equal(plan.totalUnrealisedPnlUsd, 40);
+  assert.equal(plan.allocations.length, 1);
+  assert.equal(plan.allocations[0].lotId, "winner");
+  assert.ok(plan.plannedUsd <= 33 + 1e-8);
 });
 
 test("runtime closes both tracked and broker-only tickets from the account-wide plan", async () => {

@@ -5,6 +5,7 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 
 const SEPARATOR = "\u2014".repeat(28);
 const D064_FLAT_CONFIRMATION_HALT = "D-064 harvest could not confirm every book flat; owner review required";
+const D068_ROLLOVER_CONFIRMATION_HALT = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
 const FLAT_EPSILON = 1e-8;
 
 function normaliseInstrument(raw) {
@@ -111,6 +112,9 @@ export function createMultiInstrumentOwnerService({
     if (harvest.haltReason.startsWith("D-064 harvest cannot verify fresh broker account data for ") ||
       harvest.haltReason === "D-068 cannot read and price every configured account ticket; owner review required") return "FRESH_DATA";
     if (harvest.haltReason === D064_FLAT_CONFIRMATION_HALT) return "VERIFIED_FLAT";
+    if (harvest.mode === "ROLLOVER_PARTIAL" &&
+      harvest.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
+      (!Array.isArray(harvest.plan?.completed) || harvest.plan.completed.length === 0)) return "ROLLOVER_NO_FILL";
     return null;
   }
 
@@ -136,6 +140,8 @@ export function createMultiInstrumentOwnerService({
   function recoveryRowsFailureText(rows, recoveryKind, phase) {
     const heading = recoveryKind === "VERIFIED_FLAT"
       ? `D-064 RECOVERY ${phase} — BOOKS NOT CONFIRMED FLAT`
+      : recoveryKind === "ROLLOVER_NO_FILL"
+        ? `D-068 NO-FILL RECOVERY ${phase} — BOOKS NOT RECONCILED`
       : `D-064 RECOVERY ${phase} — BOOKS NOT RECONCILED`;
     const instruction = recoveryKind === "VERIFIED_FLAT"
       ? "Every book must have fresh data, virtual net 0, broker net 0, and 0 open virtual lots. Recovery will not alter virtual lots or place a DXtrade order."
@@ -370,8 +376,11 @@ export function createMultiInstrumentOwnerService({
       await database.addEvent("WARN", "D064_HARVEST_RECOVERY_REQUESTED", { source: "telegram", dayKey: snapshot.dayKey, haltReason: snapshot.harvest.haltReason, recoveryKind, books: rows });
       const purpose = recoveryKind === "VERIFIED_FLAT"
         ? "This confirms the already-completed harvest, retains its original trigger, reopens new entries, and keeps ordinary tranche exits paused until 22:00 UTC."
+        : recoveryKind === "ROLLOVER_NO_FILL"
+          ? "This clears only the pre-dispatch D-068 no-fill halt after every book is freshly reconciled. It returns the harvest gate to READY so normal trading can continue."
         : "This rechecks fresh account data and clears only the matching fresh-data halt.";
-      return { code, message: ["D-064 HARVEST RECOVERY", "", rowsText(rows), "", purpose, "It will not change virtual lots, place a DXtrade order, or lift an operator pause.", "", `To apply, send /confirmharvestrecover ${code} within 10 minutes.`].join("\n") };
+      const heading = recoveryKind === "ROLLOVER_NO_FILL" ? "D-068 NO-FILL RECOVERY" : "D-064 HARVEST RECOVERY";
+      return { code, message: [heading, "", rowsText(rows), "", purpose, "It will not change virtual lots, place a DXtrade order, or lift an operator pause.", "", `To apply, send /confirmharvestrecover ${code} within 10 minutes.`].join("\n") };
     },
     // This is deliberately narrower than the owner-command recovery above.  It
     // runs once during a deploy only to retire the known false D-064
