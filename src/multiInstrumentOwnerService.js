@@ -108,7 +108,8 @@ export function createMultiInstrumentOwnerService({
 
   function d064RecoveryKind(harvest) {
     if (harvest?.status !== "HALTED" || typeof harvest.haltReason !== "string") return null;
-    if (harvest.haltReason.startsWith("D-064 harvest cannot verify fresh broker account data for ")) return "FRESH_DATA";
+    if (harvest.haltReason.startsWith("D-064 harvest cannot verify fresh broker account data for ") ||
+      harvest.haltReason === "D-068 cannot read and price every configured account ticket; owner review required") return "FRESH_DATA";
     if (harvest.haltReason === D064_FLAT_CONFIRMATION_HALT) return "VERIFIED_FLAT";
     return null;
   }

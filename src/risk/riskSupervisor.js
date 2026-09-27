@@ -30,7 +30,10 @@ const HARVEST_RETRYABLE_FLATTEN_STATUSES = new Set([
 ]);
 
 function isFreshDataHarvestHalt(reason) {
-  return typeof reason === "string" && reason.startsWith("D-064 harvest cannot verify fresh broker account data for ");
+  return typeof reason === "string" && (
+    reason.startsWith("D-064 harvest cannot verify fresh broker account data for ") ||
+    reason === "D-068 cannot read and price every configured account ticket; owner review required"
+  );
 }
 
 function isFlatConfirmationHarvestHalt(reason) {
@@ -435,6 +438,11 @@ export function createRiskSupervisor({
       // this feature entirely; live configured books always provide it.
       if (typeof book.getRolloverHarvestCandidates !== "function") return null;
       const rows = await book.getRolloverHarvestCandidates({ dayKey: incomingDayKey });
+      // Binance has not necessarily emitted its first live tick when Railway
+      // starts. Do not omit that book or turn the normal warm-up into a
+      // durable halt: defer the all-account calculation until every mark is
+      // available, then retry on the next risk evaluation.
+      if (rows === null) return null;
       if (!Array.isArray(rows)) throw new Error(`${book.instrument} returned invalid rollover harvest candidates`);
       candidates.push(...rows);
     }
@@ -466,13 +474,14 @@ export function createRiskSupervisor({
         ? prior.plan
         : await buildRolloverPlan(incomingDayKey);
     } catch (error) {
-      const halted = await haltHarvest({
-        incomingDayKey,
-        combinedDayPnlUsd: combined,
-        reason: `D-068 cannot read and price every configured account ticket; owner review required`,
-        details: { error: error?.message ?? "rollover ticket read failed" }
+      // Candidate pricing/readiness is transient at startup and reconnect. It
+      // blocks only this optional partial-harvest calculation; it must not
+      // create a durable safety halt or exclude a ticket from a partial plan.
+      await addEvent("WARN", "D068_ROLLOVER_HARVEST_WAITING_FOR_TICKETS", {
+        dayKey: incomingDayKey,
+        error: error?.message ?? "rollover ticket read failed"
       });
-      return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, harvest: halted });
+      return null;
     }
     if (!plan) return null;
     const pending = prior.status === "PENDING"

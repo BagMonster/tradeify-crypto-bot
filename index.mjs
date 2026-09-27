@@ -430,7 +430,7 @@ const riskSupervisor = createRiskSupervisor({
     getRolloverHarvestCandidates: () => {
       const markPrice = Number(s.lastTrade?.price);
       if (!Number.isFinite(markPrice) || markPrice <= 0 || s.feedState.connected !== true || s.feedState.stale === true) {
-        throw new Error(`${s.cfg.instrument} does not have a fresh price for the account-wide rollover harvest`);
+        return null;
       }
       return s.runtime.getRolloverHarvestCandidates({ markPrice });
     },
