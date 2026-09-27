@@ -427,11 +427,12 @@ const riskSupervisor = createRiskSupervisor({
     setTrancheExitsPaused: (on) => s.runtime.setTrancheExitsPaused(on),
     executeProtectiveCut: (args) => s.runtime.executeProtectiveCut(args),
     executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args),
-    getRolloverHarvestCandidates: ({ dayKey }) => {
+    getRolloverHarvestCandidates: () => {
       const markPrice = Number(s.lastTrade?.price);
-      if (!Number.isFinite(markPrice) || markPrice <= 0 || s.feedState.connected !== true || s.feedState.stale === true) return [];
-      const openedBeforeMs = Date.parse(`${dayKey}T00:00:00.000Z`) - 2 * 60 * 60 * 1000;
-      return s.runtime.getRolloverHarvestCandidates({ openedBeforeMs, markPrice });
+      if (!Number.isFinite(markPrice) || markPrice <= 0 || s.feedState.connected !== true || s.feedState.stale === true) {
+        throw new Error(`${s.cfg.instrument} does not have a fresh price for the account-wide rollover harvest`);
+      }
+      return s.runtime.getRolloverHarvestCandidates({ markPrice });
     },
     executeRolloverHarvest: (args) => s.runtime.executeRolloverHarvest(args)
   })),

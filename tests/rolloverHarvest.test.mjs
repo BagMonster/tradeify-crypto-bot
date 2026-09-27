@@ -35,15 +35,18 @@ test("rollover harvest divides the $33 profit target proportionally without exce
   assert.ok(Math.abs(plan.allocations[0].estimatedProfitUsd / plan.allocations[1].estimatedProfitUsd - 2) < 0.03);
 });
 
-test("rollover harvest excludes a lot opened at the new account-day boundary", () => {
-  assert.throws(() => buildProportionalRolloverHarvestPlan({
+test("rollover harvest includes a current-account-day ticket in the account-wide pool", () => {
+  const plan = buildProportionalRolloverHarvestPlan({
     dayKey: "2026-09-25",
     thresholdUsd: 33,
     candidates: [{ ...candidate({ lotId: "new", entryPrice: 100, markPrice: 110, units: 4 }), openedAt: "2026-09-24T22:00:00.000Z" }]
-  }), /not pre-rollover inventory/);
+  });
+  assert.equal(plan.totalUnrealisedPnlUsd, 40);
+  assert.equal(plan.allocations.length, 1);
+  assert.equal(plan.allocations[0].positionCode, "DX-new");
 });
 
-test("runtime sends an exact-ticket partial close and leaves the remaining ring lot open", async () => {
+test("runtime closes both tracked and broker-only tickets from the account-wide plan", async () => {
   const raw = {
     instrument: "SOL/USD",
     marketSymbol: "SOLUSDT",
@@ -82,10 +85,15 @@ test("runtime sends an exact-ticket partial close and leaves the remaining ring 
   await instance.init();
   const result = await instance.executeRolloverHarvest({
     dayKey: "2026-09-25",
-    allocations: [{ instrument: "SOL/USD", lotId: "old-lot", positionCode: "DX-OLD", virtualSide: "BUY", remainingUnits: 4, quantity: 1.5 }]
+    allocations: [
+      { instrument: "SOL/USD", lotId: "old-lot", positionCode: "DX-OLD", virtualSide: "BUY", entryPrice: 100, remainingUnits: 4, quantity: 1.5 },
+      { instrument: "SOL/USD", lotId: "DX-MANUAL", positionCode: "DX-MANUAL", virtualSide: "BUY", entryPrice: 100, remainingUnits: 4, quantity: 1.5 }
+    ]
   });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.equal(calls[0].positionCode, "DX-OLD");
+  assert.equal(calls[1].positionCode, "DX-MANUAL");
   assert.equal(result.closed[0].realizedPnlUsd, 15);
+  assert.equal(result.closed[1].realizedPnlUsd, 15);
   assert.equal(state.rings.find((item) => item.tag === "BUY1").lots[0].remainingUnits, 2.5);
 });

@@ -206,8 +206,8 @@ function createD060Runtime({
     return instance.cleanupDust({ dayKey, openedBeforeMs, maxRemainingFraction, remainingLossBudgetUsd, markPrice, onConfirmedClose });
   }
 
-  async function getRolloverHarvestCandidates({ openedBeforeMs, markPrice }) {
-    return instance.getRolloverHarvestCandidates({ openedBeforeMs, markPrice });
+  async function getRolloverHarvestCandidates({ markPrice }) {
+    return instance.getRolloverHarvestCandidates({ markPrice });
   }
 
   async function executeRolloverHarvest({ dayKey, allocations, onConfirmedClose }) {

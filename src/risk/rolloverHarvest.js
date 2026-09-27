@@ -1,4 +1,4 @@
-import { accountDayStartMs, realizedPnlUsd } from "./dailyDustCleanup.js";
+import { realizedPnlUsd } from "./dailyDustCleanup.js";
 
 function positive(name, value) {
   const n = Number(value);
@@ -16,20 +16,17 @@ function floorToStep(value, step) {
 
 /**
  * Builds the single account-day, profit-only rollover plan approved by the
- * owner. It sums eligible carried profit across the whole account—never per
- * coin—then allocates that single $33 target proportionally. It never
- * considers an adopted/manual ticket or inventory opened in the current
- * Tradeify account day.
+ * owner. It sums profit across every open broker ticket in the account—never
+ * per coin—then allocates that single $33 target proportionally. Candidate
+ * collection is broker-first, so grid, manual, adopted, and current-day
+ * inventory are all part of the same account-wide calculation.
  */
-export function buildProportionalRolloverHarvestPlan({ dayKey, thresholdUsd, candidates }) {
+export function buildProportionalRolloverHarvestPlan({ thresholdUsd, candidates }) {
   const threshold = positive("rollover harvest threshold", thresholdUsd);
-  const cutoff = accountDayStartMs(dayKey);
   if (!Array.isArray(candidates)) throw new TypeError("rollover harvest candidates are required");
 
   const eligible = candidates.map((candidate) => {
     if (!candidate || typeof candidate !== "object") throw new TypeError("rollover harvest candidate is invalid");
-    const openedAt = Date.parse(candidate.openedAt);
-    if (!Number.isFinite(openedAt) || openedAt >= cutoff) throw new TypeError("rollover harvest candidate is not pre-rollover inventory");
     if (typeof candidate.instrument !== "string" || candidate.instrument.trim() === "") throw new TypeError("rollover harvest candidate instrument is invalid");
     if (typeof candidate.lotId !== "string" || candidate.lotId.trim() === "") throw new TypeError("rollover harvest candidate lotId is invalid");
     if (typeof candidate.positionCode !== "string" || candidate.positionCode.trim() === "") throw new TypeError("rollover harvest candidate requires an exact positionCode");
@@ -49,7 +46,6 @@ export function buildProportionalRolloverHarvestPlan({ dayKey, thresholdUsd, can
       markPrice,
       remainingUnits,
       lotStep,
-      openedAt: new Date(openedAt).toISOString(),
       unrealisedPnlUsd,
       profitPerUnitUsd: unrealisedPnlUsd / remainingUnits
     });
@@ -100,7 +96,6 @@ export function buildProportionalRolloverHarvestPlan({ dayKey, thresholdUsd, can
         positionCode: candidate.positionCode,
         virtualSide: candidate.virtualSide,
         entryPrice: candidate.entryPrice,
-        openedAt: candidate.openedAt,
         remainingUnits: candidate.remainingUnits,
         quantity: candidate.quantity,
         estimatedProfitUsd: candidate.estimatedProfitUsd

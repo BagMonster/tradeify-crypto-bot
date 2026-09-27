@@ -177,10 +177,9 @@ export function createRingGridInstance({
     });
   }
 
-  async function getRolloverHarvestCandidates({ openedBeforeMs, markPrice }) {
-    if (typeof grid.rolloverHarvestCandidates !== "function") throw new Error("grid does not support rollover harvest candidates");
-    const state = await load();
-    return grid.rolloverHarvestCandidates(state, { openedBeforeMs, markPrice })
+  async function getRolloverHarvestCandidates({ markPrice }) {
+    if (typeof execution.listRolloverHarvestPositions !== "function") throw new Error("execution does not support account-wide rollover candidates");
+    return (await execution.listRolloverHarvestPositions({ markPrice }))
       .map((candidate) => Object.freeze({ instrument, ...candidate }));
   }
 
@@ -197,22 +196,19 @@ export function createRingGridInstance({
       const lotId = String(allocation.lotId ?? "").trim();
       const quantity = Number(allocation.quantity);
       const plannedRemainingUnits = Number(allocation.remainingUnits);
-      if (!positionCode || !lotId || !Number.isFinite(quantity) || quantity < lotStep - 1e-12 || !Number.isFinite(plannedRemainingUnits) || plannedRemainingUnits < quantity) throw new TypeError("rollover harvest allocation is invalid");
+      const entryPrice = Number(allocation.entryPrice);
+      if (!positionCode || !lotId || !Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(quantity) || quantity < lotStep - 1e-12 || !Number.isFinite(plannedRemainingUnits) || plannedRemainingUnits < quantity) throw new TypeError("rollover harvest allocation is invalid");
       const found = grid.findLotByPositionCode(state, positionCode);
-      if (!found || found.scope !== "RING" || found.lot.id !== lotId || found.lot.side !== allocation.virtualSide) {
-        pending.push({ ...allocation, status: "POSITION_CHANGED" });
-        break;
-      }
       // The broker fill and ring-state write can be separated by a process
       // crash. If the state already shows precisely this planned reduction,
       // mark the durable account plan complete without submitting anything.
-      if (found.lot.remainingUnits <= plannedRemainingUnits - quantity + 1e-8) {
+      if (found && found.lot.side === allocation.virtualSide && found.lot.remainingUnits <= plannedRemainingUnits - quantity + 1e-8) {
         const recovered = { instrument, lotId, recovered: true };
         await onConfirmedClose(recovered);
         closed.push(recovered);
         continue;
       }
-      if (Math.abs(found.lot.remainingUnits - plannedRemainingUnits) > 1e-8) {
+      if (found && (found.lot.side !== allocation.virtualSide || Math.abs(found.lot.remainingUnits - plannedRemainingUnits) > 1e-8)) {
         pending.push({ ...allocation, status: "POSITION_CHANGED" });
         break;
       }
@@ -231,14 +227,14 @@ export function createRingGridInstance({
       const filledQuantity = Number(result.filledQuantity);
       const realized = realizedPnlUsd({
         virtualSide: allocation.virtualSide,
-        entryPrice: found.lot.entryPrice,
+        entryPrice,
         fillPrice: result.fillPrice,
         quantity: filledQuantity
       });
       const close = {
         instrument,
         lotId,
-        ringTag: found.ringTag,
+        ringTag: found?.ringTag ?? null,
         positionCode,
         virtualSide: allocation.virtualSide,
         filledQuantity,
@@ -247,11 +243,10 @@ export function createRingGridInstance({
         orderCode: result.orderCode,
         realizedPnlUsd: realized
       };
-      state = await store.save(state.version, grid.reduceLotByPositionCode(state, positionCode, filledQuantity));
-      // The virtual reduction must be durable before the account-level plan is
-      // marked complete. If this save fails after DXtrade fills, the unchanged
-      // plan reuses the same execution-ledger row on retry and repairs virtual
-      // state; it cannot silently skip a filled reduction.
+      if (found) state = await store.save(state.version, grid.reduceLotByPositionCode(state, positionCode, filledQuantity));
+      // When this ticket also belongs to virtual state, reduce it before the
+      // account-level plan is marked complete. Broker-only tickets are still
+      // valid D-068 candidates and have no virtual inventory to mutate.
       await onConfirmedClose(close);
       closed.push(close);
     }

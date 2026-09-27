@@ -8,7 +8,7 @@ This log records approved and proposed changes to the production bot.
 
 **Status:** Approved by owner on 2026-09-26; implementation pending review, merge, and Railway deployment.
 
-The active `10k` profile's harvest threshold is `$33`. Current-account-day profit keeps the existing all-book harvest. When the combined pre-22:00-UTC, bot-owned ring inventory across the account holds at least `$33` of profit from its original entries, the bot instead closes no more than approximately `$33` across all eligible profitable carried lots in proportion to their profit. This is account-wide, never `$33` per coin. Manual/adopted and current-day inventory are excluded; every close is exact-ticket, durable, and broker-confirmed. The account day is then harvested under the existing exit-pause contract.
+The active `10k` profile's harvest threshold is `$33`. Current-account-day profit keeps the existing all-book harvest. At rollover, the bot reads every open broker ticket across the configured Tradeify account and totals positive unrealised P&L from each broker entry. When that account-wide total reaches `$33`, it closes no more than approximately `$33` across all profitable tickets in proportion to their profit. This is account-wide, never `$33` per coin: ring, manual, adopted, and current-day inventory are included. Every close is exact-ticket, durable, and broker-confirmed; an unread or unpriceable configured book fails closed rather than being excluded. The account day is then harvested under the existing exit-pause contract.
 
 Full decision: `docs/decisions/D-068-proportional-rollover-harvest.md`.
 

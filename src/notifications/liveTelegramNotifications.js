@@ -183,14 +183,14 @@ function formatEvent(event) {
 
   if (kind === "HARVEST_PENDING") {
     if (event.mode === "ROLLOVER_PARTIAL") {
-      return { kind, eventKey, message: ["D-068 ROLLOVER HARVEST PENDING", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Profit target: +${money(event.thresholdUsd)}`, "Closing proportional portions of profitable, bot-owned positions carried from the prior account day. New entries and ordinary exits are paused until confirmation."].join("\n") };
+      return { kind, eventKey, message: ["D-068 ROLLOVER HARVEST PENDING", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Profit target: +${money(event.thresholdUsd)}`, "Closing proportional portions of profitable tickets across the entire configured Tradeify account. New entries and ordinary exits are paused until confirmation."].join("\n") };
     }
     return { kind, eventKey, message: ["D-064 HARVEST PENDING", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Threshold: +${money(event.thresholdUsd)}`, "Flattening every enabled book. New entries and ordinary exits are paused until confirmation."].join("\n") };
   }
   if (kind === "HARVEST_CONFIRMED") {
     const confirmedAt = canonicalUtc("confirmedAt", event.confirmedAt);
     if (event.mode === "ROLLOVER_PARTIAL") {
-      return { kind, eventKey, message: ["D-068 ROLLOVER HARVEST CONFIRMED", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Profit target: +${money(event.thresholdUsd)}`, "A proportional $33 profit portion was closed from eligible prior-day bot positions; remaining inventory stays open.", "New touch-cross entries may run. Ordinary tranche exits are disabled until 22:00 UTC.", `Confirmed: ${timestamp(confirmedAt)}`].join("\n") };
+      return { kind, eventKey, message: ["D-068 ROLLOVER HARVEST CONFIRMED", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Profit target: +${money(event.thresholdUsd)}`, "A proportional $33 profit portion was closed across the account; remaining inventory stays open.", "New touch-cross entries may run. Ordinary tranche exits are disabled until 22:00 UTC.", `Confirmed: ${timestamp(confirmedAt)}`].join("\n") };
     }
     return { kind, eventKey, message: ["D-064 HARVEST CONFIRMED", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Threshold: +${money(event.thresholdUsd)}`, "Every enabled broker book is flat.", "New touch-cross entries may run. Ordinary tranche exits are disabled until 22:00 UTC.", `Confirmed: ${timestamp(confirmedAt)}`].join("\n") };
   }

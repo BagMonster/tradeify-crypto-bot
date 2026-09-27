@@ -538,10 +538,29 @@ export function createRingExecutionGuard({
           direction,
           quantity: positive("protective broker quantity", Math.abs(signedQty)),
           closeSide: direction === "SHORT" ? "BUY" : "SELL",
-          positionCode: positionCode(row)
+          positionCode: positionCode(row),
+          entryPrice: Number(row?.openPrice ?? row?.avgOpenPrice ?? row?.averagePrice)
         });
       })
       .sort((a, b) => (a.positionCode < b.positionCode ? -1 : a.positionCode > b.positionCode ? 1 : 0));
+  }
+
+  // D-068 is account-wide. Each configured book contributes every one of its
+  // live DXtrade tickets, rather than only lots represented in ring state.
+  // A malformed or unread ticket is a hard failure, never a silent exclusion.
+  async function listRolloverHarvestPositions({ markPrice }) {
+    const mark = positive("rollover harvest markPrice", markPrice);
+    const read = await readAllSolPositions();
+    if (!read.ok) throw new Error(`Cannot read ${INSTRUMENT} rollover positions: ${read.reason}`);
+    return Object.freeze(read.legs.map((leg) => Object.freeze({
+      positionCode: leg.positionCode,
+      lotId: leg.positionCode,
+      virtualSide: leg.direction === "LONG" ? "BUY" : "SELL",
+      entryPrice: positive("broker position entry price", leg.entryPrice),
+      remainingUnits: leg.quantity,
+      markPrice: mark,
+      lotStep: LOT_STEP_LOCAL_LOCAL
+    })));
   }
 
   async function reconcileProtectiveClose({ code, quantity, reason, actionType, legPositionCode = null }) {
@@ -910,9 +929,8 @@ export function createRingExecutionGuard({
   }
 
   // The account-day rollover harvest is a precise, partial CLOSE against one
-  // bot-owned ticket.  It cannot use the aggregate protective-cut route: that
-  // route deliberately includes every broker leg, whereas this feature must
-  // exclude current-day and manual/adopted inventory.
+  // broker ticket. It is used for every open ticket in the configured account,
+  // including tickets that do not have a matching virtual ring lot.
   async function executeRolloverHarvestClose({ stateVersion, dayKey, positionCode: wantedPositionCode, quantity, virtualSide, reason = "rollover profit harvest" }) {
     if (!Number.isSafeInteger(stateVersion) || stateVersion < 0) throw new TypeError("stateVersion is invalid");
     const wanted = text("rollover harvest positionCode", wantedPositionCode, 128);
@@ -959,5 +977,5 @@ export function createRingExecutionGuard({
     return result;
   }
 
-  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, resolveLegacyDustTicket, executeDustCleanup, executeRolloverHarvestClose });
+  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, resolveLegacyDustTicket, executeDustCleanup, listRolloverHarvestPositions, executeRolloverHarvestClose });
 }

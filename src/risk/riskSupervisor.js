@@ -431,6 +431,8 @@ export function createRiskSupervisor({
   async function buildRolloverPlan(incomingDayKey) {
     const candidates = [];
     for (const book of instruments) {
+      // Older test/maintenance callers that have no D-068 provider opt out of
+      // this feature entirely; live configured books always provide it.
       if (typeof book.getRolloverHarvestCandidates !== "function") return null;
       const rows = await book.getRolloverHarvestCandidates({ dayKey: incomingDayKey });
       if (!Array.isArray(rows)) throw new Error(`${book.instrument} returned invalid rollover harvest candidates`);
@@ -458,9 +460,20 @@ export function createRiskSupervisor({
       applyHarvestGates();
       return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, harvest: prior });
     }
-    const plan = prior.mode === "ROLLOVER_PARTIAL" && rolloverPlanEntries(prior.plan).length > 0
-      ? prior.plan
-      : await buildRolloverPlan(incomingDayKey);
+    let plan;
+    try {
+      plan = prior.mode === "ROLLOVER_PARTIAL" && rolloverPlanEntries(prior.plan).length > 0
+        ? prior.plan
+        : await buildRolloverPlan(incomingDayKey);
+    } catch (error) {
+      const halted = await haltHarvest({
+        incomingDayKey,
+        combinedDayPnlUsd: combined,
+        reason: `D-068 cannot read and price every configured account ticket; owner review required`,
+        details: { error: error?.message ?? "rollover ticket read failed" }
+      });
+      return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, harvest: halted });
+    }
     if (!plan) return null;
     const pending = prior.status === "PENDING"
       ? prior
