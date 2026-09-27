@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS solana_execution_orders (
 const EXECUTION_ACTION_CONSTRAINT = `
 ALTER TABLE solana_execution_orders DROP CONSTRAINT IF EXISTS solana_execution_orders_action_type_check;
 ALTER TABLE solana_execution_orders ADD CONSTRAINT solana_execution_orders_action_type_check
-CHECK (action_type IN ('ENTRY','EXIT','PROTECTIVE_FLAT','PROTECTIVE_CUT','DUST_CLEANUP','HEARTBEAT_OPEN','HEARTBEAT_CLOSE','CANARY_OPEN','CANARY_CLOSE'))
+CHECK (action_type IN ('ENTRY','EXIT','PROTECTIVE_FLAT','PROTECTIVE_CUT','DUST_CLEANUP','ROLLOVER_HARVEST','HEARTBEAT_OPEN','HEARTBEAT_CLOSE','CANARY_OPEN','CANARY_CLOSE'))
 `;
 
 const TELEGRAM_NOTIFICATION_SCHEMA = `
@@ -218,7 +218,7 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     const instrument = text("instrument", input.instrument, 64);
     const stateVersion = version(input.stateVersion);
     const actionType = text("actionType", input.actionType, 32);
-    if (!["ENTRY","EXIT","PROTECTIVE_FLAT","PROTECTIVE_CUT","DUST_CLEANUP","HEARTBEAT_OPEN","HEARTBEAT_CLOSE","CANARY_OPEN","CANARY_CLOSE"].includes(actionType)) {
+    if (!["ENTRY","EXIT","PROTECTIVE_FLAT","PROTECTIVE_CUT","DUST_CLEANUP","ROLLOVER_HARVEST","HEARTBEAT_OPEN","HEARTBEAT_CLOSE","CANARY_OPEN","CANARY_CLOSE"].includes(actionType)) {
       throw new TypeError("actionType is invalid");
     }
     const side = text("side", input.side, 8).toUpperCase();

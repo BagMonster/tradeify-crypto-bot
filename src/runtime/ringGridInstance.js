@@ -177,6 +177,88 @@ export function createRingGridInstance({
     });
   }
 
+  async function getRolloverHarvestCandidates({ openedBeforeMs, markPrice }) {
+    if (typeof grid.rolloverHarvestCandidates !== "function") throw new Error("grid does not support rollover harvest candidates");
+    const state = await load();
+    return grid.rolloverHarvestCandidates(state, { openedBeforeMs, markPrice })
+      .map((candidate) => Object.freeze({ instrument, ...candidate }));
+  }
+
+  async function executeRolloverHarvest({ dayKey, allocations, onConfirmedClose = async () => {} }) {
+    if (typeof execution.executeRolloverHarvestClose !== "function") throw new Error("execution does not support rollover harvest");
+    if (!Array.isArray(allocations)) throw new TypeError("rollover harvest allocations are required");
+    if (typeof onConfirmedClose !== "function") throw new TypeError("onConfirmedClose must be a function");
+    let state = await load();
+    const closed = [];
+    const pending = [];
+    for (const allocation of allocations) {
+      if (allocation?.instrument !== instrument) throw new TypeError("rollover harvest allocation instrument is invalid");
+      const positionCode = String(allocation.positionCode ?? "").trim();
+      const lotId = String(allocation.lotId ?? "").trim();
+      const quantity = Number(allocation.quantity);
+      const plannedRemainingUnits = Number(allocation.remainingUnits);
+      if (!positionCode || !lotId || !Number.isFinite(quantity) || quantity < lotStep - 1e-12 || !Number.isFinite(plannedRemainingUnits) || plannedRemainingUnits < quantity) throw new TypeError("rollover harvest allocation is invalid");
+      const found = grid.findLotByPositionCode(state, positionCode);
+      if (!found || found.scope !== "RING" || found.lot.id !== lotId || found.lot.side !== allocation.virtualSide) {
+        pending.push({ ...allocation, status: "POSITION_CHANGED" });
+        break;
+      }
+      // The broker fill and ring-state write can be separated by a process
+      // crash. If the state already shows precisely this planned reduction,
+      // mark the durable account plan complete without submitting anything.
+      if (found.lot.remainingUnits <= plannedRemainingUnits - quantity + 1e-8) {
+        const recovered = { instrument, lotId, recovered: true };
+        await onConfirmedClose(recovered);
+        closed.push(recovered);
+        continue;
+      }
+      if (Math.abs(found.lot.remainingUnits - plannedRemainingUnits) > 1e-8) {
+        pending.push({ ...allocation, status: "POSITION_CHANGED" });
+        break;
+      }
+      const result = await execution.executeRolloverHarvestClose({
+        stateVersion: state.version,
+        dayKey,
+        positionCode,
+        quantity,
+        virtualSide: allocation.virtualSide,
+        reason: "D-068 proportional rollover profit harvest"
+      });
+      if (result.status !== "FILLED") {
+        pending.push({ ...allocation, status: result.status, reason: result.reason ?? null });
+        break;
+      }
+      const filledQuantity = Number(result.filledQuantity);
+      const realized = realizedPnlUsd({
+        virtualSide: allocation.virtualSide,
+        entryPrice: found.lot.entryPrice,
+        fillPrice: result.fillPrice,
+        quantity: filledQuantity
+      });
+      const close = {
+        instrument,
+        lotId,
+        ringTag: found.ringTag,
+        positionCode,
+        virtualSide: allocation.virtualSide,
+        filledQuantity,
+        fillPrice: result.fillPrice,
+        filledAt: result.filledAt,
+        orderCode: result.orderCode,
+        realizedPnlUsd: realized
+      };
+      state = await store.save(state.version, grid.reduceLotByPositionCode(state, positionCode, filledQuantity));
+      // The virtual reduction must be durable before the account-level plan is
+      // marked complete. If this save fails after DXtrade fills, the unchanged
+      // plan reuses the same execution-ledger row on retry and repairs virtual
+      // state; it cannot silently skip a filled reduction.
+      await onConfirmedClose(close);
+      closed.push(close);
+    }
+    currentState = state;
+    return Object.freeze({ closed: Object.freeze(closed), pending: Object.freeze(pending) });
+  }
+
   function exitsPaused() {
     return trancheExitsPaused === true || isTrancheExitsPaused(instrument);
   }
@@ -279,6 +361,8 @@ export function createRingGridInstance({
     cut,
     flatten,
     cleanupDust,
+    getRolloverHarvestCandidates,
+    executeRolloverHarvest,
     getEntryBrake: () => entryBrake,
     getTrancheExitsPaused: () => exitsPaused(),
     getState: () => currentState

@@ -304,3 +304,17 @@ test("unconfirmed runtime order outcome never emits a fill notification", async 
   assert.equal(result.status, "ENTRY_PENDING");
   assert.equal(notifications.length, 0);
 });
+
+test("D-068 rollover harvest notification states that eligible inventory remains open", () => {
+  const rendered = formatLiveTelegramNotification({
+    kind: "HARVEST_CONFIRMED",
+    mode: "ROLLOVER_PARTIAL",
+    eventKey: "D068-CONFIRMED:20260925",
+    combinedDayPnlUsd: 4,
+    thresholdUsd: 33,
+    confirmedAt: "2026-09-25T01:00:00.000Z"
+  });
+  assert.match(rendered.message, /D-068 ROLLOVER HARVEST CONFIRMED/);
+  assert.match(rendered.message, /remaining inventory stays open/);
+  assert.match(rendered.message, /\+\$33\.00/);
+});

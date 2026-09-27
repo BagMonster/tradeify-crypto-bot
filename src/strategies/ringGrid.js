@@ -281,6 +281,32 @@ export function createRingGrid(config) {
   function dustCleanupCandidates(state, options) {
     return dustCleanupScan(state, options).candidates;
   }
+  // Rollover harvesting is deliberately narrower than a normal exit: it sees
+  // only bot-owned ring lots that survived the preceding account day. Adopted
+  // inventory is owner/manual inventory and must never be included.
+  function rolloverHarvestCandidates(state, { openedBeforeMs, markPrice }) {
+    const normalized = normalizeState(state);
+    const cutoff = Number(openedBeforeMs);
+    const mark = positive("rollover harvest markPrice", markPrice);
+    if (!Number.isFinite(cutoff)) throw new TypeError("openedBeforeMs is invalid");
+    const candidates = [];
+    for (const ring of normalized.rings) for (const lot of ring.lots) {
+      if (Date.parse(lot.openedAt) >= cutoff) continue;
+      if (lot.positionCode == null || String(lot.positionCode).trim() === "") continue;
+      candidates.push(Object.freeze({
+        lotId: lot.id,
+        ringTag: ring.tag,
+        virtualSide: lot.side,
+        positionCode: String(lot.positionCode),
+        entryPrice: lot.entryPrice,
+        remainingUnits: lot.remainingUnits,
+        openedAt: lot.openedAt,
+        markPrice: mark,
+        lotStep: def.lotStep
+      }));
+    }
+    return Object.freeze(candidates);
+  }
   function applyConfirmedEntry(state, intent, fill) {
     if (intent?.type !== "ENTRY") throw new TypeError("intent must be ENTRY"); const next = mutable(state); if (intent.stateVersion !== next.version) throw new Error("entry intent state version is stale"); const ring = next.rings.find((candidate) => candidate.tag === intent.ringTag); if (!ring || !ring.armed || ring.lots.length >= ring.capacity || !entryGateAllows(normalizeState(next), ring)) throw new Error("entry ring is unavailable"); const confirmed = validatedFill(fill, intent.quantity); ring.lots.push({ id: intent.lotId, side: ring.side, ringTag: ring.tag, entryPrice: confirmed.fillPrice, originalUnits: confirmed.filledQuantity, intendedUnits: intent.quantity, remainingUnits: confirmed.filledQuantity, done: 0, normalExitTranches: 0, openedAt: confirmed.filledAt, positionCode: confirmed.positionCode ?? null }); ring.armed = false; next.lastFillAt = confirmed.filledAt; next.lastFillSide = intent.side; next.lastFillPrice = confirmed.fillPrice; return increment(next);
   }
@@ -390,5 +416,5 @@ export function createRingGrid(config) {
     throw new Error("no legacy virtual lot carries that lotId");
   }
 
-  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, adoptedExposureUsd, observeRearm, nextMovingAverageExitAction, nextExitAction, applySkippedExit, entryCandidates, dustCleanupScan, dustCleanupCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten, adoptPosition, findLotByPositionCode, reduceLotByPositionCode, reduceLegacyLotById });
+  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, adoptedExposureUsd, observeRearm, nextMovingAverageExitAction, nextExitAction, applySkippedExit, entryCandidates, dustCleanupScan, dustCleanupCandidates, rolloverHarvestCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten, adoptPosition, findLotByPositionCode, reduceLotByPositionCode, reduceLegacyLotById });
 }

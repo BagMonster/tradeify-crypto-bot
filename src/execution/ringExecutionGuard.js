@@ -618,6 +618,8 @@ export function createRingExecutionGuard({
         ? "RING_D049_PARTIAL_CUT_SUBMITTING"
         : actionType === "DUST_CLEANUP"
           ? "RING_DUST_CLEANUP_SUBMITTING"
+          : actionType === "ROLLOVER_HARVEST"
+            ? "RING_ROLLOVER_HARVEST_SUBMITTING"
           : "RING_PROTECTIVE_FLATTEN_SUBMITTING";
       await addEvent("WARN", submittingKind, {
         orderCode: code,
@@ -907,5 +909,55 @@ export function createRingExecutionGuard({
     return result;
   }
 
-  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, resolveLegacyDustTicket, executeDustCleanup });
+  // The account-day rollover harvest is a precise, partial CLOSE against one
+  // bot-owned ticket.  It cannot use the aggregate protective-cut route: that
+  // route deliberately includes every broker leg, whereas this feature must
+  // exclude current-day and manual/adopted inventory.
+  async function executeRolloverHarvestClose({ stateVersion, dayKey, positionCode: wantedPositionCode, quantity, virtualSide, reason = "rollover profit harvest" }) {
+    if (!Number.isSafeInteger(stateVersion) || stateVersion < 0) throw new TypeError("stateVersion is invalid");
+    const wanted = text("rollover harvest positionCode", wantedPositionCode, 128);
+    const qty = positive("rollover harvest quantity", quantity);
+    if (virtualSide !== "BUY" && virtualSide !== "SELL") throw new TypeError("rollover harvest virtualSide is invalid");
+    if (!isEnabled()) return Object.freeze({ status: "BLOCKED", reason: "Automatic execution locks are off" });
+
+    const read = await readAllSolPositions();
+    if (!read.ok) {
+      await addEvent("ERROR", "RING_ROLLOVER_HARVEST_ACCOUNT_DATA_UNAVAILABLE", { positionCode: wanted, reason: read.reason });
+      return Object.freeze({ status: "ACCOUNT_DATA_UNAVAILABLE", reason: read.reason });
+    }
+    const leg = read.legs.find((candidate) => candidate.positionCode === wanted);
+    if (!leg) return Object.freeze({ status: "BROKER_POSITION_MISSING", positionCode: wanted });
+    if (leg.closeSide !== (virtualSide === "BUY" ? "SELL" : "BUY")) {
+      await addEvent("ERROR", "RING_ROLLOVER_HARVEST_SIDE_MISMATCH", { positionCode: wanted, virtualSide, brokerDirection: leg.direction });
+      return Object.freeze({ status: "SIDE_MISMATCH", positionCode: wanted });
+    }
+    if (qty > leg.quantity + 1e-8) {
+      await addEvent("WARN", "RING_ROLLOVER_HARVEST_POSITION_CHANGED", { positionCode: wanted, requestedQuantity: qty, brokerQuantity: leg.quantity });
+      return Object.freeze({ status: "POSITION_CHANGED", positionCode: wanted, brokerQuantity: leg.quantity });
+    }
+
+    // This key is independent of the ring-state version. If a worker restarts
+    // after DXtrade accepted the request but before the state save, it resumes
+    // the exact same ledger row rather than submitting another partial close.
+    const code = `${PREFIX}RHV-${EPOCH}${compactDayKey(dayKey)}-${legSuffix(wanted)}`;
+    const result = await closeOneLeg({
+      code,
+      leg,
+      quantity: qty,
+      actionType: "ROLLOVER_HARVEST",
+      reason: text("rollover harvest reason", reason, 300),
+      slippagePolicy: "ROLLOVER_PROFIT_PARTIAL",
+      stateVersion,
+      full: false
+    });
+    await addEvent(result.status === "FILLED" ? "WARN" : "ERROR", "RING_ROLLOVER_HARVEST_RESULT", {
+      orderCode: code,
+      positionCode: wanted,
+      status: result.status,
+      filledQuantity: result.filledQuantity ?? 0
+    });
+    return result;
+  }
+
+  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, resolveLegacyDustTicket, executeDustCleanup, executeRolloverHarvestClose });
 }

@@ -426,7 +426,14 @@ const riskSupervisor = createRiskSupervisor({
     setEntryBrake: (on) => s.runtime.setEntryBrake(on),
     setTrancheExitsPaused: (on) => s.runtime.setTrancheExitsPaused(on),
     executeProtectiveCut: (args) => s.runtime.executeProtectiveCut(args),
-    executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args)
+    executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args),
+    getRolloverHarvestCandidates: ({ dayKey }) => {
+      const markPrice = Number(s.lastTrade?.price);
+      if (!Number.isFinite(markPrice) || markPrice <= 0 || s.feedState.connected !== true || s.feedState.stale === true) return [];
+      const openedBeforeMs = Date.parse(`${dayKey}T00:00:00.000Z`) - 2 * 60 * 60 * 1000;
+      return s.runtime.getRolloverHarvestCandidates({ openedBeforeMs, markPrice });
+    },
+    executeRolloverHarvest: (args) => s.runtime.executeRolloverHarvest(args)
   })),
   addEvent: database.addEvent,
   notifications: liveNotifications,

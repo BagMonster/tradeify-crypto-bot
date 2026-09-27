@@ -29,7 +29,7 @@ const TEN_K = Object.freeze({
   entryBrakeUsd: 120,
   cutTiers: [{ thresholdUsd: 100, fraction: 0.1 }, { thresholdUsd: 150, fraction: 0.2 }, { thresholdUsd: 200, fraction: 0.5 }],
   fullFlattenUsd: 250,
-  harvestUsd: 75,
+  harvestUsd: 33,
   exposurePool: { softUsd: 2200, hardUsd: 2250 },
   perCoinCapUsd: 25000
 });
@@ -78,9 +78,9 @@ test("10k applies the decided $10K numbers and passes every downstream validator
   assert.deepEqual(risk.cutTiers, [{ thresholdUsd: 100, fraction: 0.1 }, { thresholdUsd: 150, fraction: 0.2 }]);
   assert.equal(risk.partialCutUsd, 200);
   assert.equal(risk.fullFlattenUsd, 250);
-  assert.equal(risk.sessionHarvestUsd, 75);
-  assert.deepEqual(risk.exposurePool, { softUsd: 2200, hardUsd: 2250 });
-  for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 25000, entry.instrument);
+  assert.equal(risk.sessionHarvestUsd, 33);
+  assert.deepEqual(risk.exposurePool, { softUsd: 3000, hardUsd: 3500 });
+  for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 4500, entry.instrument);
 
   // The same validators the bot runs at startup.
   assert.doesNotThrow(() => validateAccountConfig(account));
@@ -109,7 +109,7 @@ test("the boot-log summary shows the numbers the bot will run with", async () =>
   const line = describeAccountProfile(await loadAccountProfile("10k"));
   assert.match(line, /"10k": \$10,000 account, daily limit -\$300/);
   assert.match(line, /flatten -\$250/);
-  assert.match(line, /pool \$2,200 soft \/ \$2,250 hard/);
+  assert.match(line, /pool \$3,000 soft \/ \$3,500 hard/);
 });
 
 // ---- Mistakes that must stop the bot at startup -------------------------------

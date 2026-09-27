@@ -215,12 +215,18 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
       CREATE TABLE IF NOT EXISTS session_harvest_state (
         day_key TEXT PRIMARY KEY CHECK (day_key ~ '^\\d{4}-\\d{2}-\\d{2}$'),
         status TEXT NOT NULL CHECK (status IN ('READY','PENDING','CONFIRMED','HALTED')),
+        mode TEXT NOT NULL DEFAULT 'FULL' CHECK (mode IN ('FULL','ROLLOVER_PARTIAL')),
+        plan JSONB,
         trigger_pnl_usd NUMERIC(18,6),
         confirmed_at TIMESTAMPTZ,
         halt_reason TEXT,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await pool.query("ALTER TABLE session_harvest_state ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'FULL'");
+    await pool.query("ALTER TABLE session_harvest_state ADD COLUMN IF NOT EXISTS plan JSONB");
+    await pool.query("ALTER TABLE session_harvest_state DROP CONSTRAINT IF EXISTS session_harvest_state_mode_check");
+    await pool.query("ALTER TABLE session_harvest_state ADD CONSTRAINT session_harvest_state_mode_check CHECK (mode IN ('FULL','ROLLOVER_PARTIAL'))");
     await pool.query(`
       CREATE TABLE IF NOT EXISTS daily_dust_cleanup (
         day_key TEXT PRIMARY KEY CHECK (day_key ~ '^\\d{4}-\\d{2}-\\d{2}$'),
@@ -611,15 +617,17 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     const key = requiredText("session harvest day key", dayKey, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("session harvest day key is invalid");
     const result = await pool.query(
-      "SELECT day_key, status, trigger_pnl_usd, confirmed_at, halt_reason FROM session_harvest_state WHERE day_key=$1",
+      "SELECT day_key, status, mode, plan, trigger_pnl_usd, confirmed_at, halt_reason FROM session_harvest_state WHERE day_key=$1",
       [key]
     );
-    if (result.rowCount === 0) return Object.freeze({ dayKey: key, status: "READY", triggerPnlUsd: null, confirmedAt: null, haltReason: null });
+    if (result.rowCount === 0) return Object.freeze({ dayKey: key, status: "READY", mode: "FULL", plan: null, triggerPnlUsd: null, confirmedAt: null, haltReason: null });
     if (result.rowCount !== 1) throw new Error("session harvest state lookup returned an invalid row count");
     const row = result.rows[0];
     return Object.freeze({
       dayKey: row.day_key,
       status: requiredText("session harvest status", row.status, 16),
+      mode: row.mode == null ? "FULL" : requiredText("session harvest mode", row.mode, 32),
+      plan: row.plan == null ? null : row.plan,
       triggerPnlUsd: row.trigger_pnl_usd == null ? null : toFiniteNumber("session harvest trigger P&L", row.trigger_pnl_usd),
       confirmedAt: row.confirmed_at == null ? null : toDate("session harvest confirmation", row.confirmed_at).toISOString(),
       haltReason: row.halt_reason == null ? null : requiredText("session harvest halt reason", row.halt_reason, 300)
@@ -631,21 +639,25 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("session harvest day key is invalid");
     const status = requiredText("session harvest status", input?.status, 16);
     if (!["READY", "PENDING", "CONFIRMED", "HALTED"].includes(status)) throw new Error("session harvest status is invalid");
+    const mode = input?.mode == null ? "FULL" : requiredText("session harvest mode", input.mode, 32);
+    if (!["FULL", "ROLLOVER_PARTIAL"].includes(mode)) throw new Error("session harvest mode is invalid");
+    const plan = input?.plan == null ? null : input.plan;
+    if (plan !== null && (typeof plan !== "object" || Array.isArray(plan))) throw new Error("session harvest plan is invalid");
     const trigger = input?.triggerPnlUsd == null ? null : toFiniteNumber("session harvest trigger P&L", input.triggerPnlUsd);
     const confirmedAt = input?.confirmedAt == null ? null : toDate("session harvest confirmation", input.confirmedAt).toISOString();
     const haltReason = input?.haltReason == null ? null : requiredText("session harvest halt reason", input.haltReason, 300);
     const result = await pool.query(
-      `INSERT INTO session_harvest_state (day_key, status, trigger_pnl_usd, confirmed_at, halt_reason)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO session_harvest_state (day_key, status, mode, plan, trigger_pnl_usd, confirmed_at, halt_reason)
+       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7)
        ON CONFLICT (day_key) DO UPDATE SET
-         status=EXCLUDED.status, trigger_pnl_usd=EXCLUDED.trigger_pnl_usd,
+         status=EXCLUDED.status, mode=EXCLUDED.mode, plan=EXCLUDED.plan, trigger_pnl_usd=EXCLUDED.trigger_pnl_usd,
          confirmed_at=EXCLUDED.confirmed_at, halt_reason=EXCLUDED.halt_reason, updated_at=NOW()
-       RETURNING day_key, status, trigger_pnl_usd, confirmed_at, halt_reason`,
-      [key, status, trigger, confirmedAt, haltReason]
+       RETURNING day_key, status, mode, plan, trigger_pnl_usd, confirmed_at, halt_reason`,
+      [key, status, mode, plan == null ? null : JSON.stringify(plan), trigger, confirmedAt, haltReason]
     );
     if (result.rowCount !== 1) throw new Error("session harvest state save failed");
     const row = result.rows[0];
-    return Object.freeze({ dayKey: row.day_key, status: row.status, triggerPnlUsd: row.trigger_pnl_usd == null ? null : toFiniteNumber("session harvest trigger P&L", row.trigger_pnl_usd), confirmedAt: row.confirmed_at == null ? null : toDate("session harvest confirmation", row.confirmed_at).toISOString(), haltReason: row.halt_reason });
+    return Object.freeze({ dayKey: row.day_key, status: row.status, mode: row.mode ?? "FULL", plan: row.plan ?? null, triggerPnlUsd: row.trigger_pnl_usd == null ? null : toFiniteNumber("session harvest trigger P&L", row.trigger_pnl_usd), confirmedAt: row.confirmed_at == null ? null : toDate("session harvest confirmation", row.confirmed_at).toISOString(), haltReason: row.halt_reason });
   }
 
   function normalizeDailyDustCleanupState(row, dayKey) {

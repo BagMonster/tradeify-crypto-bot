@@ -185,6 +185,10 @@ function createD060Runtime({
     void instance.setEntryBrake(on);
   }
 
+  function setTrancheExitsPaused(on) {
+    void instance.setTrancheExitsPaused(on);
+  }
+
   function attachRiskSupervisor(supervisor) {
     if (!supervisor || typeof supervisor.getSnapshot !== "function") throw new TypeError("risk supervisor is invalid");
     riskSupervisor = supervisor;
@@ -202,6 +206,14 @@ function createD060Runtime({
     return instance.cleanupDust({ dayKey, openedBeforeMs, maxRemainingFraction, remainingLossBudgetUsd, markPrice, onConfirmedClose });
   }
 
+  async function getRolloverHarvestCandidates({ openedBeforeMs, markPrice }) {
+    return instance.getRolloverHarvestCandidates({ openedBeforeMs, markPrice });
+  }
+
+  async function executeRolloverHarvest({ dayKey, allocations, onConfirmedClose }) {
+    return instance.executeRolloverHarvest({ dayKey, allocations, onConfirmedClose });
+  }
+
   function getRiskLadderState() {
     return riskSupervisor?.getSnapshot?.() ?? null;
   }
@@ -214,10 +226,13 @@ function createD060Runtime({
     getDayPnlUsd,
     getExposureUsd,
     setEntryBrake,
+    setTrancheExitsPaused,
     attachRiskSupervisor,
     executeProtectiveCut,
     executeProtectiveFlatten,
     executeDustCleanup,
+    getRolloverHarvestCandidates,
+    executeRolloverHarvest,
     definition: grid.definition
   });
 }

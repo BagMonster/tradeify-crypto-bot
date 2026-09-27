@@ -12,7 +12,7 @@
     { "thresholdUsd": 200, "fraction": 0.5 }
   ],
   "fullFlattenUsd": 250,
-  "harvestUsd": 75,
+  "harvestUsd": 33,
   "exposurePool": { "softUsd": 3000, "hardUsd": 3500 },
   "perCoinCapUsd": 4500
 }
