@@ -216,3 +216,20 @@ test("D-068 harvests only the proportional $33 rollover-profit plan and leaves b
   assert.equal(supervisor.getSnapshot().trancheExitsPaused, true);
   assert.equal(sol.calls.some(([kind]) => kind === "flatten"), false);
 });
+
+test("D-068 waits for startup market marks without creating a durable harvest halt", async () => {
+  const halts = [];
+  const sol = book("SOL/USD");
+  sol.getRolloverHarvestCandidates = async () => null;
+  const supervisor = createRiskSupervisor({
+    config: { ...config, sessionHarvestUsd: 33 },
+    instruments: [sol],
+    harvestStore: memoryHarvestStore(),
+    getCombinedDayPnlUsd: () => 0,
+    setSafetyHalt: async (reason) => halts.push(reason)
+  });
+  const result = await supervisor.evaluate({ dayKey: "2026-09-27" });
+  assert.equal(result.action, "NONE");
+  assert.equal(supervisor.getSnapshot().harvest.status, "READY");
+  assert.deepEqual(halts, []);
+});

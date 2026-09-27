@@ -8,7 +8,7 @@
 - The existing account-day harvest remains a full, all-book harvest for profit earned during the current account day.
 - A different rollover path has priority when the combined unrealised profit on **every open broker position in the configured Tradeify account**, calculated from each broker entry, is at least `$33`. This is explicitly **not** a `$33` requirement per coin.
 - That rollover path closes only approximately `$33` of the **account-wide combined profit**, allocated proportionally across every profitable ticket. This includes ring, manual, adopted, and current-account-day inventory. Quantity is floored to each instrument's `0.01` lot step and the planned total must not exceed `$33`.
-- Each partial close requires the exact live DXtrade `positionCode`; no ticket is inferred from virtual state. If any configured book cannot be read or priced, the rollover harvest fails closed rather than silently excluding it.
+- Each partial close requires the exact live DXtrade `positionCode`; no ticket is inferred from virtual state. If any configured book cannot be read or priced, the rollover harvest waits for fresh data and places no partial-harvest order; it does not omit that book.
 - On a confirmed rollover harvest, the account-day harvest is complete. As with the existing harvest contract, new touch-cross entries may occur while ordinary tranche-profit exits remain paused until the next 22:00 UTC rollover. Protective cuts and the loss flatten remain available.
 
 ## Safety behavior
