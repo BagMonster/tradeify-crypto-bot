@@ -112,8 +112,10 @@ export function createMultiInstrumentOwnerService({
     if (harvest.haltReason.startsWith("D-064 harvest cannot verify fresh broker account data for ") ||
       harvest.haltReason === "D-068 cannot read and price every configured account ticket; owner review required") return "FRESH_DATA";
     if (harvest.haltReason === D064_FLAT_CONFIRMATION_HALT) return "VERIFIED_FLAT";
-    if (harvest.mode === "ROLLOVER_PARTIAL" &&
-      harvest.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
+    // Old D-068 persistence may identify this plan as FULL despite the
+    // unambiguous D-068 halt reason.  Require the exact reason and no
+    // confirmed entries, not the unreliable legacy mode label.
+    if (harvest.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
       (!Array.isArray(harvest.plan?.completed) || harvest.plan.completed.length === 0)) return "ROLLOVER_NO_FILL";
     return null;
   }
@@ -362,7 +364,7 @@ export function createMultiInstrumentOwnerService({
       if (!riskSupervisor || !database) return { code: null, message: "D-064 recovery is not configured on this deployment." };
       const snapshot = riskSupervisor.getSnapshot();
       const recoveryKind = d064RecoveryKind(snapshot.harvest);
-      if (!recoveryKind) return { code: null, message: "D-064 recovery is refused: the current halt is not a recoverable D-064 fresh-data or flat-confirmation halt." };
+      if (!recoveryKind) return { code: null, message: "Harvest recovery is refused: the current halt is not a recoverable fresh-data, flat-confirmation, or no-fill D-068 halt." };
       const [botState, rows] = await Promise.all([database.getState(), inspectBooks()]);
       if (botState.safety_halt === true && botState.halt_reason !== snapshot.harvest.haltReason) {
         return { code: null, message: "D-064 recovery is refused: a different safety halt is active. It was not changed." };

@@ -42,8 +42,11 @@ function isFlatConfirmationHarvestHalt(reason) {
 }
 
 function isRolloverNoFillHarvestHalt(harvest) {
-  return harvest?.mode === "ROLLOVER_PARTIAL" &&
-    harvest?.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
+  // The pre-recovery D-068 implementation persisted some partial-harvest
+  // rows with the legacy FULL mode.  The exact D-068 reason plus an empty
+  // completed list is the durable evidence that no close was confirmed; mode
+  // is not trustworthy enough to block the owner-confirmed recovery.
+  return harvest?.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
     (!Array.isArray(harvest?.plan?.completed) || harvest.plan.completed.length === 0);
 }
 

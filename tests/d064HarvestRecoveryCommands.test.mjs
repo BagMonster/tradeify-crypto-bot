@@ -139,7 +139,9 @@ test("D-064 flat-confirmation recovery passes the verified-flat mode only after 
 test("D-068 no-fill recovery is available only for a halted plan with no confirmed closes", async () => {
   const database = databaseStub(D068_NO_FILL_HALT);
   const supervisor = supervisorStub(D068_NO_FILL_HALT, {
-    mode: "ROLLOVER_PARTIAL",
+    // Legacy D-068 rows can carry this old default even though their reason
+    // proves they came from rollover harvest.
+    mode: "FULL",
     plan: { allocations: [{ instrument: "SOL/USD", lotId: "ticket" }], completed: [] }
   });
   const rows = [
