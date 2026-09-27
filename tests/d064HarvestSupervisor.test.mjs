@@ -190,3 +190,29 @@ test("D-064 reloads a confirmed harvest after a worker restart", async () => {
   assert.equal(supervisor.getSnapshot().trancheExitsPaused, true);
   assert.equal(sol.calls.some(([kind]) => kind === "flatten"), false);
 });
+
+test("D-068 harvests only the proportional $33 rollover-profit plan and leaves books open", async () => {
+  const store = memoryHarvestStore();
+  const closes = [];
+  const sol = book("SOL/USD");
+  sol.getRolloverHarvestCandidates = async () => [{
+    instrument: "SOL/USD", lotId: "BUY1-V0", ringTag: "BUY1", positionCode: "DX-SOL", virtualSide: "BUY",
+    entryPrice: 100, markPrice: 110, remainingUnits: 4, lotStep: 0.01, openedAt: "2026-09-24T21:00:00.000Z"
+  }];
+  sol.executeRolloverHarvest = async ({ allocations, onConfirmedClose }) => {
+    assert.equal(allocations.length, 1);
+    assert.ok(allocations[0].quantity < 4);
+    const close = { instrument: "SOL/USD", lotId: "BUY1-V0", filledQuantity: allocations[0].quantity, realizedPnlUsd: 33 };
+    await onConfirmedClose(close);
+    closes.push(close);
+    return { closed: [close], pending: [] };
+  };
+  const config33 = { ...config, sessionHarvestUsd: 33 };
+  const supervisor = createRiskSupervisor({ config: config33, instruments: [sol], harvestStore: store, getCombinedDayPnlUsd: () => 4, now: () => Date.parse("2026-09-25T01:00:00.000Z") });
+  const result = await supervisor.evaluate({ dayKey: "2026-09-25" });
+  assert.equal(result.action, "HARVEST_CONFIRMED");
+  assert.equal(closes.length, 1);
+  assert.equal(supervisor.getSnapshot().harvest.mode, "ROLLOVER_PARTIAL");
+  assert.equal(supervisor.getSnapshot().trancheExitsPaused, true);
+  assert.equal(sol.calls.some(([kind]) => kind === "flatten"), false);
+});

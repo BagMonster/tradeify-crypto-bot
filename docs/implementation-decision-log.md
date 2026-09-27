@@ -4,6 +4,14 @@ This log records approved and proposed changes to the production bot.
 
 > **Current production:** Five ring grids from `config/instruments.json` under **D-060** + **D-062** (INJ in place of ZEC). One-sided per instrument with position-linked exits under **D-059**. Live continuity: `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`. **D-063 (DRAFT)** adds shallow cut tiers, a $10,000 cap, and a −$600 brake.
 
+## D-068 — $33 proportional rollover harvest
+
+**Status:** Approved by owner on 2026-09-26; implementation pending review, merge, and Railway deployment.
+
+The active `10k` profile's harvest threshold is `$33`. Current-account-day profit keeps the existing all-book harvest. At rollover, the bot reads every open broker ticket across the configured Tradeify account and totals positive unrealised P&L from each broker entry. When that account-wide total reaches `$33`, it closes no more than approximately `$33` across all profitable tickets in proportion to their profit. This is account-wide, never `$33` per coin: ring, manual, adopted, and current-day inventory are included. Every close is exact-ticket, durable, and broker-confirmed; an unread or unpriceable configured book fails closed rather than being excluded. The account day is then harvested under the existing exit-pause contract.
+
+Full decision: `docs/decisions/D-068-proportional-rollover-harvest.md`.
+
 ## D-066 — Owner-controlled non-harvest safety-halt countdown
 
 **Status:** Implemented locally; awaiting owner review and explicit merge approval.

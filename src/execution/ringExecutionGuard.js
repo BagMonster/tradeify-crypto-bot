@@ -538,10 +538,29 @@ export function createRingExecutionGuard({
           direction,
           quantity: positive("protective broker quantity", Math.abs(signedQty)),
           closeSide: direction === "SHORT" ? "BUY" : "SELL",
-          positionCode: positionCode(row)
+          positionCode: positionCode(row),
+          entryPrice: Number(row?.openPrice ?? row?.avgOpenPrice ?? row?.averagePrice)
         });
       })
       .sort((a, b) => (a.positionCode < b.positionCode ? -1 : a.positionCode > b.positionCode ? 1 : 0));
+  }
+
+  // D-068 is account-wide. Each configured book contributes every one of its
+  // live DXtrade tickets, rather than only lots represented in ring state.
+  // A malformed or unread ticket is a hard failure, never a silent exclusion.
+  async function listRolloverHarvestPositions({ markPrice }) {
+    const mark = positive("rollover harvest markPrice", markPrice);
+    const read = await readAllSolPositions();
+    if (!read.ok) throw new Error(`Cannot read ${INSTRUMENT} rollover positions: ${read.reason}`);
+    return Object.freeze(read.legs.map((leg) => Object.freeze({
+      positionCode: leg.positionCode,
+      lotId: leg.positionCode,
+      virtualSide: leg.direction === "LONG" ? "BUY" : "SELL",
+      entryPrice: positive("broker position entry price", leg.entryPrice),
+      remainingUnits: leg.quantity,
+      markPrice: mark,
+      lotStep: LOT_STEP_LOCAL_LOCAL
+    })));
   }
 
   async function reconcileProtectiveClose({ code, quantity, reason, actionType, legPositionCode = null }) {
@@ -618,6 +637,8 @@ export function createRingExecutionGuard({
         ? "RING_D049_PARTIAL_CUT_SUBMITTING"
         : actionType === "DUST_CLEANUP"
           ? "RING_DUST_CLEANUP_SUBMITTING"
+          : actionType === "ROLLOVER_HARVEST"
+            ? "RING_ROLLOVER_HARVEST_SUBMITTING"
           : "RING_PROTECTIVE_FLATTEN_SUBMITTING";
       await addEvent("WARN", submittingKind, {
         orderCode: code,
@@ -907,5 +928,54 @@ export function createRingExecutionGuard({
     return result;
   }
 
-  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, resolveLegacyDustTicket, executeDustCleanup });
+  // The account-day rollover harvest is a precise, partial CLOSE against one
+  // broker ticket. It is used for every open ticket in the configured account,
+  // including tickets that do not have a matching virtual ring lot.
+  async function executeRolloverHarvestClose({ stateVersion, dayKey, positionCode: wantedPositionCode, quantity, virtualSide, reason = "rollover profit harvest" }) {
+    if (!Number.isSafeInteger(stateVersion) || stateVersion < 0) throw new TypeError("stateVersion is invalid");
+    const wanted = text("rollover harvest positionCode", wantedPositionCode, 128);
+    const qty = positive("rollover harvest quantity", quantity);
+    if (virtualSide !== "BUY" && virtualSide !== "SELL") throw new TypeError("rollover harvest virtualSide is invalid");
+    if (!isEnabled()) return Object.freeze({ status: "BLOCKED", reason: "Automatic execution locks are off" });
+
+    const read = await readAllSolPositions();
+    if (!read.ok) {
+      await addEvent("ERROR", "RING_ROLLOVER_HARVEST_ACCOUNT_DATA_UNAVAILABLE", { positionCode: wanted, reason: read.reason });
+      return Object.freeze({ status: "ACCOUNT_DATA_UNAVAILABLE", reason: read.reason });
+    }
+    const leg = read.legs.find((candidate) => candidate.positionCode === wanted);
+    if (!leg) return Object.freeze({ status: "BROKER_POSITION_MISSING", positionCode: wanted });
+    if (leg.closeSide !== (virtualSide === "BUY" ? "SELL" : "BUY")) {
+      await addEvent("ERROR", "RING_ROLLOVER_HARVEST_SIDE_MISMATCH", { positionCode: wanted, virtualSide, brokerDirection: leg.direction });
+      return Object.freeze({ status: "SIDE_MISMATCH", positionCode: wanted });
+    }
+    if (qty > leg.quantity + 1e-8) {
+      await addEvent("WARN", "RING_ROLLOVER_HARVEST_POSITION_CHANGED", { positionCode: wanted, requestedQuantity: qty, brokerQuantity: leg.quantity });
+      return Object.freeze({ status: "POSITION_CHANGED", positionCode: wanted, brokerQuantity: leg.quantity });
+    }
+
+    // This key is independent of the ring-state version. If a worker restarts
+    // after DXtrade accepted the request but before the state save, it resumes
+    // the exact same ledger row rather than submitting another partial close.
+    const code = `${PREFIX}RHV-${EPOCH}${compactDayKey(dayKey)}-${legSuffix(wanted)}`;
+    const result = await closeOneLeg({
+      code,
+      leg,
+      quantity: qty,
+      actionType: "ROLLOVER_HARVEST",
+      reason: text("rollover harvest reason", reason, 300),
+      slippagePolicy: "ROLLOVER_PROFIT_PARTIAL",
+      stateVersion,
+      full: false
+    });
+    await addEvent(result.status === "FILLED" ? "WARN" : "ERROR", "RING_ROLLOVER_HARVEST_RESULT", {
+      orderCode: code,
+      positionCode: wanted,
+      status: result.status,
+      filledQuantity: result.filledQuantity ?? 0
+    });
+    return result;
+  }
+
+  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, resolveLegacyDustTicket, executeDustCleanup, listRolloverHarvestPositions, executeRolloverHarvestClose });
 }

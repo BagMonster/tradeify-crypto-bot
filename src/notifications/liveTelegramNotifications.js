@@ -182,13 +182,30 @@ function formatEvent(event) {
   const instrument = headingInstrument(event.instrument);
 
   if (kind === "HARVEST_PENDING") {
+    if (event.mode === "ROLLOVER_PARTIAL") {
+      return { kind, eventKey, message: ["D-068 ROLLOVER HARVEST PENDING", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Profit target: +${money(event.thresholdUsd)}`, "Closing proportional portions of profitable tickets across the entire configured Tradeify account. New entries and ordinary exits are paused until confirmation."].join("\n") };
+    }
     return { kind, eventKey, message: ["D-064 HARVEST PENDING", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Threshold: +${money(event.thresholdUsd)}`, "Flattening every enabled book. New entries and ordinary exits are paused until confirmation."].join("\n") };
   }
   if (kind === "HARVEST_CONFIRMED") {
     const confirmedAt = canonicalUtc("confirmedAt", event.confirmedAt);
+    if (event.mode === "ROLLOVER_PARTIAL") {
+      return { kind, eventKey, message: ["D-068 ROLLOVER HARVEST CONFIRMED", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Profit target: +${money(event.thresholdUsd)}`, "A proportional $33 profit portion was closed across the account; remaining inventory stays open.", "New touch-cross entries may run. Ordinary tranche exits are disabled until 22:00 UTC.", `Confirmed: ${timestamp(confirmedAt)}`].join("\n") };
+    }
     return { kind, eventKey, message: ["D-064 HARVEST CONFIRMED", `Account-day P&L: ${signedMoney(event.combinedDayPnlUsd)}`, `Threshold: +${money(event.thresholdUsd)}`, "Every enabled broker book is flat.", "New touch-cross entries may run. Ordinary tranche exits are disabled until 22:00 UTC.", `Confirmed: ${timestamp(confirmedAt)}`].join("\n") };
   }
   if (kind === "HARVEST_HALTED") {
+    if (event.mode === "ROLLOVER_PARTIAL") {
+      return {
+        kind,
+        eventKey,
+        message: [
+          "🚨 D-068 ROLLOVER HARVEST SAFETY HALT",
+          "The planned partial profit closes could not be confirmed.",
+          "Correction: do not use /resume to bypass this state. Inspect /status and the Railway logs; normal harvest state resets at the next 22:00 UTC account-day rollover."
+        ].join("\n")
+      };
+    }
     const freshnessFailure = typeof event.reason === "string" &&
       event.reason.trim().startsWith("D-064 harvest cannot verify fresh broker account data for ");
     const reason = displayText(event.reason, { max: 300, fallback: REASON_WITHHELD });

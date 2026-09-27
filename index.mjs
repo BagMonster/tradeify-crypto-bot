@@ -426,7 +426,15 @@ const riskSupervisor = createRiskSupervisor({
     setEntryBrake: (on) => s.runtime.setEntryBrake(on),
     setTrancheExitsPaused: (on) => s.runtime.setTrancheExitsPaused(on),
     executeProtectiveCut: (args) => s.runtime.executeProtectiveCut(args),
-    executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args)
+    executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args),
+    getRolloverHarvestCandidates: () => {
+      const markPrice = Number(s.lastTrade?.price);
+      if (!Number.isFinite(markPrice) || markPrice <= 0 || s.feedState.connected !== true || s.feedState.stale === true) {
+        throw new Error(`${s.cfg.instrument} does not have a fresh price for the account-wide rollover harvest`);
+      }
+      return s.runtime.getRolloverHarvestCandidates({ markPrice });
+    },
+    executeRolloverHarvest: (args) => s.runtime.executeRolloverHarvest(args)
   })),
   addEvent: database.addEvent,
   notifications: liveNotifications,

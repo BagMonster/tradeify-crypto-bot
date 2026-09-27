@@ -14,6 +14,7 @@
  */
 
 import { harvestReason, setTrancheExitsPausedAll } from "./sessionHarvest.js";
+import { buildProportionalRolloverHarvestPlan } from "./rolloverHarvest.js";
 
 const DEFAULT_HARVEST_FRESH_DATA_GRACE_MS = 5 * 60 * 1000;
 const DEFAULT_CUT_COOLDOWN_MS = 15 * 60 * 1000;
@@ -329,7 +330,7 @@ export function createRiskSupervisor({
   }
 
   async function loadHarvest(nextDayKey) {
-    if (!sessionHarvestEnabled) return Object.freeze({ dayKey: nextDayKey, status: "READY", triggerPnlUsd: null, confirmedAt: null, haltReason: null });
+    if (!sessionHarvestEnabled) return Object.freeze({ dayKey: nextDayKey, status: "READY", mode: "FULL", plan: null, triggerPnlUsd: null, confirmedAt: null, haltReason: null });
     if (harvestState?.dayKey !== nextDayKey) harvestState = await harvestStore.get(nextDayKey);
     return harvestState;
   }
@@ -360,6 +361,8 @@ export function createRiskSupervisor({
     const halted = await saveHarvest({
       dayKey: incomingDayKey,
       status: "HALTED",
+      mode: prior.mode ?? "FULL",
+      plan: prior.plan ?? null,
       triggerPnlUsd: prior.triggerPnlUsd ?? (Number.isFinite(combinedDayPnlUsd) ? combinedDayPnlUsd : null),
       confirmedAt: null,
       haltReason: reason
@@ -371,11 +374,11 @@ export function createRiskSupervisor({
       reason,
       ...(details ?? {})
     });
-    notifications?.enqueue?.({ kind: "HARVEST_HALTED", eventKey: `D064-HALTED:${incomingDayKey.replaceAll("-", "")}`, reason });
+    notifications?.enqueue?.({ kind: "HARVEST_HALTED", mode: prior.mode ?? "FULL", eventKey: `D064-HALTED:${incomingDayKey.replaceAll("-", "")}`, reason });
     return halted;
   }
 
-  async function runHarvest({ incomingDayKey, combined, readings }) {
+  async function runFullHarvest({ incomingDayKey, combined, readings }) {
     const prior = await loadHarvest(incomingDayKey);
     if (prior.status === "CONFIRMED") {
       applyHarvestGates();
@@ -387,7 +390,7 @@ export function createRiskSupervisor({
     }
     const pending = prior.status === "PENDING"
       ? prior
-      : await saveHarvest({ dayKey: incomingDayKey, status: "PENDING", triggerPnlUsd: combined, confirmedAt: null, haltReason: null });
+      : await saveHarvest({ dayKey: incomingDayKey, status: "PENDING", mode: "FULL", plan: null, triggerPnlUsd: combined, confirmedAt: null, haltReason: null });
     applyHarvestGates();
     if (prior.status !== "PENDING") {
       await addEvent("WARN", "D064_HARVEST_PENDING", { dayKey: incomingDayKey, combinedDayPnlUsd: combined, threshold: sessionHarvestThreshold });
@@ -417,12 +420,153 @@ export function createRiskSupervisor({
       return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: halted });
     }
     if (pendingResults.length > 0) return Object.freeze({ action: "HARVEST_PENDING", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: pending });
-    const confirmed = await saveHarvest({ dayKey: incomingDayKey, status: "CONFIRMED", triggerPnlUsd: pending.triggerPnlUsd, confirmedAt: new Date(now()).toISOString(), haltReason: null });
+    const confirmed = await saveHarvest({ dayKey: incomingDayKey, status: "CONFIRMED", mode: "FULL", plan: null, triggerPnlUsd: pending.triggerPnlUsd, confirmedAt: new Date(now()).toISOString(), haltReason: null });
     applyHarvestGates();
     for (const book of instruments) if (!stickyBrake(book.instrument)) applyEntryBrake(book, false);
     await addEvent("WARN", "D064_HARVEST_CONFIRMED", { dayKey: incomingDayKey, combinedDayPnlUsd: combined, threshold: sessionHarvestThreshold });
     notifications?.enqueue?.({ kind: "HARVEST_CONFIRMED", eventKey: `D064-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`, combinedDayPnlUsd: combined, thresholdUsd: sessionHarvestThreshold, confirmedAt: confirmed.confirmedAt });
     return Object.freeze({ action: "HARVEST_CONFIRMED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: confirmed });
+  }
+
+  async function buildRolloverPlan(incomingDayKey) {
+    const candidates = [];
+    for (const book of instruments) {
+      // Older test/maintenance callers that have no D-068 provider opt out of
+      // this feature entirely; live configured books always provide it.
+      if (typeof book.getRolloverHarvestCandidates !== "function") return null;
+      const rows = await book.getRolloverHarvestCandidates({ dayKey: incomingDayKey });
+      if (!Array.isArray(rows)) throw new Error(`${book.instrument} returned invalid rollover harvest candidates`);
+      candidates.push(...rows);
+    }
+    const plan = buildProportionalRolloverHarvestPlan({
+      dayKey: incomingDayKey,
+      thresholdUsd: sessionHarvestThreshold,
+      candidates
+    });
+    return plan.allocations.length > 0 ? plan : null;
+  }
+
+  function rolloverPlanEntries(plan) {
+    return Array.isArray(plan?.allocations) ? plan.allocations : [];
+  }
+
+  async function runRolloverHarvest({ incomingDayKey, combined, readings }) {
+    const prior = await loadHarvest(incomingDayKey);
+    if (prior.status === "CONFIRMED") {
+      applyHarvestGates();
+      return Object.freeze({ action: "NONE", combinedDayPnlUsd: combined, harvest: prior });
+    }
+    if (prior.status === "HALTED") {
+      applyHarvestGates();
+      return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, harvest: prior });
+    }
+    let plan;
+    try {
+      plan = prior.mode === "ROLLOVER_PARTIAL" && rolloverPlanEntries(prior.plan).length > 0
+        ? prior.plan
+        : await buildRolloverPlan(incomingDayKey);
+    } catch (error) {
+      const halted = await haltHarvest({
+        incomingDayKey,
+        combinedDayPnlUsd: combined,
+        reason: `D-068 cannot read and price every configured account ticket; owner review required`,
+        details: { error: error?.message ?? "rollover ticket read failed" }
+      });
+      return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, harvest: halted });
+    }
+    if (!plan) return null;
+    const pending = prior.status === "PENDING"
+      ? prior
+      : await saveHarvest({
+          dayKey: incomingDayKey,
+          status: "PENDING",
+          mode: "ROLLOVER_PARTIAL",
+          plan,
+          triggerPnlUsd: combined,
+          confirmedAt: null,
+          haltReason: null
+        });
+    applyHarvestGates();
+    if (prior.status !== "PENDING") {
+      await addEvent("WARN", "D068_ROLLOVER_HARVEST_PENDING", {
+        dayKey: incomingDayKey,
+        combinedDayPnlUsd: combined,
+        threshold: sessionHarvestThreshold,
+        totalCarriedProfitUsd: plan.totalUnrealisedPnlUsd,
+        plannedProfitUsd: plan.plannedUsd,
+        allocations: rolloverPlanEntries(plan)
+      });
+      notifications?.enqueue?.({ kind: "HARVEST_PENDING", mode: "ROLLOVER_PARTIAL", eventKey: `D068-PENDING:${incomingDayKey.replaceAll("-", "")}`, combinedDayPnlUsd: combined, thresholdUsd: sessionHarvestThreshold });
+    }
+
+    const completed = new Set(Array.isArray(pending.plan?.completed) ? pending.plan.completed : []);
+    let active = { ...plan, completed: [...completed] };
+    const results = [];
+    for (const reading of readings) {
+      const allocations = rolloverPlanEntries(active).filter((item) => item.instrument === reading.instrument && !completed.has(`${item.instrument}:${item.lotId}`));
+      if (allocations.length === 0) continue;
+      if (typeof reading.book.executeRolloverHarvest !== "function") throw new Error(`${reading.instrument} cannot execute rollover harvest`);
+      const result = await reading.book.executeRolloverHarvest({
+        dayKey: incomingDayKey,
+        allocations,
+        onConfirmedClose: async (close) => {
+          completed.add(`${close.instrument}:${close.lotId}`);
+          active = { ...active, completed: [...completed] };
+          await saveHarvest({
+            dayKey: incomingDayKey,
+            status: "PENDING",
+            mode: "ROLLOVER_PARTIAL",
+            plan: active,
+            triggerPnlUsd: pending.triggerPnlUsd,
+            confirmedAt: null,
+            haltReason: null
+          });
+        }
+      });
+      results.push({ instrument: reading.instrument, result });
+      if (result.pending.length > 0) break;
+    }
+    const pendingResults = results.flatMap((item) => item.result.pending.map((entry) => ({ instrument: item.instrument, ...entry })));
+    if (pendingResults.length > 0) {
+      const terminal = pendingResults.some((entry) => !HARVEST_RETRYABLE_FLATTEN_STATUSES.has(entry.status));
+      if (terminal) {
+        const halted = await haltHarvest({
+          incomingDayKey,
+          combinedDayPnlUsd: combined,
+          reason: "D-068 rollover harvest could not confirm its planned profit closes; owner review required",
+          details: { pending: pendingResults }
+        });
+        return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: halted });
+      }
+      return Object.freeze({ action: "HARVEST_PENDING", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: harvestState });
+    }
+    const confirmed = await saveHarvest({
+      dayKey: incomingDayKey,
+      status: "CONFIRMED",
+      mode: "ROLLOVER_PARTIAL",
+      plan: active,
+      triggerPnlUsd: pending.triggerPnlUsd,
+      confirmedAt: new Date(now()).toISOString(),
+      haltReason: null
+    });
+    applyHarvestGates();
+    for (const book of instruments) if (!stickyBrake(book.instrument)) applyEntryBrake(book, false);
+    await addEvent("WARN", "D068_ROLLOVER_HARVEST_CONFIRMED", {
+      dayKey: incomingDayKey,
+      combinedDayPnlUsd: combined,
+      threshold: sessionHarvestThreshold,
+      totalCarriedProfitUsd: plan.totalUnrealisedPnlUsd,
+      plannedProfitUsd: plan.plannedUsd,
+      closes: results.flatMap((item) => item.result.closed)
+    });
+    notifications?.enqueue?.({ kind: "HARVEST_CONFIRMED", mode: "ROLLOVER_PARTIAL", eventKey: `D068-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`, combinedDayPnlUsd: combined, thresholdUsd: sessionHarvestThreshold, confirmedAt: confirmed.confirmedAt });
+    return Object.freeze({ action: "HARVEST_CONFIRMED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: confirmed });
+  }
+
+  async function runHarvest(args) {
+    const prior = await loadHarvest(args.incomingDayKey);
+    if (prior.mode === "ROLLOVER_PARTIAL") return runRolloverHarvest(args);
+    return runFullHarvest(args);
   }
 
   async function executeFullFlatten({ incomingDayKey, combined, readings }) {
@@ -678,7 +822,11 @@ export function createRiskSupervisor({
         return Object.freeze({ action: "BRAKE", instruments: Object.freeze(newlyBraked), combinedDayPnlUsd: combined });
       }
 
-      if (sessionHarvestEnabled && combined >= sessionHarvestThreshold) return runHarvest({ incomingDayKey, combined, readings });
+      if (sessionHarvestEnabled) {
+        const rollover = await runRolloverHarvest({ incomingDayKey, combined, readings });
+        if (rollover !== null) return rollover;
+        if (combined >= sessionHarvestThreshold) return runHarvest({ incomingDayKey, combined, readings });
+      }
 
       return Object.freeze({ action: "NONE", combinedDayPnlUsd: combined });
     } finally {
@@ -720,6 +868,8 @@ export function createRiskSupervisor({
       const confirmed = await saveHarvest({
         dayKey: incomingDayKey,
         status: "CONFIRMED",
+        mode: prior.mode ?? "FULL",
+        plan: prior.plan ?? null,
         triggerPnlUsd: prior.triggerPnlUsd,
         confirmedAt: new Date(now()).toISOString(),
         haltReason: null
@@ -749,7 +899,7 @@ export function createRiskSupervisor({
     } catch {
       return Object.freeze({ action: "ACCOUNT_DATA_UNAVAILABLE", harvest: prior });
     }
-    await saveHarvest({ dayKey: incomingDayKey, status: "READY", triggerPnlUsd: null, confirmedAt: null, haltReason: null });
+    await saveHarvest({ dayKey: incomingDayKey, status: "READY", mode: "FULL", plan: null, triggerPnlUsd: null, confirmedAt: null, haltReason: null });
     applyHarvestGates();
     hasSuccessfulRead = true;
     return evaluate({ dayKey: incomingDayKey });
