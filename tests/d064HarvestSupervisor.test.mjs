@@ -308,7 +308,7 @@ test("D-068 no-fill recovery clears the exact legacy halt even when its mode was
   assert.equal(supervisor.getSnapshot().harvest.status, "READY");
 });
 
-test("D-068 no-fill recovery refuses a plan with any confirmed close", async () => {
+test("D-068 no-fill recovery refuses a plan with any confirmed close but reconciled-partial recovery confirms it", async () => {
   const store = memoryHarvestStore();
   const reason = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
   await store.save({
@@ -328,4 +328,8 @@ test("D-068 no-fill recovery refuses a plan with any confirmed close", async () 
   });
   const result = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_NO_FILL" });
   assert.equal(result.action, "HARVEST_RECOVERY_REFUSED");
+  const reconciled = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_RECONCILED_PARTIAL" });
+  assert.equal(reconciled.action, "HARVEST_CONFIRMED");
+  assert.equal(supervisor.getSnapshot().harvest.mode, "ROLLOVER_PARTIAL");
+  assert.equal(supervisor.getSnapshot().harvest.status, "CONFIRMED");
 });

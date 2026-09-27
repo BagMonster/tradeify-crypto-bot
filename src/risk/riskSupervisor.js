@@ -50,6 +50,11 @@ function isRolloverNoFillHarvestHalt(harvest) {
     (!Array.isArray(harvest?.plan?.completed) || harvest.plan.completed.length === 0);
 }
 
+function isRolloverReconciledPartialHarvestHalt(harvest) {
+  return harvest?.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
+    Array.isArray(harvest?.plan?.completed) && harvest.plan.completed.length > 0;
+}
+
 const REQUIRED_CONFIG = Object.freeze([
   "entryBrakeUsd",
   "partialCutUsd",
@@ -883,7 +888,7 @@ export function createRiskSupervisor({
     if (!sessionHarvestEnabled) return Object.freeze({ action: "HARVEST_DISABLED" });
     if (typeof incomingDayKey !== "string" || incomingDayKey === "") throw new TypeError("recoverHarvest requires a dayKey");
     if (booksVerified !== true) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED" });
-    if (recoveryKind !== "FRESH_DATA" && recoveryKind !== "VERIFIED_FLAT" && recoveryKind !== "ROLLOVER_NO_FILL") {
+    if (recoveryKind !== "FRESH_DATA" && recoveryKind !== "VERIFIED_FLAT" && recoveryKind !== "ROLLOVER_NO_FILL" && recoveryKind !== "ROLLOVER_RECONCILED_PARTIAL") {
       return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED" });
     }
     if (incomingDayKey !== dayKey) rollover(incomingDayKey);
@@ -892,7 +897,8 @@ export function createRiskSupervisor({
     const freshDataRecovery = recoveryKind === "FRESH_DATA" && isFreshDataHarvestHalt(prior.haltReason);
     const verifiedFlatRecovery = recoveryKind === "VERIFIED_FLAT" && isFlatConfirmationHarvestHalt(prior.haltReason);
     const rolloverNoFillRecovery = recoveryKind === "ROLLOVER_NO_FILL" && isRolloverNoFillHarvestHalt(prior);
-    if (!freshDataRecovery && !verifiedFlatRecovery && !rolloverNoFillRecovery) {
+    const rolloverReconciledPartialRecovery = recoveryKind === "ROLLOVER_RECONCILED_PARTIAL" && isRolloverReconciledPartialHarvestHalt(prior);
+    if (!freshDataRecovery && !verifiedFlatRecovery && !rolloverNoFillRecovery && !rolloverReconciledPartialRecovery) {
       return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
     }
     const readings = readBooks();
@@ -905,16 +911,16 @@ export function createRiskSupervisor({
       const cleared = await clearSafetyHaltIfReason(prior.haltReason);
       if (!cleared) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
     }
-    if (verifiedFlatRecovery) {
-      // The harvest has already flattened every book.  Do not reset to READY
-      // and re-test today's P&L: realised P&L can fall below the threshold
-      // between the flatten and this verification.  Confirm the original
-      // harvest instead, retain its trigger, release only harvest entry brakes,
-      // and keep ordinary tranche exits paused until the account-day reset.
+    if (verifiedFlatRecovery || rolloverReconciledPartialRecovery) {
+      // At least one broker close was confirmed.  Do not reset to READY and
+      // re-test today's P&L: realised P&L can fall below the threshold between
+      // execution and this verification.  Confirm the original harvest,
+      // retain its trigger, release only harvest entry brakes, and keep
+      // ordinary tranche exits paused until the account-day reset.
       const confirmed = await saveHarvest({
         dayKey: incomingDayKey,
         status: "CONFIRMED",
-        mode: prior.mode ?? "FULL",
+        mode: rolloverReconciledPartialRecovery ? "ROLLOVER_PARTIAL" : (prior.mode ?? "FULL"),
         plan: prior.plan ?? null,
         triggerPnlUsd: prior.triggerPnlUsd,
         confirmedAt: new Date(now()).toISOString(),
@@ -922,14 +928,15 @@ export function createRiskSupervisor({
       });
       applyHarvestGates();
       for (const book of instruments) if (!stickyBrake(book.instrument)) applyEntryBrake(book, false);
-      await addEvent("WARN", "D064_HARVEST_RECOVERED_CONFIRMED", {
+      await addEvent("WARN", rolloverReconciledPartialRecovery ? "D068_ROLLOVER_HARVEST_RECOVERED_CONFIRMED" : "D064_HARVEST_RECOVERED_CONFIRMED", {
         dayKey: incomingDayKey,
         triggerPnlUsd: prior.triggerPnlUsd,
         recoveryKind
       });
       notifications?.enqueue?.({
         kind: "HARVEST_CONFIRMED",
-        eventKey: `D064-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`,
+        mode: rolloverReconciledPartialRecovery ? "ROLLOVER_PARTIAL" : undefined,
+        eventKey: `${rolloverReconciledPartialRecovery ? "D068" : "D064"}-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`,
         combinedDayPnlUsd: prior.triggerPnlUsd,
         thresholdUsd: sessionHarvestThreshold,
         confirmedAt: confirmed.confirmedAt
