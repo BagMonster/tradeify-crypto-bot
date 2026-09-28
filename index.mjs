@@ -65,6 +65,9 @@ const orderCodeEpoch = accountOrderEpoch(environment.dxtrade.accountCode);
 
 const database = createDatabase(environment);
 await database.init(account);
+const persistedExposurePoolEpisode = accountRisk.exposurePool
+  ? await database.getExposurePoolEpisode()
+  : null;
 
 // Deadman switch, bot side. The bot records when a risk evaluation last completed and
 // writes it to Postgres every 30 seconds; watchdog/deadman.mjs, a separate Railway
@@ -131,6 +134,12 @@ const accountMonitor = createDxtradeAccountMonitor({
   onSnapshot: async (snapshot) => {
     accountErrorLogged = false;
     await database.syncAccountSnapshot(snapshot, account);
+    if (exposureGate) {
+      const exposureUsd = enabledInstruments.reduce((sum, cfg) => sum + bookExposure(snapshot, cfg.instrument), 0);
+      if (exposureGate.observe({ exposureUsd, observedAtMs: Number(snapshot.fetchedAtMs) })) {
+        await database.saveExposurePoolEpisode({ closedSinceMs: exposureGate.getSnapshot().closedSinceMs });
+      }
+    }
     if (snapshot.accountLocked) {
       if (!accountLockLatched) {
         accountLockLatched = true;
@@ -178,7 +187,8 @@ const exposureGate = accountRisk.exposurePool
     hardUsd: accountRisk.exposurePool.hardUsd,
     readExposure: readAccountExposure,
     notifications: liveNotifications,
-    addEvent: database.addEvent
+    addEvent: database.addEvent,
+    initialClosedSinceMs: persistedExposurePoolEpisode?.closedSinceMs ?? null
   })
   : null;
 console.log(exposureGate
@@ -449,6 +459,12 @@ const riskSupervisor = createRiskSupervisor({
   setSafetyHalt: (reason) => database.setSafetyHalt(reason),
   clearSafetyHaltIfReason: (reason) => database.clearSafetyHaltIfReason(reason),
   getSafetyHaltState: () => database.getState(),
+  getExposurePoolSnapshot: () => exposureGate?.getSnapshot() ?? null,
+  onRolloverHarvestConfirmed: async () => {
+    if (exposureGate?.markHarvested()) {
+      await database.saveExposurePoolEpisode({ closedSinceMs: exposureGate.getSnapshot().closedSinceMs });
+    }
+  },
   requestHaltWarning: requestNonHarvestHalt
 });
 
