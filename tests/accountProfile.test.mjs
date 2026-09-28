@@ -31,6 +31,7 @@ const TEN_K = Object.freeze({
   fullFlattenUsd: 250,
   harvestUsd: 33,
   exposurePool: { softUsd: 2200, hardUsd: 2250 },
+  exposurePoolHarvest: { firstAfterHours: 24, secondAfterHours: 36, firstFraction: 0.5, minimumFraction: 0.25 },
   perCoinCapUsd: 25000
 });
 
@@ -80,6 +81,7 @@ test("10k applies the decided $10K numbers and passes every downstream validator
   assert.equal(risk.fullFlattenUsd, 250);
   assert.equal(risk.sessionHarvestUsd, 33);
   assert.deepEqual(risk.exposurePool, { softUsd: 3000, hardUsd: 3500 });
+  assert.deepEqual(risk.exposurePoolHarvest, { firstAfterHours: 24, secondAfterHours: 36, firstFraction: 0.5, minimumFraction: 0.25 });
   for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 4500, entry.instrument);
 
   // The same validators the bot runs at startup.
