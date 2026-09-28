@@ -139,7 +139,9 @@ test("D-064 flat-confirmation recovery passes the verified-flat mode only after 
 test("D-068 no-fill recovery is available only for a halted plan with no confirmed closes", async () => {
   const database = databaseStub(D068_NO_FILL_HALT);
   const supervisor = supervisorStub(D068_NO_FILL_HALT, {
-    mode: "ROLLOVER_PARTIAL",
+    // Legacy D-068 rows can carry this old default even though their reason
+    // proves they came from rollover harvest.
+    mode: "FULL",
     plan: { allocations: [{ instrument: "SOL/USD", lotId: "ticket" }], completed: [] }
   });
   const rows = [
@@ -148,10 +150,27 @@ test("D-068 no-fill recovery is available only for a halted plan with no confirm
   ];
   const service = serviceFor({ database, supervisor, rows });
   const request = await service.requestHarvestRecovery();
-  assert.match(request.message, /D-068 NO-FILL RECOVERY/);
+  assert.match(request.message, /D-068 ROLLOVER RECOVERY/);
   const message = await service.confirmHarvestRecovery(request.code);
   assert.match(message, /recovery applied/);
   assert.equal(supervisor.recovery.recoveryKind, "ROLLOVER_NO_FILL");
+});
+
+test("D-068 reconciled-partial recovery preserves the completed harvest for the account day", async () => {
+  const database = databaseStub(D068_NO_FILL_HALT);
+  const supervisor = supervisorStub(D068_NO_FILL_HALT, {
+    mode: "FULL",
+    plan: { allocations: [{ instrument: "SOL/USD", lotId: "ticket" }], completed: ["SOL/USD:ticket"] }
+  });
+  const rows = [
+    { instrument: "SOL/USD", ok: true, match: true, virtualNet: -7, brokerNet: -7, openLots: 3 },
+    { instrument: "DOGE/USD", ok: true, match: true, virtualNet: -2, brokerNet: -2, openLots: 1 }
+  ];
+  const service = serviceFor({ database, supervisor, rows });
+  const request = await service.requestHarvestRecovery();
+  assert.match(request.message, /D-068 ROLLOVER RECOVERY/);
+  await service.confirmHarvestRecovery(request.code);
+  assert.equal(supervisor.recovery.recoveryKind, "ROLLOVER_RECONCILED_PARTIAL");
 });
 
 test("verified startup recovery clears only the matching, reconciled D-064 freshness halt", async () => {

@@ -282,13 +282,13 @@ test("D-068 defers an unsubmitted changed ticket with a warning and leaves norma
   assert.equal(sol.calls.some(([kind, on]) => kind === "brake" && on === false), true);
 });
 
-test("D-068 no-fill recovery clears only the exact halted partial plan after book verification", async () => {
+test("D-068 no-fill recovery clears the exact legacy halt even when its mode was persisted as FULL", async () => {
   const store = memoryHarvestStore();
   const reason = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
   await store.save({
     dayKey: "2026-09-27",
     status: "HALTED",
-    mode: "ROLLOVER_PARTIAL",
+    mode: "FULL",
     plan: { allocations: [{ instrument: "SOL/USD", lotId: "ticket" }], completed: [] },
     triggerPnlUsd: -3.65,
     confirmedAt: null,
@@ -306,4 +306,30 @@ test("D-068 no-fill recovery clears only the exact halted partial plan after boo
   const result = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_NO_FILL" });
   assert.equal(result.action, "NONE");
   assert.equal(supervisor.getSnapshot().harvest.status, "READY");
+});
+
+test("D-068 no-fill recovery refuses a plan with any confirmed close but reconciled-partial recovery confirms it", async () => {
+  const store = memoryHarvestStore();
+  const reason = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
+  await store.save({
+    dayKey: "2026-09-27",
+    status: "HALTED",
+    mode: "FULL",
+    plan: { allocations: [{ instrument: "SOL/USD", lotId: "ticket" }], completed: ["SOL/USD:ticket"] },
+    triggerPnlUsd: 5.03,
+    confirmedAt: null,
+    haltReason: reason
+  });
+  const supervisor = createRiskSupervisor({
+    config: { ...config, sessionHarvestUsd: 33 },
+    instruments: [book("SOL/USD")],
+    harvestStore: store,
+    getCombinedDayPnlUsd: () => 5.03
+  });
+  const result = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_NO_FILL" });
+  assert.equal(result.action, "HARVEST_RECOVERY_REFUSED");
+  const reconciled = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_RECONCILED_PARTIAL" });
+  assert.equal(reconciled.action, "HARVEST_CONFIRMED");
+  assert.equal(supervisor.getSnapshot().harvest.mode, "ROLLOVER_PARTIAL");
+  assert.equal(supervisor.getSnapshot().harvest.status, "CONFIRMED");
 });

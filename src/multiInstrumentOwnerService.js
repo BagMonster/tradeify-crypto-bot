@@ -112,9 +112,13 @@ export function createMultiInstrumentOwnerService({
     if (harvest.haltReason.startsWith("D-064 harvest cannot verify fresh broker account data for ") ||
       harvest.haltReason === "D-068 cannot read and price every configured account ticket; owner review required") return "FRESH_DATA";
     if (harvest.haltReason === D064_FLAT_CONFIRMATION_HALT) return "VERIFIED_FLAT";
-    if (harvest.mode === "ROLLOVER_PARTIAL" &&
-      harvest.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
-      (!Array.isArray(harvest.plan?.completed) || harvest.plan.completed.length === 0)) return "ROLLOVER_NO_FILL";
+    // Old D-068 persistence may identify this plan as FULL despite the
+    // unambiguous D-068 halt reason.  Do not use that legacy mode label.
+    if (harvest.haltReason === D068_ROLLOVER_CONFIRMATION_HALT) {
+      return Array.isArray(harvest.plan?.completed) && harvest.plan.completed.length > 0
+        ? "ROLLOVER_RECONCILED_PARTIAL"
+        : "ROLLOVER_NO_FILL";
+    }
     return null;
   }
 
@@ -140,7 +144,7 @@ export function createMultiInstrumentOwnerService({
   function recoveryRowsFailureText(rows, recoveryKind, phase) {
     const heading = recoveryKind === "VERIFIED_FLAT"
       ? `D-064 RECOVERY ${phase} — BOOKS NOT CONFIRMED FLAT`
-      : recoveryKind === "ROLLOVER_NO_FILL"
+      : recoveryKind === "ROLLOVER_NO_FILL" || recoveryKind === "ROLLOVER_RECONCILED_PARTIAL"
         ? `D-068 NO-FILL RECOVERY ${phase} — BOOKS NOT RECONCILED`
       : `D-064 RECOVERY ${phase} — BOOKS NOT RECONCILED`;
     const instruction = recoveryKind === "VERIFIED_FLAT"
@@ -362,7 +366,7 @@ export function createMultiInstrumentOwnerService({
       if (!riskSupervisor || !database) return { code: null, message: "D-064 recovery is not configured on this deployment." };
       const snapshot = riskSupervisor.getSnapshot();
       const recoveryKind = d064RecoveryKind(snapshot.harvest);
-      if (!recoveryKind) return { code: null, message: "D-064 recovery is refused: the current halt is not a recoverable D-064 fresh-data or flat-confirmation halt." };
+      if (!recoveryKind) return { code: null, message: "Harvest recovery is refused: the current halt is not a recoverable fresh-data, flat-confirmation, or no-fill D-068 halt." };
       const [botState, rows] = await Promise.all([database.getState(), inspectBooks()]);
       if (botState.safety_halt === true && botState.halt_reason !== snapshot.harvest.haltReason) {
         return { code: null, message: "D-064 recovery is refused: a different safety halt is active. It was not changed." };
@@ -378,8 +382,10 @@ export function createMultiInstrumentOwnerService({
         ? "This confirms the already-completed harvest, retains its original trigger, reopens new entries, and keeps ordinary tranche exits paused until 22:00 UTC."
         : recoveryKind === "ROLLOVER_NO_FILL"
           ? "This clears only the pre-dispatch D-068 no-fill halt after every book is freshly reconciled. It returns the harvest gate to READY so normal trading can continue."
-        : "This rechecks fresh account data and clears only the matching fresh-data halt.";
-      const heading = recoveryKind === "ROLLOVER_NO_FILL" ? "D-068 NO-FILL RECOVERY" : "D-064 HARVEST RECOVERY";
+          : recoveryKind === "ROLLOVER_RECONCILED_PARTIAL"
+            ? "This confirms the already reconciled D-068 partial harvest, reopens new entries, and keeps ordinary tranche exits paused until 22:00 UTC so no second profit slice can run today."
+          : "This rechecks fresh account data and clears only the matching fresh-data halt.";
+      const heading = recoveryKind === "ROLLOVER_NO_FILL" || recoveryKind === "ROLLOVER_RECONCILED_PARTIAL" ? "D-068 ROLLOVER RECOVERY" : "D-064 HARVEST RECOVERY";
       return { code, message: [heading, "", rowsText(rows), "", purpose, "It will not change virtual lots, place a DXtrade order, or lift an operator pause.", "", `To apply, send /confirmharvestrecover ${code} within 10 minutes.`].join("\n") };
     },
     // This is deliberately narrower than the owner-command recovery above.  It
