@@ -43,7 +43,7 @@ const PROFILE_OWNED_ACCOUNT_FIELDS = Object.freeze([
 ]);
 const PROFILE_OWNED_RISK_FIELDS = Object.freeze([
   "entryBrakeUsd", "cutTiers", "partialCutUsd", "partialCutFraction",
-  "fullFlattenUsd", "dailyLossLimitUsd", "sessionHarvestUsd", "exposurePool"
+  "fullFlattenUsd", "dailyLossLimitUsd", "sessionHarvestUsd", "exposurePool", "exposurePoolHarvest"
 ]);
 
 const PROFILE_NAME = /^[a-z0-9-]{1,32}$/;
@@ -116,6 +116,18 @@ export function validateAccountProfile(input, name = "profile") {
     exposurePool = Object.freeze({ softUsd, hardUsd });
   }
 
+  let exposurePoolHarvest = null;
+  if (input.exposurePoolHarvest != null) {
+    if (exposurePool === null) fail("exposurePoolHarvest requires exposurePool");
+    const firstAfterHours = positive("exposurePoolHarvest.firstAfterHours", input.exposurePoolHarvest.firstAfterHours);
+    const secondAfterHours = positive("exposurePoolHarvest.secondAfterHours", input.exposurePoolHarvest.secondAfterHours);
+    const firstFraction = positive("exposurePoolHarvest.firstFraction", input.exposurePoolHarvest.firstFraction);
+    const minimumFraction = positive("exposurePoolHarvest.minimumFraction", input.exposurePoolHarvest.minimumFraction);
+    if (!(secondAfterHours > firstAfterHours)) fail("exposurePoolHarvest.secondAfterHours must be after firstAfterHours");
+    if (!(firstFraction < 1 && minimumFraction < firstFraction)) fail("exposurePoolHarvest fractions must decrease and stay below one");
+    exposurePoolHarvest = Object.freeze({ firstAfterHours, secondAfterHours, firstFraction, minimumFraction });
+  }
+
   return Object.freeze({
     name,
     accountSize,
@@ -127,7 +139,8 @@ export function validateAccountProfile(input, name = "profile") {
     fullFlattenUsd,
     harvestUsd,
     perCoinCapUsd,
-    exposurePool
+    exposurePool,
+    exposurePoolHarvest
   });
 }
 
@@ -200,7 +213,8 @@ export function applyAccountProfile({ profile, account, instruments }) {
     fullFlattenUsd: profile.fullFlattenUsd,
     dailyLossLimitUsd: profile.dailyLossLimitUsd,
     sessionHarvestUsd: profile.harvestUsd,
-    ...(profile.exposurePool ? { exposurePool: { softUsd: profile.exposurePool.softUsd, hardUsd: profile.exposurePool.hardUsd } } : {})
+    ...(profile.exposurePool ? { exposurePool: { softUsd: profile.exposurePool.softUsd, hardUsd: profile.exposurePool.hardUsd } } : {}),
+    ...(profile.exposurePoolHarvest ? { exposurePoolHarvest: { ...profile.exposurePoolHarvest } } : {})
   };
 
   for (const entry of instrumentsOut.instruments ?? []) {
