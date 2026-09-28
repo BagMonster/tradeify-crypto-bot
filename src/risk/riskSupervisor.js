@@ -41,18 +41,18 @@ function isFlatConfirmationHarvestHalt(reason) {
   return reason === HARVEST_FLAT_CONFIRMATION_HALT;
 }
 
-function isRolloverNoFillHarvestHalt(harvest) {
-  // The pre-recovery D-068 implementation persisted some partial-harvest
-  // rows with the legacy FULL mode.  The exact D-068 reason plus an empty
-  // completed list is the durable evidence that no close was confirmed; mode
-  // is not trustworthy enough to block the owner-confirmed recovery.
+function isUnverifiedRolloverHarvestHalt(harvest) {
+  // Old D-068 rows persisted a local completed list, but that list records a
+  // callback, not a broker receipt.  It is never sufficient to lock ordinary
+  // exits.  Future real D-068 confirmations carry an explicit broker marker.
   return harvest?.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
-    (!Array.isArray(harvest?.plan?.completed) || harvest.plan.completed.length === 0);
+    harvest?.plan?.confirmation?.source !== "BROKER_CONFIRMED";
 }
 
-function isRolloverReconciledPartialHarvestHalt(harvest) {
-  return harvest?.haltReason === D068_ROLLOVER_CONFIRMATION_HALT &&
-    Array.isArray(harvest?.plan?.completed) && harvest.plan.completed.length > 0;
+function isUnverifiedRolloverConfirmation(harvest) {
+  return harvest?.status === "CONFIRMED" &&
+    harvest?.mode === "ROLLOVER_PARTIAL" &&
+    harvest?.plan?.confirmation?.source !== "BROKER_CONFIRMED";
 }
 
 const REQUIRED_CONFIG = Object.freeze([
@@ -116,6 +116,8 @@ export function createRiskSupervisor({
   setSafetyHalt = async () => {},
   clearSafetyHaltIfReason = async () => false,
   getSafetyHaltState = async () => null,
+  getExposurePoolSnapshot = null,
+  onRolloverHarvestConfirmed = async () => {},
   // requestHaltWarning is no longer used: the full flatten does not wait on a
   // warning cycle. index.mjs may still pass it; an unknown property is ignored.
   now = () => Date.now()
@@ -183,6 +185,26 @@ export function createRiskSupervisor({
   const sessionHarvestFreshDataGraceMs = sessionHarvestEnabled && Number.isFinite(configuredFreshDataGrace)
     ? positiveNumber("sessionHarvestFreshDataGraceMs", configuredFreshDataGrace)
     : DEFAULT_HARVEST_FRESH_DATA_GRACE_MS;
+  const exposurePoolHarvest = config.exposurePoolHarvest ?? null;
+
+  function rolloverHarvestTarget() {
+    const policy = exposurePoolHarvest;
+    if (!policy || typeof getExposurePoolSnapshot !== "function") return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD" });
+    let snapshot;
+    try {
+      snapshot = getExposurePoolSnapshot();
+    } catch {
+      return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD" });
+    }
+    const sinceMs = Number(snapshot?.closedSinceMs);
+    if (snapshot?.closed !== true || !Number.isFinite(sinceMs)) return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD" });
+    const ageMs = Math.max(0, now() - sinceMs);
+    const firstMs = Number(policy.firstAfterHours) * 60 * 60 * 1000;
+    const secondMs = Number(policy.secondAfterHours) * 60 * 60 * 1000;
+    if (ageMs >= secondMs) return Object.freeze({ thresholdUsd: fixed2(sessionHarvestThreshold * Number(policy.minimumFraction)), phase: "FULL_36H", ageMs });
+    if (ageMs >= firstMs) return Object.freeze({ thresholdUsd: fixed2(sessionHarvestThreshold * Number(policy.firstFraction)), phase: "FULL_24H", ageMs });
+    return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD", ageMs });
+  }
   if (sessionHarvestEnabled && (!harvestStore || typeof harvestStore.get !== "function" || typeof harvestStore.save !== "function")) {
     throw new TypeError("enabled session harvest requires a durable harvestStore");
   }
@@ -446,7 +468,7 @@ export function createRiskSupervisor({
     return Object.freeze({ action: "HARVEST_CONFIRMED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: confirmed });
   }
 
-  async function buildRolloverPlan(incomingDayKey) {
+  async function buildRolloverPlan(incomingDayKey, thresholdUsd) {
     const candidates = [];
     for (const book of instruments) {
       // Older test/maintenance callers that have no D-068 provider opt out of
@@ -463,7 +485,7 @@ export function createRiskSupervisor({
     }
     const plan = buildProportionalRolloverHarvestPlan({
       dayKey: incomingDayKey,
-      thresholdUsd: sessionHarvestThreshold,
+      thresholdUsd,
       candidates
     });
     return plan.allocations.length > 0 ? plan : null;
@@ -484,10 +506,11 @@ export function createRiskSupervisor({
       return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, harvest: prior });
     }
     let plan;
+    const target = rolloverHarvestTarget();
     try {
       plan = prior.mode === "ROLLOVER_PARTIAL" && rolloverPlanEntries(prior.plan).length > 0
         ? prior.plan
-        : await buildRolloverPlan(incomingDayKey);
+        : await buildRolloverPlan(incomingDayKey, target.thresholdUsd);
     } catch (error) {
       // Candidate pricing/readiness is transient at startup and reconnect. It
       // blocks only this optional partial-harvest calculation; it must not
@@ -515,13 +538,14 @@ export function createRiskSupervisor({
       await addEvent("WARN", "D068_ROLLOVER_HARVEST_PENDING", {
         dayKey: incomingDayKey,
         combinedDayPnlUsd: combined,
-        threshold: sessionHarvestThreshold,
+        threshold: plan.targetUsd,
+        targetPhase: target.phase,
         netCarriedPnlUsd: plan.totalUnrealisedPnlUsd,
         totalProfitablePnlUsd: plan.totalProfitablePnlUsd,
         plannedProfitUsd: plan.plannedUsd,
         allocations: rolloverPlanEntries(plan)
       });
-      notifications?.enqueue?.({ kind: "HARVEST_PENDING", mode: "ROLLOVER_PARTIAL", eventKey: `D068-PENDING:${incomingDayKey.replaceAll("-", "")}`, combinedDayPnlUsd: combined, thresholdUsd: sessionHarvestThreshold });
+      notifications?.enqueue?.({ kind: "HARVEST_PENDING", mode: "ROLLOVER_PARTIAL", eventKey: `D068-PENDING:${incomingDayKey.replaceAll("-", "")}`, combinedDayPnlUsd: combined, thresholdUsd: plan.targetUsd });
     }
 
     const completed = new Set(Array.isArray(pending.plan?.completed) ? pending.plan.completed : []);
@@ -572,14 +596,14 @@ export function createRiskSupervisor({
         await addEvent("WARN", "D068_ROLLOVER_HARVEST_DEFERRED", {
           dayKey: incomingDayKey,
           combinedDayPnlUsd: combined,
-          threshold: sessionHarvestThreshold,
+          threshold: plan.targetUsd,
           pending: pendingResults
         });
         notifications?.enqueue?.({
           kind: "HARVEST_DEFERRED",
           mode: "ROLLOVER_PARTIAL",
           eventKey: `D068-DEFERRED:${incomingDayKey.replaceAll("-", "")}`,
-          thresholdUsd: sessionHarvestThreshold,
+          thresholdUsd: plan.targetUsd,
           pending: pendingResults
         });
         return Object.freeze({ action: "HARVEST_DEFERRED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: ready });
@@ -589,6 +613,7 @@ export function createRiskSupervisor({
       // optional harvest into a safety halt.
       return Object.freeze({ action: "HARVEST_PENDING", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: harvestState });
     }
+    active = { ...active, confirmation: { source: "BROKER_CONFIRMED", at: new Date(now()).toISOString() } };
     const confirmed = await saveHarvest({
       dayKey: incomingDayKey,
       status: "CONFIRMED",
@@ -599,17 +624,26 @@ export function createRiskSupervisor({
       haltReason: null
     });
     applyHarvestGates();
+    try {
+      await onRolloverHarvestConfirmed();
+    } catch (error) {
+      // The broker-confirmed harvest is already durable.  A best-effort timer
+      // reset must never turn it into a safety halt or change its result.
+      try {
+        await addEvent("WARN", "D068_EXPOSURE_POOL_CLOCK_RESET_DEFERRED", { dayKey: incomingDayKey, error: error?.message ?? "exposure pool clock save failed" });
+      } catch { /* audit storage is unavailable too */ }
+    }
     for (const book of instruments) if (!stickyBrake(book.instrument)) applyEntryBrake(book, false);
     await addEvent("WARN", "D068_ROLLOVER_HARVEST_CONFIRMED", {
       dayKey: incomingDayKey,
       combinedDayPnlUsd: combined,
-      threshold: sessionHarvestThreshold,
+      threshold: plan.targetUsd,
       netCarriedPnlUsd: plan.totalUnrealisedPnlUsd,
       totalProfitablePnlUsd: plan.totalProfitablePnlUsd,
       plannedProfitUsd: plan.plannedUsd,
       closes: results.flatMap((item) => item.result.closed)
     });
-    notifications?.enqueue?.({ kind: "HARVEST_CONFIRMED", mode: "ROLLOVER_PARTIAL", eventKey: `D068-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`, combinedDayPnlUsd: combined, thresholdUsd: sessionHarvestThreshold, confirmedAt: confirmed.confirmedAt });
+    notifications?.enqueue?.({ kind: "HARVEST_CONFIRMED", mode: "ROLLOVER_PARTIAL", eventKey: `D068-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`, combinedDayPnlUsd: combined, thresholdUsd: plan.targetUsd, confirmedAt: confirmed.confirmedAt });
     return Object.freeze({ action: "HARVEST_CONFIRMED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: confirmed });
   }
 
@@ -888,17 +922,17 @@ export function createRiskSupervisor({
     if (!sessionHarvestEnabled) return Object.freeze({ action: "HARVEST_DISABLED" });
     if (typeof incomingDayKey !== "string" || incomingDayKey === "") throw new TypeError("recoverHarvest requires a dayKey");
     if (booksVerified !== true) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED" });
-    if (recoveryKind !== "FRESH_DATA" && recoveryKind !== "VERIFIED_FLAT" && recoveryKind !== "ROLLOVER_NO_FILL" && recoveryKind !== "ROLLOVER_RECONCILED_PARTIAL") {
+    if (recoveryKind !== "FRESH_DATA" && recoveryKind !== "VERIFIED_FLAT" && recoveryKind !== "ROLLOVER_UNVERIFIED") {
       return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED" });
     }
     if (incomingDayKey !== dayKey) rollover(incomingDayKey);
     const prior = await loadHarvest(incomingDayKey);
-    if (prior.status !== "HALTED") return Object.freeze({ action: "HARVEST_NOT_HALTED", harvest: prior });
+    const unverifiedRolloverConfirmation = recoveryKind === "ROLLOVER_UNVERIFIED" && isUnverifiedRolloverConfirmation(prior);
+    if (prior.status !== "HALTED" && !unverifiedRolloverConfirmation) return Object.freeze({ action: "HARVEST_NOT_HALTED", harvest: prior });
     const freshDataRecovery = recoveryKind === "FRESH_DATA" && isFreshDataHarvestHalt(prior.haltReason);
     const verifiedFlatRecovery = recoveryKind === "VERIFIED_FLAT" && isFlatConfirmationHarvestHalt(prior.haltReason);
-    const rolloverNoFillRecovery = recoveryKind === "ROLLOVER_NO_FILL" && isRolloverNoFillHarvestHalt(prior);
-    const rolloverReconciledPartialRecovery = recoveryKind === "ROLLOVER_RECONCILED_PARTIAL" && isRolloverReconciledPartialHarvestHalt(prior);
-    if (!freshDataRecovery && !verifiedFlatRecovery && !rolloverNoFillRecovery && !rolloverReconciledPartialRecovery) {
+    const rolloverUnverifiedRecovery = recoveryKind === "ROLLOVER_UNVERIFIED" && isUnverifiedRolloverHarvestHalt(prior);
+    if (!freshDataRecovery && !verifiedFlatRecovery && !rolloverUnverifiedRecovery && !unverifiedRolloverConfirmation) {
       return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
     }
     const readings = readBooks();
@@ -911,7 +945,7 @@ export function createRiskSupervisor({
       const cleared = await clearSafetyHaltIfReason(prior.haltReason);
       if (!cleared) return Object.freeze({ action: "HARVEST_RECOVERY_REFUSED", harvest: prior });
     }
-    if (verifiedFlatRecovery || rolloverReconciledPartialRecovery) {
+    if (verifiedFlatRecovery) {
       // At least one broker close was confirmed.  Do not reset to READY and
       // re-test today's P&L: realised P&L can fall below the threshold between
       // execution and this verification.  Confirm the original harvest,
@@ -920,7 +954,7 @@ export function createRiskSupervisor({
       const confirmed = await saveHarvest({
         dayKey: incomingDayKey,
         status: "CONFIRMED",
-        mode: rolloverReconciledPartialRecovery ? "ROLLOVER_PARTIAL" : (prior.mode ?? "FULL"),
+        mode: prior.mode ?? "FULL",
         plan: prior.plan ?? null,
         triggerPnlUsd: prior.triggerPnlUsd,
         confirmedAt: new Date(now()).toISOString(),
@@ -928,15 +962,14 @@ export function createRiskSupervisor({
       });
       applyHarvestGates();
       for (const book of instruments) if (!stickyBrake(book.instrument)) applyEntryBrake(book, false);
-      await addEvent("WARN", rolloverReconciledPartialRecovery ? "D068_ROLLOVER_HARVEST_RECOVERED_CONFIRMED" : "D064_HARVEST_RECOVERED_CONFIRMED", {
+      await addEvent("WARN", "D064_HARVEST_RECOVERED_CONFIRMED", {
         dayKey: incomingDayKey,
         triggerPnlUsd: prior.triggerPnlUsd,
         recoveryKind
       });
       notifications?.enqueue?.({
         kind: "HARVEST_CONFIRMED",
-        mode: rolloverReconciledPartialRecovery ? "ROLLOVER_PARTIAL" : undefined,
-        eventKey: `${rolloverReconciledPartialRecovery ? "D068" : "D064"}-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`,
+        eventKey: `D064-CONFIRMED:${incomingDayKey.replaceAll("-", "")}`,
         combinedDayPnlUsd: prior.triggerPnlUsd,
         thresholdUsd: sessionHarvestThreshold,
         confirmedAt: confirmed.confirmedAt
