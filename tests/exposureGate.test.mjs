@@ -89,6 +89,19 @@ test("the gate reopens once exposure falls below the soft ceiling, and says so o
   assert.equal(enqueued.filter((e) => e.kind === "EXPOSURE_GATE_REOPENED").length, 1, "no repeat while open");
 });
 
+test("the full-pool clock is observed without an entry and resets after a real harvest", () => {
+  const { gate, state } = harness({ broker: 2300 });
+  assert.equal(gate.observe({ exposureUsd: 2300 }), true);
+  const firstSince = gate.getSnapshot().closedSinceMs;
+  state.t += 36 * 60 * 60 * 1000;
+  assert.equal(gate.observe({ exposureUsd: 2301 }), false);
+  assert.equal(gate.getSnapshot().closedSinceMs, firstSince);
+  assert.equal(gate.markHarvested(), true);
+  assert.equal(gate.getSnapshot().closedSinceMs, state.t);
+  assert.equal(gate.observe({ exposureUsd: 2100 }), true);
+  assert.equal(gate.getSnapshot().closed, false);
+});
+
 test("unknown exposure is never treated as zero", () => {
   const { gate, state } = harness({ broker: 0 });
   state.unavailable = true;
