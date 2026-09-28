@@ -76,6 +76,7 @@ export function createExposureGate({
   notifications = null,
   addEvent = async () => {},
   now = () => Date.now(),
+  initialClosedSinceMs = null,
   filledReservationTtlMs = DEFAULT_FILLED_RESERVATION_TTL_MS,
   snapshotMarginMs = DEFAULT_SNAPSHOT_MARGIN_MS
 }) {
@@ -89,7 +90,9 @@ export function createExposureGate({
   const reservations = new Map();
   let nextId = 1;
 
-  let closed = null;            // { sinceMs, refusals, exposureUsd } while entries are refused at the soft ceiling
+  let closed = Number.isFinite(initialClosedSinceMs) && initialClosedSinceMs > 0
+    ? { sinceMs: Number(initialClosedSinceMs), refusals: 0, exposureUsd: null }
+    : null;                     // { sinceMs, refusals, exposureUsd } while entries are refused at the soft ceiling
   let hardCrossRefusals = 0;    // lifetime count, for /status and logs
   let dataUnavailableRefusals = 0;
 
@@ -233,6 +236,35 @@ export function createExposureGate({
     r.filledAtMs = now();
   }
 
+  // The account monitor calls this on every fresh broker snapshot.  Unlike an
+  // entry request it does not page the owner: it only keeps the full-pool
+  // episode accurate (and durable) when price moves without a new entry.
+  function observe({ exposureUsd, observedAtMs = NaN } = {}) {
+    const brokerUsd = Number(exposureUsd);
+    if (!Number.isFinite(brokerUsd) || brokerUsd < 0) return false;
+    prune(Number(observedAtMs));
+    const exposure = brokerUsd + reservedUsd();
+    if (exposure >= soft) {
+      if (closed !== null) {
+        closed.exposureUsd = exposure;
+        return false;
+      }
+      closed = { sinceMs: now(), refusals: 0, exposureUsd: exposure };
+      return true;
+    }
+    if (closed === null) return false;
+    closed = null;
+    return true;
+  }
+
+  // A real rollover harvest starts a new full-pool episode even if its small
+  // partial close does not take the account below the soft ceiling.
+  function markHarvested() {
+    if (closed === null) return false;
+    closed = { ...closed, sinceMs: now(), refusals: 0 };
+    return true;
+  }
+
   function getSnapshot() {
     // 2026-09-22. prune() used to run only inside requestEntry, so between entries
     // /status kept showing the reservation of an order that had already filled —
@@ -254,7 +286,7 @@ export function createExposureGate({
     });
   }
 
-  return Object.freeze({ requestEntry, settle, getSnapshot });
+  return Object.freeze({ requestEntry, settle, observe, markHarvested, getSnapshot });
 }
 
 function usd(value) {
