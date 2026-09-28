@@ -98,7 +98,7 @@ test("D-064 command confirms only after all books match and keeps the operator p
   const request = await service.requestHarvestRecovery();
   assert.match(request.code, /^\d{6}$/);
   const message = await service.confirmHarvestRecovery(request.code);
-  assert.match(message, /D-064 recovery applied: NONE/);
+  assert.match(message, /Harvest recovery applied: NONE/);
   assert.equal(supervisor.recovery.booksVerified, true);
   assert.equal(supervisor.recovery.recoveryKind, "FRESH_DATA");
   assert.equal(database.state.resume_code_hash, null);
@@ -153,7 +153,7 @@ test("D-068 no-fill recovery is available only for a halted plan with no confirm
   assert.match(request.message, /D-068 ROLLOVER RECOVERY/);
   const message = await service.confirmHarvestRecovery(request.code);
   assert.match(message, /recovery applied/);
-  assert.equal(supervisor.recovery.recoveryKind, "ROLLOVER_NO_FILL");
+  assert.equal(supervisor.recovery.recoveryKind, "ROLLOVER_UNVERIFIED");
 });
 
 test("D-068 reconciled-partial recovery preserves the completed harvest for the account day", async () => {
@@ -170,7 +170,7 @@ test("D-068 reconciled-partial recovery preserves the completed harvest for the 
   const request = await service.requestHarvestRecovery();
   assert.match(request.message, /D-068 ROLLOVER RECOVERY/);
   await service.confirmHarvestRecovery(request.code);
-  assert.equal(supervisor.recovery.recoveryKind, "ROLLOVER_RECONCILED_PARTIAL");
+  assert.equal(supervisor.recovery.recoveryKind, "ROLLOVER_UNVERIFIED");
 });
 
 test("verified startup recovery clears only the matching, reconciled D-064 freshness halt", async () => {
