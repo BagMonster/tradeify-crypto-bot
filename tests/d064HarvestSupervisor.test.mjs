@@ -303,12 +303,12 @@ test("D-068 no-fill recovery clears the exact legacy halt even when its mode was
     getSafetyHaltState: async () => ({ safety_halt: true, halt_reason: reason }),
     clearSafetyHaltIfReason: async (value) => value === reason
   });
-  const result = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_NO_FILL" });
+  const result = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_UNVERIFIED" });
   assert.equal(result.action, "NONE");
   assert.equal(supervisor.getSnapshot().harvest.status, "READY");
 });
 
-test("D-068 no-fill recovery refuses a plan with any confirmed close but reconciled-partial recovery confirms it", async () => {
+test("D-068 unverified legacy plan clears to READY even when its saved completed list is non-empty", async () => {
   const store = memoryHarvestStore();
   const reason = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
   await store.save({
@@ -326,10 +326,61 @@ test("D-068 no-fill recovery refuses a plan with any confirmed close but reconci
     harvestStore: store,
     getCombinedDayPnlUsd: () => 5.03
   });
-  const result = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_NO_FILL" });
-  assert.equal(result.action, "HARVEST_RECOVERY_REFUSED");
-  const reconciled = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_RECONCILED_PARTIAL" });
-  assert.equal(reconciled.action, "HARVEST_CONFIRMED");
-  assert.equal(supervisor.getSnapshot().harvest.mode, "ROLLOVER_PARTIAL");
-  assert.equal(supervisor.getSnapshot().harvest.status, "CONFIRMED");
+  const result = await supervisor.recoverHarvest({ dayKey: "2026-09-27", booksVerified: true, recoveryKind: "ROLLOVER_UNVERIFIED" });
+  assert.equal(result.action, "NONE");
+  assert.equal(supervisor.getSnapshot().harvest.status, "READY");
+  assert.equal(supervisor.getSnapshot().trancheExitsPaused, false);
+});
+
+test("D-068 owner recovery clears an unverified legacy confirmation and restores ordinary exits", async () => {
+  const store = memoryHarvestStore();
+  await store.save({ dayKey: "2026-09-28", status: "CONFIRMED", mode: "ROLLOVER_PARTIAL", plan: { allocations: [{ instrument: "SOL/USD", lotId: "ticket" }], completed: ["SOL/USD:ticket"] }, triggerPnlUsd: 5.03, confirmedAt: "2026-09-28T00:06:49.797Z", haltReason: null });
+  const sol = book("SOL/USD");
+  const supervisor = createRiskSupervisor({ config: { ...config, sessionHarvestUsd: 33 }, instruments: [sol], harvestStore: store, getCombinedDayPnlUsd: () => 5.03 });
+  const result = await supervisor.recoverHarvest({ dayKey: "2026-09-28", booksVerified: true, recoveryKind: "ROLLOVER_UNVERIFIED" });
+  assert.equal(result.action, "NONE");
+  assert.equal(supervisor.getSnapshot().harvest.status, "READY");
+  assert.equal(supervisor.getSnapshot().trancheExitsPaused, false);
+  assert.equal(sol.calls.some(([kind]) => kind === "flatten"), false);
+});
+
+test("D-068 full-pool schedule uses $16.50 after 24 hours", async () => {
+  const store = memoryHarvestStore();
+  const nowMs = Date.parse("2026-09-28T12:00:00.000Z");
+  const closes = [];
+  const sol = book("SOL/USD");
+  sol.getRolloverHarvestCandidates = async () => [{ instrument: "SOL/USD", lotId: "ticket", positionCode: "DX-TICKET", virtualSide: "BUY", entryPrice: 100, markPrice: 110, remainingUnits: 4, lotStep: 0.01 }];
+  sol.executeRolloverHarvest = async ({ allocations, onConfirmedClose }) => {
+    closes.push(allocations[0]);
+    await onConfirmedClose({ instrument: "SOL/USD", lotId: "ticket", filledQuantity: allocations[0].quantity, realizedPnlUsd: allocations[0].estimatedProfitUsd });
+    return { closed: [], pending: [] };
+  };
+  const supervisor = createRiskSupervisor({
+    config: { ...config, sessionHarvestUsd: 33, exposurePoolHarvest: { firstAfterHours: 24, secondAfterHours: 36, firstFraction: 0.5, minimumFraction: 0.25 } },
+    instruments: [sol], harvestStore: store, getCombinedDayPnlUsd: () => 0, now: () => nowMs,
+    getExposurePoolSnapshot: () => ({ closed: true, closedSinceMs: nowMs - 24 * 60 * 60 * 1000 })
+  });
+  await supervisor.evaluate({ dayKey: "2026-09-28" });
+  assert.equal(closes[0].estimatedProfitUsd, 16.5);
+});
+
+test("D-068 full-pool schedule floors at $8.25 after 36 hours", async () => {
+  const store = memoryHarvestStore();
+  const nowMs = Date.parse("2026-09-29T12:00:00.000Z");
+  const sol = book("SOL/USD");
+  sol.getRolloverHarvestCandidates = async () => [{ instrument: "SOL/USD", lotId: "ticket", positionCode: "DX-TICKET", virtualSide: "BUY", entryPrice: 100, markPrice: 110, remainingUnits: 4, lotStep: 0.01 }];
+  let allocation = null;
+  sol.executeRolloverHarvest = async ({ allocations, onConfirmedClose }) => {
+    allocation = allocations[0];
+    await onConfirmedClose({ instrument: "SOL/USD", lotId: "ticket", filledQuantity: allocation.quantity, realizedPnlUsd: allocation.estimatedProfitUsd });
+    return { closed: [], pending: [] };
+  };
+  const supervisor = createRiskSupervisor({
+    config: { ...config, sessionHarvestUsd: 33, exposurePoolHarvest: { firstAfterHours: 24, secondAfterHours: 36, firstFraction: 0.5, minimumFraction: 0.25 } },
+    instruments: [sol], harvestStore: store, getCombinedDayPnlUsd: () => 0, now: () => nowMs,
+    getExposurePoolSnapshot: () => ({ closed: true, closedSinceMs: nowMs - 36 * 60 * 60 * 1000 })
+  });
+  await supervisor.evaluate({ dayKey: "2026-09-29" });
+  assert.equal(supervisor.getSnapshot().harvest.plan.targetUsd, 8.25);
+  assert.ok(allocation.estimatedProfitUsd <= 8.25);
 });

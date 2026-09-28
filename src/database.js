@@ -228,6 +228,13 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     await pool.query("ALTER TABLE session_harvest_state DROP CONSTRAINT IF EXISTS session_harvest_state_mode_check");
     await pool.query("ALTER TABLE session_harvest_state ADD CONSTRAINT session_harvest_state_mode_check CHECK (mode IN ('FULL','ROLLOVER_PARTIAL'))");
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS exposure_pool_episode (
+        id SMALLINT PRIMARY KEY CHECK (id = 1),
+        closed_since TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS daily_dust_cleanup (
         day_key TEXT PRIMARY KEY CHECK (day_key ~ '^\\d{4}-\\d{2}-\\d{2}$'),
         auto_loss_usd NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (auto_loss_usd >= 0),
@@ -634,6 +641,28 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     });
   }
 
+  async function getExposurePoolEpisode() {
+    const result = await pool.query("SELECT closed_since FROM exposure_pool_episode WHERE id=1");
+    if (result.rowCount === 0) return Object.freeze({ closedSinceMs: null });
+    if (result.rowCount !== 1) throw new Error("exposure pool episode lookup returned an invalid row count");
+    const value = result.rows[0].closed_since;
+    const ms = value == null ? null : toDate("exposure pool closed since", value).getTime();
+    return Object.freeze({ closedSinceMs: ms });
+  }
+
+  async function saveExposurePoolEpisode({ closedSinceMs = null } = {}) {
+    const since = closedSinceMs == null ? null : toDate("exposure pool closed since", new Date(Number(closedSinceMs))).toISOString();
+    const result = await pool.query(
+      `INSERT INTO exposure_pool_episode (id, closed_since) VALUES (1,$1)
+       ON CONFLICT (id) DO UPDATE SET closed_since=EXCLUDED.closed_since, updated_at=NOW()
+       RETURNING closed_since`,
+      [since]
+    );
+    if (result.rowCount !== 1) throw new Error("exposure pool episode save failed");
+    const value = result.rows[0].closed_since;
+    return Object.freeze({ closedSinceMs: value == null ? null : toDate("exposure pool closed since", value).getTime() });
+  }
+
   async function saveSessionHarvestState(input) {
     const key = requiredText("session harvest day key", input?.dayKey, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("session harvest day key is invalid");
@@ -933,6 +962,8 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     getDailyLedger,
     addEvent,
     getSessionHarvestState,
+    getExposurePoolEpisode,
+    saveExposurePoolEpisode,
     saveSessionHarvestState,
     getDailyDustCleanupState,
     saveDailyDustCleanupState,

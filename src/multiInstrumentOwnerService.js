@@ -108,6 +108,7 @@ export function createMultiInstrumentOwnerService({
   }
 
   function d064RecoveryKind(harvest) {
+    if (harvest?.status === "CONFIRMED" && harvest?.mode === "ROLLOVER_PARTIAL" && harvest?.plan?.confirmation?.source !== "BROKER_CONFIRMED") return "ROLLOVER_UNVERIFIED";
     if (harvest?.status !== "HALTED" || typeof harvest.haltReason !== "string") return null;
     if (harvest.haltReason.startsWith("D-064 harvest cannot verify fresh broker account data for ") ||
       harvest.haltReason === "D-068 cannot read and price every configured account ticket; owner review required") return "FRESH_DATA";
@@ -115,9 +116,7 @@ export function createMultiInstrumentOwnerService({
     // Old D-068 persistence may identify this plan as FULL despite the
     // unambiguous D-068 halt reason.  Do not use that legacy mode label.
     if (harvest.haltReason === D068_ROLLOVER_CONFIRMATION_HALT) {
-      return Array.isArray(harvest.plan?.completed) && harvest.plan.completed.length > 0
-        ? "ROLLOVER_RECONCILED_PARTIAL"
-        : "ROLLOVER_NO_FILL";
+      return "ROLLOVER_UNVERIFIED";
     }
     return null;
   }
@@ -144,8 +143,8 @@ export function createMultiInstrumentOwnerService({
   function recoveryRowsFailureText(rows, recoveryKind, phase) {
     const heading = recoveryKind === "VERIFIED_FLAT"
       ? `D-064 RECOVERY ${phase} — BOOKS NOT CONFIRMED FLAT`
-      : recoveryKind === "ROLLOVER_NO_FILL" || recoveryKind === "ROLLOVER_RECONCILED_PARTIAL"
-        ? `D-068 NO-FILL RECOVERY ${phase} — BOOKS NOT RECONCILED`
+      : recoveryKind === "ROLLOVER_UNVERIFIED"
+        ? `D-068 UNVERIFIED RECOVERY ${phase} — BOOKS NOT RECONCILED`
       : `D-064 RECOVERY ${phase} — BOOKS NOT RECONCILED`;
     const instruction = recoveryKind === "VERIFIED_FLAT"
       ? "Every book must have fresh data, virtual net 0, broker net 0, and 0 open virtual lots. Recovery will not alter virtual lots or place a DXtrade order."
@@ -363,13 +362,13 @@ export function createMultiInstrumentOwnerService({
       return target.books[0].service.confirmRematch(code);
     },
     async requestHarvestRecovery() {
-      if (!riskSupervisor || !database) return { code: null, message: "D-064 recovery is not configured on this deployment." };
+      if (!riskSupervisor || !database) return { code: null, message: "Harvest recovery is not configured on this deployment." };
       const snapshot = riskSupervisor.getSnapshot();
       const recoveryKind = d064RecoveryKind(snapshot.harvest);
       if (!recoveryKind) return { code: null, message: "Harvest recovery is refused: the current halt is not a recoverable fresh-data, flat-confirmation, or no-fill D-068 halt." };
       const [botState, rows] = await Promise.all([database.getState(), inspectBooks()]);
       if (botState.safety_halt === true && botState.halt_reason !== snapshot.harvest.haltReason) {
-        return { code: null, message: "D-064 recovery is refused: a different safety halt is active. It was not changed." };
+        return { code: null, message: "Harvest recovery is refused: a different safety halt is active. It was not changed." };
       }
       if (!recoveryRowsAreSafe(rows, recoveryKind)) {
         return { code: null, message: recoveryRowsFailureText(rows, recoveryKind, "REFUSED") };
@@ -380,12 +379,10 @@ export function createMultiInstrumentOwnerService({
       await database.addEvent("WARN", "D064_HARVEST_RECOVERY_REQUESTED", { source: "telegram", dayKey: snapshot.dayKey, haltReason: snapshot.harvest.haltReason, recoveryKind, books: rows });
       const purpose = recoveryKind === "VERIFIED_FLAT"
         ? "This confirms the already-completed harvest, retains its original trigger, reopens new entries, and keeps ordinary tranche exits paused until 22:00 UTC."
-        : recoveryKind === "ROLLOVER_NO_FILL"
-          ? "This clears only the pre-dispatch D-068 no-fill halt after every book is freshly reconciled. It returns the harvest gate to READY so normal trading can continue."
-          : recoveryKind === "ROLLOVER_RECONCILED_PARTIAL"
-            ? "This confirms the already reconciled D-068 partial harvest, reopens new entries, and keeps ordinary tranche exits paused until 22:00 UTC so no second profit slice can run today."
+        : recoveryKind === "ROLLOVER_UNVERIFIED"
+          ? "This clears an unverified legacy D-068 record after every book is freshly reconciled. It does not treat a saved plan as proof of a fill: the harvest gate returns to READY and ordinary tranche exits are enabled."
           : "This rechecks fresh account data and clears only the matching fresh-data halt.";
-      const heading = recoveryKind === "ROLLOVER_NO_FILL" || recoveryKind === "ROLLOVER_RECONCILED_PARTIAL" ? "D-068 ROLLOVER RECOVERY" : "D-064 HARVEST RECOVERY";
+      const heading = recoveryKind === "ROLLOVER_UNVERIFIED" ? "D-068 ROLLOVER RECOVERY" : "D-064 HARVEST RECOVERY";
       return { code, message: [heading, "", rowsText(rows), "", purpose, "It will not change virtual lots, place a DXtrade order, or lift an operator pause.", "", `To apply, send /confirmharvestrecover ${code} within 10 minutes.`].join("\n") };
     },
     // This is deliberately narrower than the owner-command recovery above.  It
@@ -413,20 +410,20 @@ export function createMultiInstrumentOwnerService({
       return Object.freeze({ ...result, rows: Object.freeze(rows) });
     },
     async confirmHarvestRecovery(code) {
-      if (!riskSupervisor || !database) return "D-064 recovery is not configured on this deployment.";
+      if (!riskSupervisor || !database) return "Harvest recovery is not configured on this deployment.";
       const botState = await database.getState();
       if (!/^\d{6}$/.test(code ?? "")) return "Use /confirmharvestrecover followed by the 6-digit code from /harvestrecover.";
-      if (!botState.resume_code_hash || !botState.resume_code_salt || !botState.resume_code_expires_at) return "No D-064 recovery request is pending. Send /harvestrecover first.";
+      if (!botState.resume_code_hash || !botState.resume_code_salt || !botState.resume_code_expires_at) return "No harvest recovery request is pending. Send /harvestrecover first.";
       if (new Date(botState.resume_code_expires_at).getTime() < Date.now()) {
         await database.clearResumeChallenge();
-        return "That D-064 recovery code expired. Send /harvestrecover for a new code.";
+        return "That harvest recovery code expired. Send /harvestrecover for a new code.";
       }
       const snapshot = riskSupervisor.getSnapshot();
       const recoveryKind = d064RecoveryKind(snapshot.harvest);
       const rows = await inspectBooks();
       if (!recoveryKind || !sameHex(harvestRecoveryHash(code, botState.resume_code_salt, recoveryKind), botState.resume_code_hash) || (botState.safety_halt === true && botState.halt_reason !== snapshot.harvest.haltReason)) {
         await database.clearResumeChallenge();
-        return "D-064 recovery aborted: the harvest or safety-halt state changed. No halt was cleared.";
+        return "Harvest recovery aborted: the harvest or safety-halt state changed. No halt was cleared.";
       }
       if (!recoveryRowsAreSafe(rows, recoveryKind)) {
         await database.clearResumeChallenge();
@@ -434,9 +431,9 @@ export function createMultiInstrumentOwnerService({
       }
       const result = await riskSupervisor.recoverHarvest({ dayKey: accountDayKey(Date.now()), booksVerified: true, recoveryKind });
       await database.clearResumeChallenge();
-      if (result.action === "HARVEST_RECOVERY_REFUSED" || result.action === "ACCOUNT_DATA_UNAVAILABLE") return "D-064 recovery refused because fresh broker account data could not be verified. No halt was cleared.";
+      if (result.action === "HARVEST_RECOVERY_REFUSED" || result.action === "ACCOUNT_DATA_UNAVAILABLE") return "Harvest recovery refused because fresh broker account data could not be verified. No harvest state was changed.";
       await database.addEvent("WARN", "D064_HARVEST_RECOVERY_APPLIED", { source: "telegram", dayKey: accountDayKey(Date.now()), action: result.action, recoveryKind, books: rows });
-      return `D-064 recovery applied: ${result.action}. The account-day harvest gate is now ${riskSupervisor.getSnapshot().harvest?.status ?? "unavailable"}. Operator pause is unchanged.`;
+      return `Harvest recovery applied: ${result.action}. The account-day harvest gate is now ${riskSupervisor.getSnapshot().harvest?.status ?? "unavailable"}. Operator pause is unchanged.`;
     },
     async pauseHalt() {
       if (!haltWarnings || typeof haltWarnings.defer !== "function") return "Owner halt-warning deferral is not configured on this deployment.";
