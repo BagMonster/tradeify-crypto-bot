@@ -26,10 +26,11 @@ const TEN_K = Object.freeze({
   dailyLossLimitUsd: 300,
   maxLossUsd: 600,
   maxNotionalUsd: 20000,
-  entryBrakeUsd: 120,
+  entryBrakeUsd: 50,
   cutTiers: [{ thresholdUsd: 100, fraction: 0.1 }, { thresholdUsd: 150, fraction: 0.2 }, { thresholdUsd: 200, fraction: 0.5 }],
   fullFlattenUsd: 250,
   harvestUsd: 33,
+  rolloverHarvestDelayMinutes: 5,
   exposurePool: { softUsd: 2200, hardUsd: 2250 },
   exposurePoolHarvest: { firstAfterHours: 24, secondAfterHours: 36, firstFraction: 0.5, minimumFraction: 0.25 },
   perCoinCapUsd: 25000
@@ -64,6 +65,7 @@ test("50k reproduces the configuration that was live before profiles existed", a
   assert.equal(risk.fullFlattenUsd, 1250);
   assert.equal(risk.dailyLossLimitUsd, 1500);
   assert.equal(risk.sessionHarvestUsd, 600);
+  assert.equal(risk.rolloverHarvestDelayMinutes, 5);
   assert.equal(risk.exposurePool, undefined, "the $50K account never had a pool");
   for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 150000, entry.instrument);
 });
@@ -75,11 +77,12 @@ test("10k applies the decided $10K numbers and passes every downstream validator
   assert.equal(account.maxLossOffset, 600);
   assert.equal(account.maxNotional, 20000);
   const risk = instruments.accountRisk;
-  assert.equal(risk.entryBrakeUsd, 120);
+  assert.equal(risk.entryBrakeUsd, 50);
   assert.deepEqual(risk.cutTiers, [{ thresholdUsd: 100, fraction: 0.1 }, { thresholdUsd: 150, fraction: 0.2 }]);
   assert.equal(risk.partialCutUsd, 200);
   assert.equal(risk.fullFlattenUsd, 250);
   assert.equal(risk.sessionHarvestUsd, 33);
+  assert.equal(risk.rolloverHarvestDelayMinutes, 5);
   assert.deepEqual(risk.exposurePool, { softUsd: 3000, hardUsd: 3500 });
   assert.deepEqual(risk.exposurePoolHarvest, { firstAfterHours: 24, secondAfterHours: 36, firstFraction: 0.5, minimumFraction: 0.25 });
   for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 4500, entry.instrument);
@@ -102,6 +105,8 @@ test("the 100k draft is internally consistent, so confirming it is the only step
     account: await readJson("config/account.json"),
     instruments: await readJson("config/instruments.json")
   });
+  assert.equal(applied.instruments.accountRisk.entryBrakeUsd, 500);
+  assert.equal(applied.instruments.accountRisk.rolloverHarvestDelayMinutes, 5);
   assert.doesNotThrow(() => validateAccountConfig(applied.account));
   assert.doesNotThrow(() => loadInstrumentConfigObject(applied.instruments));
   assert.doesNotThrow(() => supervisorFrom(applied.instruments.accountRisk));
@@ -137,6 +142,12 @@ test("cut tiers out of order, or deeper than the flatten, are refused", () => {
 
 test("a brake at or below the deepest tier's depth is required", () => {
   assert.throws(() => validateAccountProfile({ ...TEN_K, entryBrakeUsd: 200 }, "x"), /entryBrakeUsd \(\$200\) must be below the deepest cut tier/);
+});
+
+test("the rollover harvest delay must be a whole number from zero through sixty minutes", () => {
+  assert.throws(() => validateAccountProfile({ ...TEN_K, rolloverHarvestDelayMinutes: -1 }, "x"), /whole number from 0 through 60/);
+  assert.throws(() => validateAccountProfile({ ...TEN_K, rolloverHarvestDelayMinutes: 5.5 }, "x"), /whole number from 0 through 60/);
+  assert.throws(() => validateAccountProfile({ ...TEN_K, rolloverHarvestDelayMinutes: 61 }, "x"), /whole number from 0 through 60/);
 });
 
 test("an exposure pool with soft >= hard, or above the notional cap, is refused", () => {

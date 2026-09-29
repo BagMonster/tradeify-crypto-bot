@@ -217,6 +217,41 @@ test("D-068 harvests only the proportional $33 rollover-profit plan and leaves b
   assert.equal(sol.calls.some(([kind]) => kind === "flatten"), false);
 });
 
+test("D-068 waits five minutes after the 22:00 UTC reset before closing profit", async () => {
+  const store = memoryHarvestStore();
+  const closes = [];
+  let nowMs = Date.parse("2026-09-28T22:03:00.000Z");
+  const sol = book("SOL/USD");
+  sol.getRolloverHarvestCandidates = async () => [{
+    instrument: "SOL/USD", lotId: "BUY1-V0", ringTag: "BUY1", positionCode: "DX-SOL", virtualSide: "BUY",
+    entryPrice: 100, markPrice: 110, remainingUnits: 4, lotStep: 0.01, openedAt: "2026-09-28T21:00:00.000Z"
+  }];
+  sol.executeRolloverHarvest = async ({ allocations, onConfirmedClose }) => {
+    const close = { instrument: "SOL/USD", lotId: "BUY1-V0", filledQuantity: allocations[0].quantity, realizedPnlUsd: 33 };
+    await onConfirmedClose(close);
+    closes.push(close);
+    return { closed: [close], pending: [] };
+  };
+  const supervisor = createRiskSupervisor({
+    config: { ...config, sessionHarvestUsd: 33, rolloverHarvestDelayMinutes: 5 },
+    instruments: [sol], harvestStore: store, getCombinedDayPnlUsd: () => 4, now: () => nowMs
+  });
+
+  const waiting = await supervisor.evaluate({ dayKey: "2026-09-29" });
+  assert.equal(waiting.action, "ROLLOVER_HARVEST_WAITING");
+  assert.equal(waiting.waitRemainingMs, 2 * 60 * 1000);
+  assert.equal(closes.length, 0);
+  assert.equal(sol.calls.some(([kind, on]) => kind === "exits" && on === true), true);
+  assert.equal(sol.calls.some(([kind, on]) => kind === "brake" && on === true), true);
+  assert.equal(supervisor.getSnapshot().trancheExitsPaused, true);
+  assert.equal(supervisor.getSnapshot().rolloverHarvestDelayRemainingMs, 2 * 60 * 1000);
+
+  nowMs = Date.parse("2026-09-28T22:05:00.000Z");
+  const confirmed = await supervisor.evaluate({ dayKey: "2026-09-29" });
+  assert.equal(confirmed.action, "HARVEST_CONFIRMED");
+  assert.equal(closes.length, 1);
+});
+
 test("D-068 waits for startup market marks without creating a durable harvest halt", async () => {
   const halts = [];
   const sol = book("SOL/USD");

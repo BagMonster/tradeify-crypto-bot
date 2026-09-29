@@ -43,7 +43,7 @@ const PROFILE_OWNED_ACCOUNT_FIELDS = Object.freeze([
 ]);
 const PROFILE_OWNED_RISK_FIELDS = Object.freeze([
   "entryBrakeUsd", "cutTiers", "partialCutUsd", "partialCutFraction",
-  "fullFlattenUsd", "dailyLossLimitUsd", "sessionHarvestUsd", "exposurePool", "exposurePoolHarvest"
+  "fullFlattenUsd", "dailyLossLimitUsd", "sessionHarvestUsd", "rolloverHarvestDelayMinutes", "exposurePool", "exposurePoolHarvest"
 ]);
 
 const PROFILE_NAME = /^[a-z0-9-]{1,32}$/;
@@ -54,6 +54,11 @@ function fail(message) {
 
 function positive(name, value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) fail(`${name} must be a positive number, found ${JSON.stringify(value)}`);
+  return value;
+}
+
+function minutes(name, value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 60) fail(`${name} must be a whole number from 0 through 60, found ${JSON.stringify(value)}`);
   return value;
 }
 
@@ -105,6 +110,9 @@ export function validateAccountProfile(input, name = "profile") {
   if (!(fullFlattenUsd < dailyLossLimitUsd)) fail(`fullFlattenUsd (${money(fullFlattenUsd)}) must trigger before the daily loss limit (${money(dailyLossLimitUsd)})`);
 
   const harvestUsd = positive("harvestUsd", input.harvestUsd);
+  const rolloverHarvestDelayMinutes = input.rolloverHarvestDelayMinutes == null
+    ? 0
+    : minutes("rolloverHarvestDelayMinutes", input.rolloverHarvestDelayMinutes);
   const perCoinCapUsd = positive("perCoinCapUsd", input.perCoinCapUsd);
 
   let exposurePool = null;
@@ -138,6 +146,7 @@ export function validateAccountProfile(input, name = "profile") {
     cutTiers: Object.freeze(cutTiers),
     fullFlattenUsd,
     harvestUsd,
+    rolloverHarvestDelayMinutes,
     perCoinCapUsd,
     exposurePool,
     exposurePoolHarvest
@@ -213,6 +222,7 @@ export function applyAccountProfile({ profile, account, instruments }) {
     fullFlattenUsd: profile.fullFlattenUsd,
     dailyLossLimitUsd: profile.dailyLossLimitUsd,
     sessionHarvestUsd: profile.harvestUsd,
+    rolloverHarvestDelayMinutes: profile.rolloverHarvestDelayMinutes,
     ...(profile.exposurePool ? { exposurePool: { softUsd: profile.exposurePool.softUsd, hardUsd: profile.exposurePool.hardUsd } } : {}),
     ...(profile.exposurePoolHarvest ? { exposurePoolHarvest: { ...profile.exposurePoolHarvest } } : {})
   };
