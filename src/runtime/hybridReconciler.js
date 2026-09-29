@@ -12,6 +12,12 @@
 // as the bot's. Calling an order MANUAL requires every signal to agree. Anything
 // else is UNKNOWN and escalates, because wrongly absorbing an order rewrites the
 // virtual book to match a broker state nobody has explained.
+//
+// One narrow bot exception is safe to recover: a completed CLOSE against a
+// positionCode already carried by the virtual book.  A broker fill followed by a
+// failed state save leaves exactly that kind of stale virtual inventory.  The
+// absorber can retire the exact affected lot; bot OPEN fills remain escalations
+// because inventing their ring placement would be unsafe.
 
 const NET_TOLERANCE = 1e-8;
 const BOT_ORDER_CODE_PREFIX = "dxsca-integration-session-code:";
@@ -152,9 +158,16 @@ export function classifyBook(row, orders = [], options = {}) {
     if (fill === null) continue;
     if (watermark !== null && fill.transactionTime <= watermark) continue;
     const origin = classifyOrigin(order, knownClientOrderIds);
-    if (origin === ORIGIN.BOT) continue;
+    if (origin === ORIGIN.BOT) {
+      if (fill.effect === "CLOSE") {
+        candidates.push(Object.freeze({ ...fill, origin }));
+        continue;
+      }
+      sawUnknown = true;
+      continue;
+    }
     if (origin === ORIGIN.UNKNOWN) { sawUnknown = true; continue; }
-    candidates.push(fill);
+    candidates.push(Object.freeze({ ...fill, origin }));
   }
 
   if (sawUnknown) {
@@ -173,8 +186,8 @@ export function classifyBook(row, orders = [], options = {}) {
       instrument,
       verdict: VERDICT.UNEXPLAINED,
       reason: candidates.length === 0
-        ? `broker net ${brokerNet} does not match virtual net ${virtualNet} and no manual fill explains it`
-        : `manual fills account for ${explained} units but the book diverged by ${delta}`,
+        ? `broker net ${brokerNet} does not match virtual net ${virtualNet} and no recoverable close fill explains it`
+        : `recoverable close fills account for ${explained} units but the book diverged by ${delta}`,
       delta,
       fills: Object.freeze([])
     });

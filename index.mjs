@@ -1011,7 +1011,7 @@ async function runHybridReconcileOnce() {
     });
   }
 
-  if (report.escalations.length === 0) {
+  if (report.escalations.length === 0 && report.recheckRequired !== true) {
     await clearNonHarvestHalt("hybrid-reconciliation");
     // Clearing the pending warning cycle is not enough once it has converted to
     // a durable safety halt. Match on the stored reason rather than an in-memory
@@ -1031,6 +1031,14 @@ async function runHybridReconcileOnce() {
       }
     }
     lastHybridHaltReason = null;
+    return;
+  }
+
+  if (report.escalations.length === 0 && report.recheckRequired === true) {
+    // A broker-confirmed close was replayed into virtual state. Do not resume
+    // on that write alone: the following one-minute pass must read DXtrade
+    // again and prove every net now matches.
+    console.log("HYBRID: recovered virtual state; waiting for a fresh all-books match before clearing the safety halt.");
     return;
   }
 

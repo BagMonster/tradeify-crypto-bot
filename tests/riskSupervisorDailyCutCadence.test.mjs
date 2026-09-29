@@ -39,10 +39,10 @@ function cutFractions(book) {
   return book.calls.filter(([kind]) => kind === "cut").map(([, args]) => args.fraction);
 }
 
-test("D-063 selects a tier from combined day P&L, while cutting only losing books", async () => {
+test("D-063 selects a tier from total unrealised loss, not realised day loss", async () => {
   let nowMs = 1_000_000;
-  let combinedDayPnlUsd = -101; // Includes a prior realised loss; open loss is only $40.
-  const losingState = { unrealised: -40, dayPnl: -40 };
+  let combinedDayPnlUsd = -151.99; // 2026-09-29: loss was already realised; only $1.71 remained open.
+  const losingState = { unrealised: -1.71, dayPnl: -1.71 };
   const winningState = { unrealised: 25, dayPnl: 25 };
   const losing = mutableBook("SOL/USD", losingState);
   const winning = mutableBook("DOGE/USD", winningState);
@@ -55,17 +55,16 @@ test("D-063 selects a tier from combined day P&L, while cutting only losing book
 
   const result = await supervisor.evaluate({ dayKey: "2026-09-24" });
 
-  assert.equal(result.action, "CUT");
-  assert.equal(result.tier.thresholdUsd, 100);
-  assert.deepEqual(cutFractions(losing), [0.10]);
+  assert.equal(result.action, "NONE");
+  assert.equal(result.tier, undefined);
+  assert.deepEqual(cutFractions(losing), []);
   assert.deepEqual(cutFractions(winning), []);
-  assert.match(losing.calls[0][1].reason, /combined day P&L -101\.00/);
 });
 
-test("D-063 gives each tier its own 15-minute cooldown and permits immediate escalation", async () => {
+test("D-063 self-clears after a cut, then permits a deeper unrealised-loss escalation", async () => {
   let nowMs = 2_000_000;
   let combinedDayPnlUsd = -101;
-  const state = { unrealised: -60, dayPnl: -60 };
+  const state = { unrealised: -101, dayPnl: -101 };
   const sol = mutableBook("SOL/USD", state);
   const supervisor = createRiskSupervisor({
     config,
@@ -77,22 +76,29 @@ test("D-063 gives each tier its own 15-minute cooldown and permits immediate esc
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-24" })).tier.thresholdUsd, 100);
   assert.deepEqual(cutFractions(sol), [0.10]);
 
+  // A confirmed cut reduced the open loss. Realised day loss remains below the
+  // old threshold, but that cannot cause another protective cut on its own.
+  state.unrealised = -90;
   nowMs += 5 * 60 * 1000;
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-24" })).action, "NONE");
   assert.deepEqual(cutFractions(sol), [0.10]);
 
-  // A deeper tier has not fired, so its own timer is clear and it may act now.
+  // A genuinely deeper open loss bypasses the cooldown.
   combinedDayPnlUsd = -151;
+  state.unrealised = -151;
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-24" })).tier.thresholdUsd, 150);
   assert.deepEqual(cutFractions(sol), [0.10, 0.20]);
 
+  state.unrealised = -149;
   nowMs += 5 * 60 * 1000;
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-24" })).action, "NONE");
   assert.deepEqual(cutFractions(sol), [0.10, 0.20]);
 
-  // Recovery into the shallower band follows that tier's original timer.
-  combinedDayPnlUsd = -101;
-  nowMs += 5 * 60 * 1000;
+  // A later worsening back through the -$100 open-loss tier waits for the
+  // one ladder cooldown, then becomes eligible again.
+  combinedDayPnlUsd = -201;
+  state.unrealised = -101;
+  nowMs += 10 * 60 * 1000;
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-24" })).tier.thresholdUsd, 100);
   assert.deepEqual(cutFractions(sol), [0.10, 0.20, 0.10]);
 });
@@ -111,7 +117,7 @@ test("D-063 does not consume a tier cooldown when no open book is losing", async
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-24" })).action, "NONE");
   assert.equal(supervisor.getSnapshot().cutCooldownRemainingMs, 0);
 
-  state.unrealised = -10;
+  state.unrealised = -101;
   nowMs += 60_000;
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-24" })).action, "CUT");
   assert.deepEqual(cutFractions(sol), [0.10]);
