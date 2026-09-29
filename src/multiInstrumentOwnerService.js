@@ -231,7 +231,7 @@ export function createMultiInstrumentOwnerService({
     }
     if (snapshot.lastError) lines.push(`  supervisor note: ${snapshot.lastError}`);
     if (snapshot.freshDataGrace) {
-      lines.push(`  D-064 fresh-data grace: normal grid actions blocked; ${Math.ceil(snapshot.freshDataGrace.remainingMs / 1000)}s before durable halt`);
+      lines.push(`  D-064 broker-data outage: account snapshot unavailable for ${Math.ceil(snapshot.freshDataGrace.outageMs / 1000)}s; Telegram warning only, no D-064 entry block`);
     }
     const pendingHalt = haltWarnings?.snapshot ? haltWarnings.snapshot() : null;
     if (pendingHalt && typeof pendingHalt.then !== "function") {
