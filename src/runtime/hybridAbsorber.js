@@ -223,6 +223,12 @@ export async function runReconciliationPass(deps) {
     decisions,
     matched: report.matched,
     absorbed: Object.freeze(absorbed),
+    // A persisted recovery is not by itself sufficient to resume. The caller
+    // must make one fresh broker-versus-virtual pass and see MATCH before it
+    // clears a hybrid safety halt.
+    recheckRequired: absorbed.some((outcome) =>
+      outcome.result === ABSORB_RESULT.APPLIED || outcome.result === ABSORB_RESULT.CONFLICT
+    ),
     escalations: Object.freeze(escalations),
     severity,
     accountWide: escalations.length >= 2
