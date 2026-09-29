@@ -6,14 +6,18 @@ test("D-064 harvest notifications are accepted and describe each operator state"
   const pending = formatLiveTelegramNotification({ kind: "HARVEST_PENDING", eventKey: "D064-PENDING:20260909", combinedDayPnlUsd: 250, thresholdUsd: 250 });
   const confirmed = formatLiveTelegramNotification({ kind: "HARVEST_CONFIRMED", eventKey: "D064-CONFIRMED:20260909", combinedDayPnlUsd: 251.25, thresholdUsd: 250, confirmedAt: "2026-09-09T12:00:00.000Z" });
   const halted = formatLiveTelegramNotification({ kind: "HARVEST_HALTED", eventKey: "D064-HALTED:20260909", reason: "D-064 harvest cannot verify fresh broker account data for SOL/USD" });
-  const grace = formatLiveTelegramNotification({ kind: "HARVEST_FRESHNESS_GRACE", eventKey: "D064-FRESH-GRACE:20260910:1", instruments: ["SOL/USD", "INJ/USD"], graceMs: 300000 });
+  const grace = formatLiveTelegramNotification({ kind: "HARVEST_FRESHNESS_GRACE", eventKey: "D064-FRESH-GRACE:20260910:1", instruments: ["SOL/USD", "INJ/USD"], graceMs: 60000 });
+  const restored = formatLiveTelegramNotification({ kind: "HARVEST_FRESHNESS_RESTORED", eventKey: "D064-FRESH-RESTORED:1", instruments: ["SOL/USD", "INJ/USD"], outageMs: 120000 });
   const reset = formatLiveTelegramNotification({ kind: "HARVEST_RESET", eventKey: "D064-RESET:20260910", dayKey: "2026-09-10" });
   assert.match(pending.message, /PENDING/);
   assert.match(confirmed.message, /CONFIRMED/);
   assert.match(halted.message, /SAFETY HALT/);
   assert.match(halted.message, /\/harvestrecover/);
-  assert.match(grace.message, /5 minutes/);
+  assert.match(grace.message, /DXTRADE DATA OUTAGE/);
+  assert.match(grace.message, /1 minute/);
   assert.match(grace.message, /do not use \/resume/);
+  assert.match(restored.message, /DATA RESTORED/);
+  assert.match(restored.message, /2 minutes/);
   assert.match(reset.message, /RESET/);
 });
 
