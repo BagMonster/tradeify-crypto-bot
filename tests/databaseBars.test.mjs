@@ -392,11 +392,15 @@ test("10 - freshness episodes persist and runtime-history retention only targets
   assert.deepEqual(active.instruments, saved.instruments);
 
   const retained = await database.pruneOperationalHistory({ nowMs: Date.parse("2026-09-30T00:00:00.000Z") });
-  assert.equal(retained.totalDeleted, 12);
+  assert.equal(retained.totalDeleted, 10);
   const deletes = calls.filter(({ text }) => /DELETE FROM/i.test(text));
-  assert.equal(deletes.length, 6);
-  assert.equal(deletes.every(({ text, params }) => /LIMIT 5000/i.test(text) && Array.isArray(params) && /\.000Z$/.test(params[0])), true);
+  assert.equal(deletes.length, 5);
+  assert.equal(deletes.slice(0, 4).every(({ text, params }) => /LIMIT 5000/i.test(text) && Array.isArray(params) && /\.000Z$/.test(params[0])), true);
+  assert.equal(deletes.at(-1).params.length, 0, "bars are removed entirely because the live grid does not read PostgreSQL bars");
   assert.equal(deletes.some(({ text }) => /DELETE FROM execution_orders/i.test(text)), true);
   assert.equal(deletes.some(({ text }) => /DELETE FROM solana_execution_orders/i.test(text)), true);
   assert.equal(deletes.some(({ text }) => /DELETE FROM bars/i.test(text)), true);
+  const solanaPrune = deletes.find(({ text }) => /DELETE FROM solana_execution_orders/i.test(text));
+  assert.match(solanaPrune.text, /ring_grid_state/i);
+  assert.match(solanaPrune.text, /positionCode/i);
 });
