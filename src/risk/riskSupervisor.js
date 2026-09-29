@@ -15,6 +15,7 @@
 
 import { harvestReason, setTrancheExitsPausedAll } from "./sessionHarvest.js";
 import { buildProportionalRolloverHarvestPlan } from "./rolloverHarvest.js";
+import { ACCOUNT_DAY_OFFSET_MS } from "./dailyRiskLadder.js";
 
 const DEFAULT_HARVEST_FRESH_DATA_GRACE_MS = 5 * 60 * 1000;
 const DEFAULT_CUT_COOLDOWN_MS = 15 * 60 * 1000;
@@ -71,6 +72,13 @@ function positiveNumber(name, value) {
 
 function fixed2(value) {
   return Number(Number(value).toFixed(2));
+}
+
+function rolloverHarvestWaitRemainingMs(dayKey, delayMs, nowMs) {
+  if (delayMs === 0) return 0;
+  const midnightMs = Date.parse(`${dayKey}T00:00:00.000Z`);
+  if (!Number.isFinite(midnightMs)) throw new TypeError("rollover harvest dayKey is invalid");
+  return Math.max(0, midnightMs - ACCOUNT_DAY_OFFSET_MS + delayMs - nowMs);
 }
 
 // Every book carrying an unrealised loss is cut, at the same fraction.
@@ -177,6 +185,13 @@ export function createRiskSupervisor({
     ? positiveNumber("sessionHarvestUsd", config.sessionHarvestUsd)
     : Number(config.sessionHarvestUsd);
   const sessionHarvestThreshold = sessionHarvestEnabled ? sessionHarvestUsd : 0;
+  const rolloverHarvestDelayMinutes = config.rolloverHarvestDelayMinutes == null
+    ? 0
+    : Number(config.rolloverHarvestDelayMinutes);
+  if (!Number.isSafeInteger(rolloverHarvestDelayMinutes) || rolloverHarvestDelayMinutes < 0 || rolloverHarvestDelayMinutes > 60) {
+    throw new TypeError("rolloverHarvestDelayMinutes must be a whole number from 0 through 60");
+  }
+  const rolloverHarvestDelayMs = rolloverHarvestDelayMinutes * 60 * 1000;
   const configuredCutCooldownMs = Number(config.cutCooldownMs);
   const cutCooldownMs = Number.isFinite(configuredCutCooldownMs) && configuredCutCooldownMs >= 0
     ? configuredCutCooldownMs
@@ -504,6 +519,21 @@ export function createRiskSupervisor({
     if (prior.status === "HALTED") {
       applyHarvestGates();
       return Object.freeze({ action: "HARVEST_HALTED", combinedDayPnlUsd: combined, harvest: prior });
+    }
+    const waitRemainingMs = rolloverHarvestWaitRemainingMs(incomingDayKey, rolloverHarvestDelayMs, now());
+    if (waitRemainingMs > 0) {
+      // The broker's new accounting day starts at 22:00 UTC.  Keep the grid
+      // quiet during the configured settlement window so no ordinary exit or
+      // new entry can race the account-wide D-068 calculation.  This does not
+      // alter the account-day baseline or any risk-ladder timing.
+      applyTrancheExitPause(true);
+      for (const book of instruments) applyEntryBrake(book, true);
+      return Object.freeze({
+        action: "ROLLOVER_HARVEST_WAITING",
+        combinedDayPnlUsd: combined,
+        waitRemainingMs,
+        harvest: prior
+      });
     }
     let plan;
     const target = rolloverHarvestTarget();
@@ -1017,6 +1047,9 @@ export function createRiskSupervisor({
     const activeCutCooldownRemainingMs = activeCutTierLastCutAtMs === null
       ? 0
       : Math.max(0, cutCooldownMs - (now() - activeCutTierLastCutAtMs));
+    const rolloverHarvestDelayRemainingMs = sessionHarvestEnabled && harvestState?.status === "READY" && dayKey !== null
+      ? rolloverHarvestWaitRemainingMs(dayKey, rolloverHarvestDelayMs, now())
+      : 0;
     return Object.freeze({
       dayKey,
       dayPnlUsd,
@@ -1035,6 +1068,8 @@ export function createRiskSupervisor({
       sessionHarvestEnabled,
       sessionHarvestUsd: sessionHarvestEnabled ? sessionHarvestThreshold : null,
       sessionHarvestFreshDataGraceMs: sessionHarvestEnabled ? sessionHarvestFreshDataGraceMs : null,
+      rolloverHarvestDelayMinutes: sessionHarvestEnabled ? rolloverHarvestDelayMinutes : null,
+      rolloverHarvestDelayRemainingMs,
       freshDataGrace: unreadSinceMs === null
         ? null
         : Object.freeze({
@@ -1042,7 +1077,7 @@ export function createRiskSupervisor({
           remainingMs: Math.max(0, sessionHarvestFreshDataGraceMs - (now() - unreadSinceMs))
         }),
       harvestedToday: harvestState?.status === "CONFIRMED",
-      trancheExitsPaused: ["PENDING", "CONFIRMED", "HALTED"].includes(harvestState?.status),
+      trancheExitsPaused: ["PENDING", "CONFIRMED", "HALTED"].includes(harvestState?.status) || rolloverHarvestDelayRemainingMs > 0,
       cutsToday,
       cutCooldownMs,
       deepestCutTierFiredUsd,
