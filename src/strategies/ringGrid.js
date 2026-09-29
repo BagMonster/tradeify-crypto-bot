@@ -390,5 +390,84 @@ export function createRingGrid(config) {
     throw new Error("no legacy virtual lot carries that lotId");
   }
 
-  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, adoptedExposureUsd, observeRearm, nextMovingAverageExitAction, nextExitAction, applySkippedExit, entryCandidates, dustCleanupScan, dustCleanupCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten, adoptPosition, findLotByPositionCode, reduceLotByPositionCode, reduceLegacyLotById });
+  // A rematch treats ticket identity, direction, quantity and entry price as
+  // broker facts. Ring metadata survives only for a ticket that still exists;
+  // unknown broker tickets are adopted as exit-only inventory rather than being
+  // guessed into a ring.
+  function rematchBrokerTickets(state, tickets, { movingAverage, observedAt } = {}) {
+    const next = mutable(state);
+    const stamp = timestamp("broker rematch observedAt", observedAt);
+    if (!Array.isArray(tickets)) throw new TypeError("broker rematch tickets must be an array");
+
+    const byCode = new Map();
+    let brokerSide = null;
+    for (const raw of tickets) {
+      const positionCode = raw?.positionCode == null ? "" : String(raw.positionCode).trim();
+      const side = String(raw?.side ?? "").toUpperCase();
+      const remainingUnits = positive("broker rematch remainingUnits", raw?.remainingUnits);
+      const entryPrice = positive("broker rematch entryPrice", raw?.entryPrice);
+      if (positionCode === "") throw new TypeError("broker rematch ticket requires a positionCode");
+      if (side !== "BUY" && side !== "SELL") throw new TypeError("broker rematch ticket side is invalid");
+      if (byCode.has(positionCode)) throw new TypeError("broker rematch tickets must have unique positionCodes");
+      if (brokerSide !== null && brokerSide !== side) throw new TypeError("broker rematch refuses opposing broker tickets on one instrument");
+      brokerSide = side;
+      byCode.set(positionCode, { positionCode, side, remainingUnits: fixed8(remainingUnits), entryPrice });
+    }
+
+    const retainedCodes = new Set();
+    for (const ring of next.rings) {
+      const retained = [];
+      for (const lot of ring.lots) {
+        const ticket = lot.positionCode == null ? null : byCode.get(String(lot.positionCode));
+        if (!ticket || ticket.side !== lot.side || retainedCodes.has(ticket.positionCode)) continue;
+        lot.remainingUnits = ticket.remainingUnits;
+        lot.originalUnits = Math.max(lot.originalUnits, ticket.remainingUnits);
+        lot.entryPrice = ticket.entryPrice;
+        retained.push(lot);
+        retainedCodes.add(ticket.positionCode);
+      }
+      ring.lots = retained;
+      if (ring.lots.length === 0) ring.armed = true;
+    }
+
+    const adopted = [];
+    for (const lot of next.adopted) {
+      const ticket = byCode.get(String(lot.positionCode));
+      if (!ticket || ticket.side !== lot.side || retainedCodes.has(ticket.positionCode)) continue;
+      adopted.push({
+        ...lot,
+        remainingUnits: ticket.remainingUnits,
+        originalUnits: Math.max(lot.originalUnits, ticket.remainingUnits),
+        entryPrice: ticket.entryPrice
+      });
+      retainedCodes.add(ticket.positionCode);
+    }
+    for (const ticket of byCode.values()) {
+      if (retainedCodes.has(ticket.positionCode)) continue;
+      const ma = positive("broker rematch movingAverage", movingAverage);
+      adopted.push({
+        id: `ADOPT-${ticket.positionCode}`,
+        side: ticket.side,
+        ringTag: null,
+        adopted: true,
+        positionCode: ticket.positionCode,
+        entryPrice: ticket.entryPrice,
+        originalUnits: ticket.remainingUnits,
+        remainingUnits: ticket.remainingUnits,
+        done: 0,
+        openedAt: stamp,
+        ma
+      });
+    }
+    next.adopted = adopted;
+    if (tickets.length > 0) {
+      const newest = tickets[tickets.length - 1];
+      next.lastFillAt = stamp;
+      next.lastFillSide = newest.side;
+      next.lastFillPrice = Number(newest.entryPrice);
+    }
+    return increment(next);
+  }
+
+  return Object.freeze({ definition: def, createInitialState, normalizeState, expectedNetUnits, grossVirtualExposureUsd, adoptedExposureUsd, observeRearm, nextMovingAverageExitAction, nextExitAction, applySkippedExit, entryCandidates, dustCleanupScan, dustCleanupCandidates, applyConfirmedEntry, applyConfirmedExit, buildProtectiveCutPlan, applyConfirmedProtectiveCut, resetAfterProtectiveFlatten, adoptPosition, findLotByPositionCode, reduceLotByPositionCode, reduceLegacyLotById, rematchBrokerTickets });
 }
