@@ -183,8 +183,6 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     await query(TELEGRAM_NOTIFICATION_SCHEMA);
     await query(TELEGRAM_KIND_CONSTRAINT);
     await query(RISK_LADDER_SCHEMA);
-    await query("CREATE INDEX IF NOT EXISTS solana_execution_orders_terminal_updated_at_idx ON solana_execution_orders (updated_at) WHERE status IN ('FILLED','REJECTED','CANCELED','EXPIRED','PARTIAL','FAILED')");
-    await query("CREATE INDEX IF NOT EXISTS solana_telegram_notifications_final_updated_at_idx ON solana_telegram_notifications (updated_at) WHERE status IN ('SENT','FAILED')");
   }
 
   async function getOrder(orderCode) {

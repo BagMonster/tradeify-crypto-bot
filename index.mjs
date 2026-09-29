@@ -868,14 +868,19 @@ console.log(`Daily ring dust cleanup armed: deploy-day catch-up, then ${String(d
 // identities are short-lived diagnostics; historical bars are not part of the
 // live grid (the 200-day MA is fetched directly from Binance) and are removed.
 // Open, partial, active-legacy, and latest-activity order records are retained
-// for recovery; other finalized rows are reclaimed in small batches.
-const HISTORY_PRUNE_MS = 24 * 60 * 60 * 1000;
+// for recovery; other finalized rows are reclaimed in small batches. Delay the
+// first pass so the worker can finish its broker/reconciliation startup work.
+const HISTORY_PRUNE_START_DELAY_MS = 2 * 60 * 1000;
+const HISTORY_PRUNE_MS = 15 * 60 * 1000;
 async function pruneOperationalHistory() {
   const result = await database.pruneOperationalHistory();
   if (result.totalDeleted > 0) console.log(`PostgreSQL history retention removed ${result.totalDeleted} rows: ${JSON.stringify(result.deleted)}`);
   else console.log("PostgreSQL history retention: no expired rows.");
 }
-void pruneOperationalHistory().catch((error) => console.error(`PostgreSQL history retention failed: ${error.message}`));
+const historyPruneStartupTimer = setTimeout(() => {
+  void pruneOperationalHistory().catch((error) => console.error(`PostgreSQL history retention failed: ${error.message}`));
+}, HISTORY_PRUNE_START_DELAY_MS);
+historyPruneStartupTimer.unref?.();
 const historyPruneTimer = setInterval(() => {
   void pruneOperationalHistory().catch((error) => console.error(`PostgreSQL history retention failed: ${error.message}`));
 }, HISTORY_PRUNE_MS);
@@ -1084,6 +1089,7 @@ async function shutdown(signal) {
   console.log(`Received ${signal}; shutting down cleanly.`);
   clearInterval(heartbeatTimer);
   clearInterval(livenessTimer);
+  clearTimeout(historyPruneStartupTimer);
   clearInterval(historyPruneTimer);
   clearInterval(haltWarningTimer);
   clearInterval(dailyDustCleanupTimer);

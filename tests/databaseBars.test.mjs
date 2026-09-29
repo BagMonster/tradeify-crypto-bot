@@ -122,8 +122,7 @@ test("3 - database initialization creates bars, grid, and execution tables autom
   assert.match(schema, /timeframe IN \('15m', '4h', '1d'\)/i);
   assert.match(schema, /is_closed = TRUE/i);
   assert.match(schema, /EXTRACT\(EPOCH FROM open_time\)/i);
-  assert.match(schema, /events_created_at_idx/i);
-  assert.match(schema, /bars_timeframe_open_time_idx/i);
+  assert.doesNotMatch(schema, /CREATE INDEX/i, "worker startup must not run disk-heavy index builds");
   const stateInsert = calls.find((call) => /INSERT INTO bot_state/i.test(call.text));
   assert.ok(stateInsert);
   assert.equal(stateInsert.params[0], 50_000);
@@ -395,11 +394,12 @@ test("10 - freshness episodes persist and runtime-history retention only targets
   assert.equal(retained.totalDeleted, 10);
   const deletes = calls.filter(({ text }) => /DELETE FROM/i.test(text));
   assert.equal(deletes.length, 5);
-  assert.equal(deletes.slice(0, 4).every(({ text, params }) => /LIMIT 5000/i.test(text) && Array.isArray(params) && /\.000Z$/.test(params[0])), true);
+  assert.equal(deletes.slice(0, 4).every(({ text, params }) => /LIMIT 250/i.test(text) && Array.isArray(params) && /\.000Z$/.test(params[0])), true);
   assert.equal(deletes.at(-1).params.length, 0, "bars are removed entirely because the live grid does not read PostgreSQL bars");
   assert.equal(deletes.some(({ text }) => /DELETE FROM execution_orders/i.test(text)), true);
   assert.equal(deletes.some(({ text }) => /DELETE FROM solana_execution_orders/i.test(text)), true);
   assert.equal(deletes.some(({ text }) => /DELETE FROM bars/i.test(text)), true);
+  assert.equal(deletes.every(({ text }) => !/ORDER BY/i.test(text)), true, "retention cleanup must not sort on a storage-constrained database");
   const solanaPrune = deletes.find(({ text }) => /DELETE FROM solana_execution_orders/i.test(text));
   assert.match(solanaPrune.text, /ring_grid_state/i);
   assert.match(solanaPrune.text, /positionCode/i);

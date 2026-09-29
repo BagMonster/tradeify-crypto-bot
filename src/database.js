@@ -18,7 +18,10 @@ const HISTORY_RETENTION = Object.freeze({
   eventsDays: 3,
   telegramDays: 3,
   ordersDays: 3,
-  batchSize: 5000
+  // Every cleanup pass removes only this many rows from each disposable
+  // table. The scheduler runs frequently enough to catch up without one
+  // startup or daily job becoming a large sort, lock, or WAL burst.
+  batchSize: 250
 });
 
 function requiredText(name, value, maxLength = 128) {
@@ -352,11 +355,6 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
 
     await gridState.init();
     await executionLedger.init();
-    // Retention runs in bounded batches. These small indexes keep the daily
-    // cleanup from turning into a full-table scan as operational history grows.
-    await pool.query("CREATE INDEX IF NOT EXISTS events_created_at_idx ON events (created_at)");
-    await pool.query("CREATE INDEX IF NOT EXISTS execution_orders_terminal_updated_at_idx ON execution_orders (updated_at) WHERE status IN ('FILLED','REJECTED','CANCELED','EXPIRED','PARTIAL','FAILED')");
-    await pool.query("CREATE INDEX IF NOT EXISTS bars_timeframe_open_time_idx ON bars (timeframe, open_time)");
   }
 
   async function getState() {
@@ -707,13 +705,8 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
   }
 
   async function pruneHistoryBatch(sql, params) {
-    let deleted = 0;
-    for (;;) {
-      const result = await pool.query(sql, params);
-      const count = toNonNegativeInteger("history prune deleted rows", result.rows?.[0]?.deleted ?? 0);
-      deleted += count;
-      if (count < HISTORY_RETENTION.batchSize) return deleted;
-    }
+    const result = await pool.query(sql, params);
+    return toNonNegativeInteger("history prune deleted rows", result.rows?.[0]?.deleted ?? 0);
   }
 
   async function pruneOperationalHistory({ nowMs = Date.now() } = {}) {
@@ -722,9 +715,12 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     const batch = HISTORY_RETENTION.batchSize;
     const reclaimable = RECLAIMABLE_ORDER_STATUSES;
     const deleted = Object.freeze({
-      events: await pruneHistoryBatch(`WITH candidates AS (SELECT id FROM events WHERE created_at < $1 ORDER BY id LIMIT ${batch}), removed AS (DELETE FROM events WHERE id IN (SELECT id FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.eventsDays)]),
-      telegram: await pruneHistoryBatch(`WITH candidates AS (SELECT event_key FROM solana_telegram_notifications WHERE status IN ('SENT','FAILED') AND updated_at < $1 ORDER BY updated_at LIMIT ${batch}), removed AS (DELETE FROM solana_telegram_notifications WHERE event_key IN (SELECT event_key FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.telegramDays)]),
-      executionOrders: await pruneHistoryBatch(`WITH candidates AS (SELECT client_order_id FROM execution_orders WHERE status = ANY($2) AND updated_at < $1 ORDER BY updated_at LIMIT ${batch}), removed AS (DELETE FROM execution_orders WHERE client_order_id IN (SELECT client_order_id FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.ordersDays), reclaimable]),
+      // Do not ORDER BY these candidates. On a database under storage pressure
+      // an ORDER BY can spill to pgsql_tmp; reclaiming any expired rows is safe
+      // and deliberately more important than choosing the oldest first.
+      events: await pruneHistoryBatch(`WITH candidates AS (SELECT id FROM events WHERE created_at < $1 LIMIT ${batch}), removed AS (DELETE FROM events WHERE id IN (SELECT id FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.eventsDays)]),
+      telegram: await pruneHistoryBatch(`WITH candidates AS (SELECT event_key FROM solana_telegram_notifications WHERE status IN ('SENT','FAILED') AND updated_at < $1 LIMIT ${batch}), removed AS (DELETE FROM solana_telegram_notifications WHERE event_key IN (SELECT event_key FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.telegramDays)]),
+      executionOrders: await pruneHistoryBatch(`WITH candidates AS (SELECT client_order_id FROM execution_orders WHERE status = ANY($2) AND updated_at < $1 LIMIT ${batch}), removed AS (DELETE FROM execution_orders WHERE client_order_id IN (SELECT client_order_id FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.ordersDays), reclaimable]),
       solanaExecutionOrders: await pruneHistoryBatch(`WITH candidates AS (
         SELECT o.order_code
           FROM solana_execution_orders o
@@ -753,10 +749,9 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
                 WHERE latest.status = 'FILLED'
              )
            )
-         ORDER BY o.updated_at
          LIMIT ${batch}
       ), removed AS (DELETE FROM solana_execution_orders WHERE order_code IN (SELECT order_code FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.ordersDays), reclaimable]),
-      bars: await pruneHistoryBatch(`WITH candidates AS (SELECT ctid FROM bars ORDER BY open_time LIMIT ${batch}), removed AS (DELETE FROM bars WHERE ctid IN (SELECT ctid FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [])
+      bars: await pruneHistoryBatch(`WITH candidates AS (SELECT ctid FROM bars LIMIT ${batch}), removed AS (DELETE FROM bars WHERE ctid IN (SELECT ctid FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [])
     });
     return Object.freeze({ nowMs: now.getTime(), deleted, totalDeleted: Object.values(deleted).reduce((sum, value) => sum + value, 0) });
   }
