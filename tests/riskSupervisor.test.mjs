@@ -39,12 +39,12 @@ test("D-060 flatten takes priority over a cut", async () => {
   assert.equal(sol.calls.some(([kind]) => kind === "flatten"), true);
 });
 
-test("unread data pauses only the unread book and does not stick after a good read", async () => {
+test("unread shared data is alert-only and does not brake either book", async () => {
   const unread = book("ZEC/USD", { unreadable: true });
   const safe = book("AVAX/USD");
   const supervisor = createRiskSupervisor({ config, instruments: [unread, safe] });
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-01" })).action, "ACCOUNT_DATA_UNAVAILABLE");
-  assert.equal(unread.calls.some(([kind, on]) => kind === "brake" && on === true), true);
+  assert.equal(unread.calls.some(([kind, on]) => kind === "brake" && on === true), false);
   assert.equal(safe.calls.some(([kind, on]) => kind === "brake" && on === true), false);
   assert.deepEqual(supervisor.getSnapshot().brakedInstruments, []);
 
