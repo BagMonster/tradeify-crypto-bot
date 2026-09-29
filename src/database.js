@@ -312,6 +312,16 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS broker_rematch_stability (
+        instrument TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        first_observed_at TIMESTAMPTZ NOT NULL,
+        last_observed_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS bars (
         source TEXT NOT NULL CHECK (LENGTH(BTRIM(source)) BETWEEN 1 AND 64),
         symbol TEXT NOT NULL CHECK (LENGTH(BTRIM(symbol)) BETWEEN 1 AND 64),
@@ -581,6 +591,50 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
       absorbedThrough: toDate("hybrid watermark absorbed_through", row.absorbed_through).toISOString(),
       lastPositionCode: row.last_position_code == null ? null : String(row.last_position_code)
     });
+  }
+
+  function normalizeBrokerRematchStability(row) {
+    if (!row) return null;
+    return Object.freeze({
+      instrument: requiredText("broker rematch instrument", row.instrument, 32),
+      fingerprint: requiredText("broker rematch fingerprint", row.fingerprint, 4000),
+      firstObservedAt: toDate("broker rematch first_observed_at", row.first_observed_at).toISOString(),
+      lastObservedAt: toDate("broker rematch last_observed_at", row.last_observed_at).toISOString()
+    });
+  }
+
+  async function observeBrokerRematchStability({ instrument, fingerprint, observedAt }) {
+    const symbol = requiredText("broker rematch instrument", instrument, 32);
+    const signature = requiredText("broker rematch fingerprint", fingerprint, 4000);
+    const stamp = toDate("broker rematch observedAt", observedAt);
+    const result = await pool.query(
+      `INSERT INTO broker_rematch_stability (
+         instrument, fingerprint, first_observed_at, last_observed_at
+       ) VALUES ($1, $2, $3, $3)
+       ON CONFLICT (instrument) DO UPDATE SET
+         fingerprint = EXCLUDED.fingerprint,
+         first_observed_at = CASE
+           WHEN broker_rematch_stability.fingerprint = EXCLUDED.fingerprint
+             AND broker_rematch_stability.last_observed_at >= EXCLUDED.last_observed_at - INTERVAL '2 minutes'
+             THEN broker_rematch_stability.first_observed_at
+           ELSE EXCLUDED.first_observed_at
+         END,
+         last_observed_at = EXCLUDED.last_observed_at,
+         updated_at = NOW()
+       RETURNING *`,
+      [symbol, signature, stamp]
+    );
+    if (result.rowCount !== 1) throw new Error("broker rematch stability was not saved");
+    return normalizeBrokerRematchStability(result.rows[0]);
+  }
+
+  async function clearBrokerRematchStability(instrument) {
+    const symbol = requiredText("broker rematch instrument", instrument, 32);
+    const result = await pool.query(
+      "DELETE FROM broker_rematch_stability WHERE instrument = $1 RETURNING instrument",
+      [symbol]
+    );
+    return result.rowCount === 1;
   }
 
   async function setOperatorKilled(killed) {
@@ -1091,6 +1145,8 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     clearHaltWarningCycle,
     getHybridWatermarks,
     saveHybridWatermark,
+    observeBrokerRematchStability,
+    clearBrokerRematchStability,
     setOperatorKilled,
     setResumeChallenge,
     clearResumeChallenge,
