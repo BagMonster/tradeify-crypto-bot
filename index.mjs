@@ -26,6 +26,7 @@ import { createRingGrid } from "./src/strategies/ringGrid.js";
 import { createSolanaOwnerService } from "./src/solanaOwnerService.js";
 import { createMultiInstrumentOwnerService } from "./src/multiInstrumentOwnerService.js";
 import { runReconciliationPass } from "./src/runtime/hybridAbsorber.js";
+import { brokerTicketsFromOpenPositions, runBrokerAuthoritativeRematchPass } from "./src/runtime/brokerAuthoritativeRematch.js";
 import { startTelegramBot } from "./src/telegramBot.js";
 import { describeAccountProfile } from "./src/config/accountProfile.js";
 import { createExposureGate, formatExposurePoolLine } from "./src/risk/exposureGate.js";
@@ -965,10 +966,61 @@ const HYBRID_RECONCILE_MS = 60 * 1000;
 const HYBRID_HALT_SIGNATURE = "diverged from the DXtrade book and no manual fill explains it";
 let lastHybridHaltReason = null;
 
+async function readFreshBrokerTickets(instruments) {
+  try {
+    await dxtradeClient.login();
+    return brokerTicketsFromOpenPositions(await dxtradeClient.getOpenPositions(), instruments);
+  } catch (error) {
+    return Object.freeze({ ok: false, error: error?.message ?? "DXtrade ticket read failed", byInstrument: null });
+  }
+}
+
+async function clearHybridSafetyHalt() {
+  await clearNonHarvestHalt("hybrid-reconciliation");
+  if (typeof database.clearSafetyHaltIfReason !== "function") return false;
+  const current = await database.getState();
+  const reason = typeof current?.halt_reason === "string" ? current.halt_reason : null;
+  if (current?.safety_halt !== true || !reason || !reason.includes(HYBRID_HALT_SIGNATURE)) return false;
+  return database.clearSafetyHaltIfReason(reason);
+}
+
 async function runHybridReconcileOnce() {
   const books = typeof service.hybridBooks === "function" ? service.hybridBooks() : {};
   if (Object.keys(books).length === 0) {
     console.log("HYBRID: no books expose a hybrid surface; pass skipped.");
+    return;
+  }
+
+  const brokerRematch = await runBrokerAuthoritativeRematchPass({
+    books,
+    readBrokerTickets: readFreshBrokerTickets,
+    observeStability: (record) => database.observeBrokerRematchStability(record),
+    clearStability: (instrument) => database.clearBrokerRematchStability(instrument)
+  });
+  for (const row of brokerRematch.rows) {
+    if (row.outcome === "WAITING") {
+      console.log(`HYBRID REMATCH: ${row.instrument} stable discrepancy ${Math.floor(row.stableForMs / 1000)}s; waiting ${Math.ceil(row.remainingMs / 1000)}s.`);
+    } else if (row.outcome !== "MATCH") {
+      console.log(`HYBRID REMATCH: ${row.instrument} ${row.outcome}${row.reason ? `: ${row.reason}` : ""}`);
+    }
+  }
+  for (const instrument of brokerRematch.rematched) {
+    await database.addEvent("WARN", "BROKER_AUTHORITATIVE_BOOK_REMATCHED", {
+      instrument,
+      source: "stable DXtrade ticket snapshot",
+      stabilityWindowSeconds: 600
+    });
+  }
+  if (brokerRematch.verifiedAll) {
+    try {
+      const cleared = await clearHybridSafetyHalt();
+      console.log(cleared
+        ? "HYBRID REMATCH: every ticket re-read exactly; cleared the hybrid safety halt."
+        : "HYBRID REMATCH: every ticket re-read exactly; no hybrid safety halt needed clearing.");
+    } catch (error) {
+      console.error(`HYBRID REMATCH: post-rematch halt clear failed: ${error.message}`);
+    }
+    lastHybridHaltReason = null;
     return;
   }
 
@@ -1011,6 +1063,15 @@ async function runHybridReconcileOnce() {
     });
   }
 
+  const brokerTicketMismatchPending = brokerRematch.rows.some((row) => row.outcome !== "MATCH");
+  if (report.escalations.length === 0 && report.recheckRequired !== true && brokerTicketMismatchPending) {
+    // Net equality is not enough to release a ticket-level divergence.  Keep
+    // the existing halt latched until the ten-minute window resolves it (or a
+    // new fresh broker read proves the ticket books exact).
+    console.log("HYBRID REMATCH: aggregate nets agree, but broker ticket reconciliation is still pending.");
+    return;
+  }
+
   if (report.escalations.length === 0 && report.recheckRequired !== true) {
     await clearNonHarvestHalt("hybrid-reconciliation");
     // Clearing the pending warning cycle is not enough once it has converted to
@@ -1022,7 +1083,7 @@ async function runHybridReconcileOnce() {
         const current = await database.getState();
         const reason = typeof current?.halt_reason === "string" ? current.halt_reason : null;
         if (current?.safety_halt === true && reason && reason.includes(HYBRID_HALT_SIGNATURE)) {
-          const cleared = await database.clearSafetyHaltIfReason(reason);
+          const cleared = await clearHybridSafetyHalt();
           if (cleared) console.log("HYBRID: every book agrees; cleared the hybrid safety halt.");
           else console.warn("HYBRID: hybrid safety halt changed before it could be cleared; will retry next pass.");
         }
