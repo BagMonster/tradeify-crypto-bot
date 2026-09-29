@@ -13,5 +13,6 @@
   ],
   "fullFlattenUsd": 1250,
   "harvestUsd": 600,
+  "rolloverHarvestDelayMinutes": 5,
   "perCoinCapUsd": 150000
 }
