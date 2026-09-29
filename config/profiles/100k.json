@@ -5,7 +5,7 @@
   "dailyLossLimitUsd": 3000,
   "maxLossUsd": 6000,
   "maxNotionalUsd": 200000,
-  "entryBrakeUsd": 1200,
+  "entryBrakeUsd": 500,
   "cutTiers": [
     { "thresholdUsd": 1000, "fraction": 0.1 },
     { "thresholdUsd": 1500, "fraction": 0.2 },
