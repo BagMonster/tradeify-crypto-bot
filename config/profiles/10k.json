@@ -5,7 +5,7 @@
   "dailyLossLimitUsd": 300,
   "maxLossUsd": 600,
   "maxNotionalUsd": 20000,
-  "entryBrakeUsd": 50,
+  "entryBrakeUsd": 120,
   "cutTiers": [
     { "thresholdUsd": 100, "fraction": 0.1 },
     { "thresholdUsd": 150, "fraction": 0.2 },
@@ -13,6 +13,7 @@
   ],
   "fullFlattenUsd": 250,
   "harvestUsd": 33,
+  "rolloverHarvestDelayMinutes": 5,
   "exposurePool": { "softUsd": 3000, "hardUsd": 3500 },
   "exposurePoolHarvest": { "firstAfterHours": 24, "secondAfterHours": 36, "firstFraction": 0.5, "minimumFraction": 0.25 },
   "perCoinCapUsd": 4500
