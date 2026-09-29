@@ -864,11 +864,11 @@ const dailyDustCleanupTimer = setInterval(() => {
 dailyDustCleanupTimer.unref?.();
 console.log(`Daily ring dust cleanup armed: deploy-day catch-up, then ${String(dailyDustCleanup.scheduledMinuteUtc).padStart(2, "0")} minutes after the 22:00 UTC account rollover.`);
 
-// Keep PostgreSQL focused on active strategy state and recent operational
-// history. Finalised orders, sent Telegram identities and old market bars are
-// retained long enough for reconciliation and indicators, then removed in
-// small batches. PostgreSQL autovacuum can reuse the reclaimed pages without
-// interrupting live execution.
+// Keep PostgreSQL focused on active strategy state. Events and sent Telegram
+// identities are short-lived diagnostics; historical bars are not part of the
+// live grid (the 200-day MA is fetched directly from Binance) and are removed.
+// Open, partial, active-legacy, and latest-activity order records are retained
+// for recovery; other finalized rows are reclaimed in small batches.
 const HISTORY_PRUNE_MS = 24 * 60 * 60 * 1000;
 async function pruneOperationalHistory() {
   const result = await database.pruneOperationalHistory();
