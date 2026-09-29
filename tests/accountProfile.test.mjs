@@ -26,7 +26,7 @@ const TEN_K = Object.freeze({
   dailyLossLimitUsd: 300,
   maxLossUsd: 600,
   maxNotionalUsd: 20000,
-  entryBrakeUsd: 120,
+  entryBrakeUsd: 50,
   cutTiers: [{ thresholdUsd: 100, fraction: 0.1 }, { thresholdUsd: 150, fraction: 0.2 }, { thresholdUsd: 200, fraction: 0.5 }],
   fullFlattenUsd: 250,
   harvestUsd: 33,
@@ -65,6 +65,7 @@ test("50k reproduces the configuration that was live before profiles existed", a
   assert.equal(risk.fullFlattenUsd, 1250);
   assert.equal(risk.dailyLossLimitUsd, 1500);
   assert.equal(risk.sessionHarvestUsd, 600);
+  assert.equal(risk.rolloverHarvestDelayMinutes, 5);
   assert.equal(risk.exposurePool, undefined, "the $50K account never had a pool");
   for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 150000, entry.instrument);
 });
@@ -76,7 +77,7 @@ test("10k applies the decided $10K numbers and passes every downstream validator
   assert.equal(account.maxLossOffset, 600);
   assert.equal(account.maxNotional, 20000);
   const risk = instruments.accountRisk;
-  assert.equal(risk.entryBrakeUsd, 120);
+  assert.equal(risk.entryBrakeUsd, 50);
   assert.deepEqual(risk.cutTiers, [{ thresholdUsd: 100, fraction: 0.1 }, { thresholdUsd: 150, fraction: 0.2 }]);
   assert.equal(risk.partialCutUsd, 200);
   assert.equal(risk.fullFlattenUsd, 250);
@@ -104,6 +105,8 @@ test("the 100k draft is internally consistent, so confirming it is the only step
     account: await readJson("config/account.json"),
     instruments: await readJson("config/instruments.json")
   });
+  assert.equal(applied.instruments.accountRisk.entryBrakeUsd, 500);
+  assert.equal(applied.instruments.accountRisk.rolloverHarvestDelayMinutes, 5);
   assert.doesNotThrow(() => validateAccountConfig(applied.account));
   assert.doesNotThrow(() => loadInstrumentConfigObject(applied.instruments));
   assert.doesNotThrow(() => supervisorFrom(applied.instruments.accountRisk));
