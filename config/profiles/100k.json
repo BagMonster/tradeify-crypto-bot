@@ -13,6 +13,7 @@
   ],
   "fullFlattenUsd": 2500,
   "harvestUsd": 750,
+  "rolloverHarvestDelayMinutes": 5,
   "exposurePool": { "softUsd": 22000, "hardUsd": 22500 },
   "perCoinCapUsd": 250000
 }
