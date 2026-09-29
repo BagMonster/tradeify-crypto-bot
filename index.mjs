@@ -452,6 +452,10 @@ const riskSupervisor = createRiskSupervisor({
     get: (dayKey) => database.getSessionHarvestState(dayKey),
     save: (state) => database.saveSessionHarvestState(state)
   }),
+  freshnessEpisodeStore: Object.freeze({
+    get: () => database.getBrokerFreshnessEpisode(),
+    save: (episode) => database.saveBrokerFreshnessEpisode(episode)
+  }),
   getCombinedDayPnlUsd: () => {
     const { openPl, dayClosedPl } = accountMetrics();
     return openPl + dayClosedPl;
@@ -550,7 +554,10 @@ async function applyReconciliationBlocked(stack, result) {
 async function processLatestTrade(stack, trade) {
   const preflight = await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
   liveness.noteEvaluation(preflight);
-  if (["FLATTEN", "CUT", "HARVEST_PENDING", "HARVEST_CONFIRMED", "HARVEST_HALTED", "ACCOUNT_DATA_UNAVAILABLE"].includes(preflight.action)) {
+  // An unavailable shared account snapshot is reported by D-064, but is not a
+  // grid gate. Individual executions still perform their normal broker-side
+  // validation before an order can be sent.
+  if (["FLATTEN", "CUT", "HARVEST_PENDING", "HARVEST_CONFIRMED", "HARVEST_HALTED"].includes(preflight.action)) {
     return preflight;
   }
   const result = await stack.runtime.processTrade(trade);
@@ -857,6 +864,23 @@ const dailyDustCleanupTimer = setInterval(() => {
 dailyDustCleanupTimer.unref?.();
 console.log(`Daily ring dust cleanup armed: deploy-day catch-up, then ${String(dailyDustCleanup.scheduledMinuteUtc).padStart(2, "0")} minutes after the 22:00 UTC account rollover.`);
 
+// Keep PostgreSQL focused on active strategy state. Events and sent Telegram
+// identities are short-lived diagnostics; historical bars are not part of the
+// live grid (the 200-day MA is fetched directly from Binance) and are removed.
+// Open, partial, active-legacy, and latest-activity order records are retained
+// for recovery; other finalized rows are reclaimed in small batches.
+const HISTORY_PRUNE_MS = 24 * 60 * 60 * 1000;
+async function pruneOperationalHistory() {
+  const result = await database.pruneOperationalHistory();
+  if (result.totalDeleted > 0) console.log(`PostgreSQL history retention removed ${result.totalDeleted} rows: ${JSON.stringify(result.deleted)}`);
+  else console.log("PostgreSQL history retention: no expired rows.");
+}
+void pruneOperationalHistory().catch((error) => console.error(`PostgreSQL history retention failed: ${error.message}`));
+const historyPruneTimer = setInterval(() => {
+  void pruneOperationalHistory().catch((error) => console.error(`PostgreSQL history retention failed: ${error.message}`));
+}, HISTORY_PRUNE_MS);
+historyPruneTimer.unref?.();
+
 // Daily DXtrade session rotation.
 //
 // This is a canary, not the fix - reactive re-auth inside the clients is the
@@ -1060,6 +1084,7 @@ async function shutdown(signal) {
   console.log(`Received ${signal}; shutting down cleanly.`);
   clearInterval(heartbeatTimer);
   clearInterval(livenessTimer);
+  clearInterval(historyPruneTimer);
   clearInterval(haltWarningTimer);
   clearInterval(dailyDustCleanupTimer);
   telegramBot.stopDevCompanionDelivery?.();

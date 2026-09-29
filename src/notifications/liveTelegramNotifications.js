@@ -14,6 +14,7 @@ const KINDS = new Set([
   "HARVEST_HALTED",
   "HARVEST_DEFERRED",
   "HARVEST_FRESHNESS_GRACE",
+  "HARVEST_FRESHNESS_RESTORED",
   "HARVEST_RESET",
   "HALT_WARNING",
   // Enqueued by riskSupervisor.js and index.mjs since the 2026-09-20 session-recovery
@@ -248,11 +249,26 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: [
-        "⚠️ D-064 FRESH-DATA GRACE",
+        "⚠️ D-064 DXTRADE DATA OUTAGE",
         `DXtrade account data is temporarily unreadable for: ${instruments.join(", ")}.`,
-        "Normal grid actions are blocked while broker data is stale; no durable halt has been latched yet.",
-        `Grace window: ${Math.ceil(graceMs / 60000)} minutes.`,
-        "Correction: wait for /status to show fresh DXtrade data. The gate clears automatically; do not use /resume."
+        "This is an alert-only outage episode: D-064 will not apply an entry brake or safety halt.",
+        `A fresh-data confirmation is sent after ${Math.ceil(graceMs / 60000)} minutes of stable reads.`,
+        "Correction: check /status for fresh DXtrade data; do not use /resume."
+      ].join("\n")
+    };
+  }
+  if (kind === "HARVEST_FRESHNESS_RESTORED") {
+    if (!Array.isArray(event.instruments) || event.instruments.length === 0) throw new TypeError("freshness restored instruments are required");
+    const instruments = event.instruments.map((value) => headingInstrument(value));
+    const outageMs = nonNegative("freshness restored outageMs", event.outageMs ?? 0);
+    return {
+      kind,
+      eventKey,
+      message: [
+        "🟢 D-064 DXTRADE DATA RESTORED",
+        `Fresh account data is stable again for: ${instruments.join(", ")}.`,
+        `Outage episode duration: ${Math.ceil(outageMs / 60000)} minutes.`,
+        "D-064 did not apply an entry brake or safety halt."
       ].join("\n")
     };
   }

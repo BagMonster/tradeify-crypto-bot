@@ -10,6 +10,17 @@ const BAR_INTERVAL_MS = Object.freeze({
   "1d": 24 * 60 * 60 * 1000
 });
 
+// PARTIAL is deliberately not disposable: it can represent broker inventory
+// that still needs owner review. FILLED rows are reclaimable only after the
+// active legacy-lot and heartbeat exceptions below are satisfied.
+const RECLAIMABLE_ORDER_STATUSES = Object.freeze(["FILLED", "REJECTED", "CANCELED", "EXPIRED", "FAILED"]);
+const HISTORY_RETENTION = Object.freeze({
+  eventsDays: 3,
+  telegramDays: 3,
+  ordersDays: 3,
+  batchSize: 5000
+});
+
 function requiredText(name, value, maxLength = 128) {
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error(`${name} must be a non-empty string`);
@@ -145,6 +156,23 @@ function normalizeState(row) {
   };
 }
 
+function normalizeFreshnessEpisode(row) {
+  if (!row) return Object.freeze({ episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, instruments: Object.freeze([]) });
+  const status = requiredText("freshness episode status", row.status, 16);
+  if (status !== "ACTIVE" && status !== "RESOLVED") throw new Error("freshness episode status is invalid");
+  const episodeId = toNonNegativeInteger("freshness episode id", row.episode_id);
+  const dateMs = (name, value) => value == null ? null : toDate(name, value).getTime();
+  const instruments = Array.isArray(row.instruments) ? row.instruments.map((value) => requiredText("freshness episode instrument", value, 32)) : [];
+  return Object.freeze({
+    episodeId,
+    status,
+    startedAtMs: dateMs("freshness episode started at", row.started_at),
+    lastUnreadAtMs: dateMs("freshness episode last unread at", row.last_unread_at),
+    freshSinceMs: dateMs("freshness episode fresh since", row.fresh_since),
+    instruments: Object.freeze(instruments)
+  });
+}
+
 export function createDatabase(environment, { PoolClass = Pool } = {}) {
   const pool = new PoolClass({
     connectionString: environment.databaseUrl,
@@ -235,6 +263,18 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
       )
     `);
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS broker_freshness_episode (
+        id SMALLINT PRIMARY KEY CHECK (id = 1),
+        episode_id BIGINT NOT NULL DEFAULT 0 CHECK (episode_id >= 0),
+        status TEXT NOT NULL DEFAULT 'RESOLVED' CHECK (status IN ('ACTIVE','RESOLVED')),
+        started_at TIMESTAMPTZ,
+        last_unread_at TIMESTAMPTZ,
+        fresh_since TIMESTAMPTZ,
+        instruments JSONB NOT NULL DEFAULT '[]'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS daily_dust_cleanup (
         day_key TEXT PRIMARY KEY CHECK (day_key ~ '^\\d{4}-\\d{2}-\\d{2}$'),
         auto_loss_usd NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (auto_loss_usd >= 0),
@@ -312,6 +352,11 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
 
     await gridState.init();
     await executionLedger.init();
+    // Retention runs in bounded batches. These small indexes keep the daily
+    // cleanup from turning into a full-table scan as operational history grows.
+    await pool.query("CREATE INDEX IF NOT EXISTS events_created_at_idx ON events (created_at)");
+    await pool.query("CREATE INDEX IF NOT EXISTS execution_orders_terminal_updated_at_idx ON execution_orders (updated_at) WHERE status IN ('FILLED','REJECTED','CANCELED','EXPIRED','PARTIAL','FAILED')");
+    await pool.query("CREATE INDEX IF NOT EXISTS bars_timeframe_open_time_idx ON bars (timeframe, open_time)");
   }
 
   async function getState() {
@@ -618,6 +663,102 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
       "INSERT INTO events (level, kind, payload) VALUES ($1, $2, $3::jsonb)",
       [level, kind, JSON.stringify(payload)]
     );
+  }
+
+  async function getBrokerFreshnessEpisode() {
+    const result = await pool.query("SELECT episode_id, status, started_at, last_unread_at, fresh_since, instruments FROM broker_freshness_episode WHERE id=1");
+    if (result.rowCount === 0) return normalizeFreshnessEpisode(null);
+    if (result.rowCount !== 1) throw new Error("broker freshness episode lookup returned an invalid row count");
+    return normalizeFreshnessEpisode(result.rows[0]);
+  }
+
+  async function saveBrokerFreshnessEpisode(input) {
+    const current = input && typeof input === "object" ? input : {};
+    const episodeId = toNonNegativeInteger("freshness episode id", current.episodeId);
+    const status = requiredText("freshness episode status", current.status, 16);
+    if (status !== "ACTIVE" && status !== "RESOLVED") throw new Error("freshness episode status is invalid");
+    const asTimestamp = (name, value) => value == null ? null : toDate(name, new Date(Number(value))).toISOString();
+    if (!Array.isArray(current.instruments) || current.instruments.some((value) => typeof value !== "string" || value.trim() === "")) {
+      throw new Error("freshness episode instruments are invalid");
+    }
+    const result = await pool.query(
+      `INSERT INTO broker_freshness_episode (id, episode_id, status, started_at, last_unread_at, fresh_since, instruments)
+       VALUES (1,$1,$2,$3,$4,$5,$6::jsonb)
+       ON CONFLICT (id) DO UPDATE SET
+         episode_id=EXCLUDED.episode_id,
+         status=EXCLUDED.status,
+         started_at=EXCLUDED.started_at,
+         last_unread_at=EXCLUDED.last_unread_at,
+         fresh_since=EXCLUDED.fresh_since,
+         instruments=EXCLUDED.instruments,
+         updated_at=NOW()
+       RETURNING episode_id, status, started_at, last_unread_at, fresh_since, instruments`,
+      [
+        episodeId,
+        status,
+        asTimestamp("freshness episode started at", current.startedAtMs),
+        asTimestamp("freshness episode last unread at", current.lastUnreadAtMs),
+        asTimestamp("freshness episode fresh since", current.freshSinceMs),
+        JSON.stringify(current.instruments.map((value) => value.trim()))
+      ]
+    );
+    if (result.rowCount !== 1) throw new Error("broker freshness episode save failed");
+    return normalizeFreshnessEpisode(result.rows[0]);
+  }
+
+  async function pruneHistoryBatch(sql, params) {
+    let deleted = 0;
+    for (;;) {
+      const result = await pool.query(sql, params);
+      const count = toNonNegativeInteger("history prune deleted rows", result.rows?.[0]?.deleted ?? 0);
+      deleted += count;
+      if (count < HISTORY_RETENTION.batchSize) return deleted;
+    }
+  }
+
+  async function pruneOperationalHistory({ nowMs = Date.now() } = {}) {
+    const now = toDate("history prune time", new Date(Number(nowMs)));
+    const cutoff = (days) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+    const batch = HISTORY_RETENTION.batchSize;
+    const reclaimable = RECLAIMABLE_ORDER_STATUSES;
+    const deleted = Object.freeze({
+      events: await pruneHistoryBatch(`WITH candidates AS (SELECT id FROM events WHERE created_at < $1 ORDER BY id LIMIT ${batch}), removed AS (DELETE FROM events WHERE id IN (SELECT id FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.eventsDays)]),
+      telegram: await pruneHistoryBatch(`WITH candidates AS (SELECT event_key FROM solana_telegram_notifications WHERE status IN ('SENT','FAILED') AND updated_at < $1 ORDER BY updated_at LIMIT ${batch}), removed AS (DELETE FROM solana_telegram_notifications WHERE event_key IN (SELECT event_key FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.telegramDays)]),
+      executionOrders: await pruneHistoryBatch(`WITH candidates AS (SELECT client_order_id FROM execution_orders WHERE status = ANY($2) AND updated_at < $1 ORDER BY updated_at LIMIT ${batch}), removed AS (DELETE FROM execution_orders WHERE client_order_id IN (SELECT client_order_id FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.ordersDays), reclaimable]),
+      solanaExecutionOrders: await pruneHistoryBatch(`WITH candidates AS (
+        SELECT o.order_code
+          FROM solana_execution_orders o
+         WHERE o.status = ANY($2)
+           AND o.updated_at < $1
+           -- A legacy lot without a broker position code can only be matched to
+           -- its exact ticket through this immutable filled ENTRY record.
+           AND NOT (
+             o.status = 'FILLED' AND o.action_type = 'ENTRY' AND EXISTS (
+               SELECT 1
+                 FROM ring_grid_state s
+                 CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload -> 'rings', '[]'::jsonb)) AS ring(value)
+                 CROSS JOIN LATERAL jsonb_array_elements(COALESCE(ring.value -> 'lots', '[]'::jsonb)) AS lot(value)
+                WHERE s.strategy_id = o.strategy_id
+                  AND s.instrument = o.instrument
+                  AND lot.value ->> 'id' = o.lot_id
+                  AND lot.value ->> 'positionCode' IS NULL
+             )
+           )
+           -- Heartbeat needs only the latest confirmed activity timestamp; keep
+           -- that one row even after all other finalized history is reclaimed.
+           AND NOT (
+             o.status = 'FILLED' AND o.filled_at = (
+               SELECT MAX(latest.filled_at)
+                 FROM solana_execution_orders latest
+                WHERE latest.status = 'FILLED'
+             )
+           )
+         ORDER BY o.updated_at
+         LIMIT ${batch}
+      ), removed AS (DELETE FROM solana_execution_orders WHERE order_code IN (SELECT order_code FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [cutoff(HISTORY_RETENTION.ordersDays), reclaimable]),
+      bars: await pruneHistoryBatch(`WITH candidates AS (SELECT ctid FROM bars ORDER BY open_time LIMIT ${batch}), removed AS (DELETE FROM bars WHERE ctid IN (SELECT ctid FROM candidates) RETURNING 1) SELECT COUNT(*)::INT AS deleted FROM removed`, [])
+    });
+    return Object.freeze({ nowMs: now.getTime(), deleted, totalDeleted: Object.values(deleted).reduce((sum, value) => sum + value, 0) });
   }
 
   async function getSessionHarvestState(dayKey) {
@@ -961,6 +1102,9 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     setIndicatorsWarm,
     getDailyLedger,
     addEvent,
+    getBrokerFreshnessEpisode,
+    saveBrokerFreshnessEpisode,
+    pruneOperationalHistory,
     getSessionHarvestState,
     getExposurePoolEpisode,
     saveExposurePoolEpisode,

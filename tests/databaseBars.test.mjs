@@ -122,6 +122,8 @@ test("3 - database initialization creates bars, grid, and execution tables autom
   assert.match(schema, /timeframe IN \('15m', '4h', '1d'\)/i);
   assert.match(schema, /is_closed = TRUE/i);
   assert.match(schema, /EXTRACT\(EPOCH FROM open_time\)/i);
+  assert.match(schema, /events_created_at_idx/i);
+  assert.match(schema, /bars_timeframe_open_time_idx/i);
   const stateInsert = calls.find((call) => /INSERT INTO bot_state/i.test(call.text));
   assert.ok(stateInsert);
   assert.equal(stateInsert.params[0], 50_000);
@@ -354,4 +356,51 @@ test("9 - indicator readiness is persisted with a parameterized fail-closed flag
   assert.equal(calls.every(({ text }) => /UPDATE bot_state/i.test(text)), true);
   assert.equal(calls.every(({ text }) => /indicators_warm = \$1/i.test(text)), true);
   await assert.rejects(database.setIndicatorsWarm("true"), /boolean/i);
+});
+
+test("10 - freshness episodes persist and runtime-history retention only targets expired disposable rows", async () => {
+  const calls = [];
+  const saved = {
+    episode_id: 4,
+    status: "ACTIVE",
+    started_at: "2026-08-01T00:00:00.000Z",
+    last_unread_at: "2026-08-01T00:00:01.000Z",
+    fresh_since: null,
+    instruments: ["SOL/USD", "INJ/USD"]
+  };
+  const pool = {
+    async query(text, params) {
+      calls.push({ text, params });
+      if (/SELECT episode_id, status/i.test(text)) return { rowCount: 0, rows: [] };
+      if (/INSERT INTO broker_freshness_episode/i.test(text)) return { rowCount: 1, rows: [saved] };
+      if (/SELECT COUNT\(\*\)::INT AS deleted FROM removed/i.test(text)) return { rowCount: 1, rows: [{ deleted: "2" }] };
+      return { rowCount: 0, rows: [] };
+    },
+    async end() {}
+  };
+  const database = databaseWithPool(pool);
+
+  assert.equal((await database.getBrokerFreshnessEpisode()).status, "RESOLVED");
+  const active = await database.saveBrokerFreshnessEpisode({
+    episodeId: 4,
+    status: "ACTIVE",
+    startedAtMs: Date.parse(saved.started_at),
+    lastUnreadAtMs: Date.parse(saved.last_unread_at),
+    freshSinceMs: null,
+    instruments: saved.instruments
+  });
+  assert.deepEqual(active.instruments, saved.instruments);
+
+  const retained = await database.pruneOperationalHistory({ nowMs: Date.parse("2026-09-30T00:00:00.000Z") });
+  assert.equal(retained.totalDeleted, 10);
+  const deletes = calls.filter(({ text }) => /DELETE FROM/i.test(text));
+  assert.equal(deletes.length, 5);
+  assert.equal(deletes.slice(0, 4).every(({ text, params }) => /LIMIT 5000/i.test(text) && Array.isArray(params) && /\.000Z$/.test(params[0])), true);
+  assert.equal(deletes.at(-1).params.length, 0, "bars are removed entirely because the live grid does not read PostgreSQL bars");
+  assert.equal(deletes.some(({ text }) => /DELETE FROM execution_orders/i.test(text)), true);
+  assert.equal(deletes.some(({ text }) => /DELETE FROM solana_execution_orders/i.test(text)), true);
+  assert.equal(deletes.some(({ text }) => /DELETE FROM bars/i.test(text)), true);
+  const solanaPrune = deletes.find(({ text }) => /DELETE FROM solana_execution_orders/i.test(text));
+  assert.match(solanaPrune.text, /ring_grid_state/i);
+  assert.match(solanaPrune.text, /positionCode/i);
 });
