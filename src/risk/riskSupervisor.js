@@ -126,11 +126,19 @@ export function createRiskSupervisor({
   getSafetyHaltState = async () => null,
   getExposurePoolSnapshot = null,
   onRolloverHarvestConfirmed = async () => {},
+  freshnessEpisodeStore = null,
+  freshnessRecoveredAfterMs = 60 * 1000,
   // requestHaltWarning is no longer used: the full flatten does not wait on a
   // warning cycle. index.mjs may still pass it; an unknown property is ignored.
   now = () => Date.now()
 }) {
   if (!config || typeof config !== "object") throw new TypeError("risk config is required");
+  if (freshnessEpisodeStore !== null && (typeof freshnessEpisodeStore?.get !== "function" || typeof freshnessEpisodeStore?.save !== "function")) {
+    throw new TypeError("freshnessEpisodeStore must provide get() and save()");
+  }
+  if (!Number.isSafeInteger(freshnessRecoveredAfterMs) || freshnessRecoveredAfterMs < 0) {
+    throw new TypeError("freshnessRecoveredAfterMs must be a non-negative whole number");
+  }
   for (const field of REQUIRED_CONFIG) {
     if (config[field] === undefined) throw new TypeError(`risk config ${field} is missing`);
   }
@@ -245,6 +253,49 @@ export function createRiskSupervisor({
   let hasSuccessfulRead = false;
   let lastError = null;
   let unreadSinceMs = null;
+  let freshnessEpisode = null;
+
+  function emptyFreshnessEpisode() {
+    return Object.freeze({ episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, instruments: Object.freeze([]) });
+  }
+
+  async function loadFreshnessEpisode() {
+    if (freshnessEpisode !== null) return freshnessEpisode;
+    freshnessEpisode = freshnessEpisodeStore === null ? emptyFreshnessEpisode() : await freshnessEpisodeStore.get();
+    return freshnessEpisode;
+  }
+
+  async function saveFreshnessEpisode(next) {
+    freshnessEpisode = freshnessEpisodeStore === null ? Object.freeze(next) : await freshnessEpisodeStore.save(next);
+    return freshnessEpisode;
+  }
+
+  async function noteFreshnessOutage(nowMs, instruments) {
+    const prior = await loadFreshnessEpisode();
+    if (prior.status === "ACTIVE") {
+      return Object.freeze({ started: false, episode: await saveFreshnessEpisode({ ...prior, lastUnreadAtMs: nowMs, freshSinceMs: null, instruments }) });
+    }
+    const episode = await saveFreshnessEpisode({
+      episodeId: Number(prior.episodeId ?? 0) + 1,
+      status: "ACTIVE",
+      startedAtMs: nowMs,
+      lastUnreadAtMs: nowMs,
+      freshSinceMs: null,
+      instruments
+    });
+    return Object.freeze({ started: true, episode });
+  }
+
+  async function noteFreshnessRead(nowMs) {
+    const prior = await loadFreshnessEpisode();
+    if (prior.status !== "ACTIVE") return Object.freeze({ restored: false, episode: prior });
+    if (prior.freshSinceMs === null) {
+      return Object.freeze({ restored: false, episode: await saveFreshnessEpisode({ ...prior, freshSinceMs: nowMs }) });
+    }
+    if (nowMs - prior.freshSinceMs < freshnessRecoveredAfterMs) return Object.freeze({ restored: false, episode: prior });
+    const episode = await saveFreshnessEpisode({ ...prior, status: "RESOLVED", freshSinceMs: null });
+    return Object.freeze({ restored: true, episode });
+  }
 
   // A protective cut that does not fill leaves the account unprotected. On
   // 2026-09-19 seventeen consecutive cuts returned ACCOUNT_DATA_UNAVAILABLE
@@ -755,54 +806,46 @@ export function createRiskSupervisor({
         if (unreadSinceMs === null) {
           unreadSinceMs = nowMs;
           if (sessionHarvestEnabled && hasSuccessfulRead) {
-            await addEvent("WARN", "D064_FRESH_DATA_GRACE_STARTED", {
-              dayKey: incomingDayKey,
-              instruments: unreadable.map((r) => r.instrument),
-              graceMs: sessionHarvestFreshDataGraceMs
-            });
-            notifications?.enqueue?.({
-              kind: "HARVEST_FRESHNESS_GRACE",
-              eventKey: `D064-FRESH-GRACE:${incomingDayKey.replaceAll("-", "")}:${nowMs}`,
-              instruments: unreadable.map((r) => r.instrument),
-              graceMs: sessionHarvestFreshDataGraceMs
-            });
+            const outage = await noteFreshnessOutage(nowMs, unreadable.map((r) => r.instrument));
+            if (outage.started) {
+              await addEvent("WARN", "D064_FRESH_DATA_OUTAGE_STARTED", {
+                dayKey: incomingDayKey,
+                instruments: outage.episode.instruments,
+                episodeId: outage.episode.episodeId
+              });
+              notifications?.enqueue?.({
+                kind: "HARVEST_FRESHNESS_GRACE",
+                eventKey: `D064-FRESH-OUTAGE:${outage.episode.episodeId}`,
+                instruments: outage.episode.instruments,
+                graceMs: freshnessRecoveredAfterMs
+              });
+            }
           }
         }
         for (const reading of readings) {
-          applyEntryBrake(
-            reading.book,
-            sessionHarvestEnabled ? true : (stickyBrake(reading.instrument) || reading.readFailed)
-          );
+          // DXtrade-read outages are alert-only. Keep independent brakes such
+          // as a booked loss tier or an unconfirmed protective cut intact, but
+          // do not turn an unavailable snapshot into a grid-entry stop.
+          applyEntryBrake(reading.book, stickyBrake(reading.instrument));
         }
         lastError = `Cannot read ${unreadable.map((r) => r.instrument).join(", ")}`;
-        await addEvent("ERROR", "RISK_SUPERVISOR_ACCOUNT_DATA_UNAVAILABLE", {
-          instruments: unreadable.map((r) => r.instrument)
-        });
-        // Keep ordinary strategy actions fail-closed while broker data is
-        // unreadable, but do not turn a one-poll delay into a durable,
-        // account-wide D-064 halt.  A fresh read inside the configured grace
-        // window clears this automatically.  An initial cold worker remains
-        // blocked without creating an irreversible halt until it has ever read
-        // a usable snapshot.
-        const graceExpired = nowMs - unreadSinceMs >= sessionHarvestFreshDataGraceMs;
-        if (sessionHarvestEnabled && hasSuccessfulRead && graceExpired) {
-          const reason = `D-064 harvest cannot verify fresh broker account data for ${unreadable.map((r) => r.instrument).join(", ")}`;
-          const halted = await haltHarvest({
-            incomingDayKey,
-            reason,
-            details: { instruments: unreadable.map((r) => ({ instrument: r.instrument, status: "ACCOUNT_DATA_UNAVAILABLE" })) }
-          });
-          return Object.freeze({ action: "HARVEST_HALTED", instruments: unreadable.map((r) => r.instrument), harvest: halted });
-        }
         return Object.freeze({
           action: "ACCOUNT_DATA_UNAVAILABLE",
           instruments: unreadable.map((r) => r.instrument),
-          graceRemainingMs: Math.max(0, sessionHarvestFreshDataGraceMs - (nowMs - unreadSinceMs))
+          outageMs: Math.max(0, nowMs - unreadSinceMs)
         });
       }
       lastError = null;
       hasSuccessfulRead = true;
       unreadSinceMs = null;
+      if (sessionHarvestEnabled) {
+        const recovery = await noteFreshnessRead(now());
+        if (recovery.restored) {
+          const outageMs = recovery.episode.startedAtMs === null ? null : Math.max(0, now() - recovery.episode.startedAtMs);
+          await addEvent("WARN", "D064_FRESH_DATA_RESTORED", { episodeId: recovery.episode.episodeId, outageMs, instruments: recovery.episode.instruments });
+          notifications?.enqueue?.({ kind: "HARVEST_FRESHNESS_RESTORED", eventKey: `D064-FRESH-RESTORED:${recovery.episode.episodeId}`, outageMs, instruments: recovery.episode.instruments });
+        }
+      }
 
       const suppliedCombined = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
       const combined = fixed2(Number.isFinite(suppliedCombined) ? suppliedCombined : readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
@@ -1074,7 +1117,7 @@ export function createRiskSupervisor({
         ? null
         : Object.freeze({
           sinceMs: unreadSinceMs,
-          remainingMs: Math.max(0, sessionHarvestFreshDataGraceMs - (now() - unreadSinceMs))
+          outageMs: Math.max(0, now() - unreadSinceMs)
         }),
       harvestedToday: harvestState?.status === "CONFIRMED",
       trancheExitsPaused: ["PENDING", "CONFIRMED", "HALTED"].includes(harvestState?.status) || rolloverHarvestDelayRemainingMs > 0,
