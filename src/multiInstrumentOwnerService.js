@@ -245,6 +245,10 @@ export function createMultiInstrumentOwnerService({
       const harvest = snapshot.harvest ?? { status: snapshot.harvestedToday === true ? "CONFIRMED" : "READY" };
       const exits = snapshot.trancheExitsPaused === true ? "OFF" : "ON";
       lines.push(`  harvest: +${harvestUsd.toFixed(2)} · ${harvest.status} · tranche exits ${exits}`);
+      const rolloverWaitMs = Number(snapshot.rolloverHarvestDelayRemainingMs);
+      if (Number.isFinite(rolloverWaitMs) && rolloverWaitMs > 0) {
+        lines.push(`  D-068 settlement wait: ${Math.ceil(rolloverWaitMs / 60_000)}m remaining; new entries and ordinary exits resume after the configured ${snapshot.rolloverHarvestDelayMinutes}-minute post-rollover window`);
+      }
       if (Number.isFinite(Number(harvest.triggerPnlUsd))) lines.push(`  harvest trigger P&L: ${money(Number(harvest.triggerPnlUsd))}`);
       if (harvest.confirmedAt) lines.push(`  harvest confirmed: ${harvest.confirmedAt}`);
       if (harvest.haltReason) lines.push(`  harvest halt: ${harvest.haltReason}`);
