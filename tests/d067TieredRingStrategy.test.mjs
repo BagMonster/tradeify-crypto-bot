@@ -5,9 +5,8 @@ import { createRingGrid } from "../src/strategies/ringGrid.js";
 import { buildGridDefinition } from "../src/strategies/ringGridDefinition.js";
 import { createRingGridInstance } from "../src/runtime/ringGridInstance.js";
 
-// Profile-applied: account-size numbers (capUsd, ladder) live in config/profiles.
-// "50k" is the live baseline these assertions were written against.
 const { instruments: raw } = await loadProfiledConfigFiles("50k");
+const CAP_USD = raw.instruments[0].sizing.capUsd;
 const OPENED_AT = "2026-09-15T00:00:00.000Z";
 const FILLED_AT = "2026-09-15T00:01:00.000Z";
 
@@ -41,14 +40,14 @@ function candidatesAt(grid, state, tag, ma = 100) {
   return grid.entryCandidates(state, { previousPrice: price + 1, price, ma });
 }
 
-test("D-067 allocates exactly $200,000 across one active tiered side", () => {
+test("D-067 allocates exactly the profile's per-coin cap across one active tiered side", () => {
   for (const instrument of ["SOL/USD", "DOGE/USD", "INJ/USD", "AAVE/USD", "AVAX/USD"]) {
     const grid = gridFor(instrument);
     const state = grid.createInitialState();
     const buyExposure = state.rings
       .filter((ring) => ring.side === "BUY")
       .reduce((total, ring) => total + (ring.usd * ring.capacity), 0);
-    assert.equal(Number(buyExposure.toFixed(6)), 200000);
+    assert.equal(Number(buyExposure.toFixed(6)), CAP_USD);
   }
 
   const sol = gridFor("SOL/USD").createInitialState();
