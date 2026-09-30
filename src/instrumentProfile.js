@@ -46,6 +46,29 @@ const PROFILES = Object.freeze({
     binanceSymbol: "AVAXUSDT",
     binanceStream: "avaxusdt@trade",
     lotStep: 0.01
+  }),
+  // PEPE, RUNE and SUI: DXtrade order tickets (2026-09-30) show 1 lot = 1 coin,
+  // priced per coin, same basis as the live five. lotStep 0.01 matches them.
+  "PEPE/USD": Object.freeze({
+    asset: "PEPE",
+    dxtradeSymbol: "PEPE/USD",
+    binanceSymbol: "PEPEUSDT",
+    binanceStream: "pepeusdt@trade",
+    lotStep: 0.01
+  }),
+  "RUNE/USD": Object.freeze({
+    asset: "RUNE",
+    dxtradeSymbol: "RUNE/USD",
+    binanceSymbol: "RUNEUSDT",
+    binanceStream: "runeusdt@trade",
+    lotStep: 0.01
+  }),
+  "SUI/USD": Object.freeze({
+    asset: "SUI",
+    dxtradeSymbol: "SUI/USD",
+    binanceSymbol: "SUIUSDT",
+    binanceStream: "suiusdt@trade",
+    lotStep: 0.01
   })
 });
 
