@@ -12,10 +12,22 @@ import { getSupportedInstrumentProfile, resolveInstrumentProfile } from "../src/
 // "50k" is the live baseline these assertions were written against.
 const { instruments: raw } = await loadProfiledConfigFiles("50k");
 
-test("D-060 config enables the five owner-authorized instruments", () => {
+// Count-agnostic: adding or removing a coin in config/instruments.json must not
+// require editing this test. It checks the rules every enabled book must obey.
+test("every enabled instrument is registered with a verified lot and a unique prefix", () => {
   const config = loadInstrumentConfigObject(raw);
-  assert.deepEqual(config.enabled.map((entry) => entry.instrument), ["SOL/USD", "DOGE/USD", "INJ/USD", "AAVE/USD", "AVAX/USD"]);
-  assert.equal(config.enabled.every((entry) => entry.sizing.lotStep === 0.01), true);
+  assert.ok(config.enabled.length >= 1, "at least one instrument must be enabled");
+  const prefixes = new Set();
+  for (const entry of config.enabled) {
+    const profile = getSupportedInstrumentProfile(entry.instrument);
+    assert.equal(profile.dxtradeSymbol, entry.instrument, `${entry.instrument} dxtradeSymbol`);
+    assert.equal(profile.binanceSymbol, entry.marketSymbol, `${entry.instrument} marketSymbol`);
+    assert.equal(typeof profile.lotStep, "number", `${entry.instrument} needs a verified lotStep in instrumentProfile`);
+    assert.equal(entry.sizing.lotStep, profile.lotStep, `${entry.instrument} lotStep must match instrumentProfile`);
+    assert.equal(prefixes.has(entry.orderPrefix), false, `${entry.instrument} duplicate orderPrefix`);
+    prefixes.add(entry.orderPrefix);
+  }
+  // D-062: ZEC stays off until the owner decides otherwise.
   assert.equal(config.enabled.some((entry) => entry.instrument === "ZEC/USD"), false);
 });
 
