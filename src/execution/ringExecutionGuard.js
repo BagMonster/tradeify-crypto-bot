@@ -344,7 +344,60 @@ export function createRingExecutionGuard({
     }
   }
 
+  // A ring whose entry the broker refuses must not retry forever. Each ring's entry
+  // order code is deterministic (PREFIX-GRID-<epoch><stateVersion>-<tag>-E), so a
+  // refusal repeats on every tick until something changes. On 2026-09-22 INJ SELL11
+  // was re-sent about twice a second for over an hour against a stale REJECTED ledger
+  // row from the closed account. After this many consecutive refusals the code is
+  // latched, the owner is alerted once, and the ring waits for a state-version change
+  // (which yields a new order code) or a restart.
+  //
+  // Only statuses the BROKER has settled count. PENDING means the order reached
+  // DXtrade and the confirmation window closed without a fill: the adapter re-polls
+  // that same order code rather than sending a new one, and it may still fill.
+  // Latching on PENDING would stop the bot watching a live order.
+  //
+  // (Restored 2026-09-29: this was added on 2026-09-22 and then removed by accident
+  // the same evening, when the order-code epoch was applied to a pre-latch copy of
+  // this file. tests/ringExecutionGuardAlerts.test.mjs has been failing since.)
+  const REJECTIONS_BEFORE_LATCH = 3;
+  const LATCHABLE = new Set(["REJECTED", "CANCELED", "EXPIRED", "FAILED"]);
+  const entryRejections = new Map();   // orderCode -> consecutive broker refusals
+
+  function noteEntryRejection(code, status, reason) {
+    if (!LATCHABLE.has(status)) {
+      // Not a refusal: still in flight, so the ring keeps its clean slate.
+      entryRejections.delete(code);
+      return 0;
+    }
+    const count = (entryRejections.get(code) ?? 0) + 1;
+    entryRejections.set(code, count);
+    if (count !== REJECTIONS_BEFORE_LATCH) return count;
+    try {
+      notifications?.enqueue?.({
+        kind: "EXECUTION_BLOCKED",
+        eventKey: `ENTRY-REJECTED:${PREFIX}:${code}`,
+        instrument: INSTRUMENT,
+        path: "ENTRY",
+        reasonCode: "ORDER_REJECTED"
+      });
+    } catch {
+      // Alerting must never interfere with the execution path.
+    }
+    return count;
+  }
+
   async function placeEntryOrder(intent, code) {
+    const rejections = entryRejections.get(code) ?? 0;
+    if (rejections >= REJECTIONS_BEFORE_LATCH) {
+      await addEvent("WARN", "RING_ENTRY_REJECT_LATCHED", { orderCode: code, ringTag: intent.ringTag, rejections });
+      // BLOCKED, so the exposure pool releases the reservation immediately.
+      return Object.freeze({
+        status: "BLOCKED",
+        orderCode: code,
+        reason: `${INSTRUMENT} ${intent.ringTag}: the broker refused this entry ${rejections} times; latched until the ring state version changes`
+      });
+    }
     const result = await adapter.place({
       orderCode: code,
       strategyId: intent.strategyId,
@@ -358,9 +411,18 @@ export function createRingExecutionGuard({
       quantity: intent.quantity
     });
     if (result.confirmed !== true || result.status !== "FILLED") {
-      await addEvent("WARN", "RING_ORDER_NOT_CONFIRMED", { orderCode: code, status: result.status ?? "UNKNOWN" });
-      return Object.freeze({ status: result.status ?? "NOT_CONFIRMED", orderCode: code });
+      // The broker's own words. Without them a rejection cannot be diagnosed at all:
+      // on 2026-09-22 hundreds of rejections were logged with no reason recorded.
+      const count = noteEntryRejection(code, result.status ?? "UNKNOWN", result.reason);
+      await addEvent("WARN", "RING_ORDER_NOT_CONFIRMED", {
+        orderCode: code,
+        status: result.status ?? "UNKNOWN",
+        reason: typeof result.reason === "string" && result.reason !== "" ? result.reason.slice(0, 300) : null,
+        consecutiveRejections: count
+      });
+      return Object.freeze({ status: result.status ?? "NOT_CONFIRMED", orderCode: code, reason: result.reason ?? null });
     }
+    entryRejections.delete(code);
     return Object.freeze({ status: "FILLED", orderCode: code, ...result });
   }
 
