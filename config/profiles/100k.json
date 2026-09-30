@@ -12,7 +12,7 @@
     { "thresholdUsd": 2000, "fraction": 0.5 }
   ],
   "fullFlattenUsd": 2500,
-  "harvestUsd": 750,
+  "harvestUsd": 330,
   "rolloverHarvestDelayMinutes": 5,
   "rolloverHarvestWindowMinutes": 3,
   "exposurePool": { "softUsd": 22000, "hardUsd": 22500 },

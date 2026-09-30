@@ -1,10 +1,10 @@
 # D-068 — proportional rollover harvest
 
-**Status:** Approved 2026-09-26; window narrowed 2026-09-29 to every account profile.
+**Status:** Approved 2026-09-26; window narrowed 2026-09-29 to every account profile. Harvest dollars set to +$33 / +$165 / +$330.
 
 ## Decision
 
-- Harvest dollars stay profile-owned (`harvestUsd` on `10k` / `50k` / `100k`).
+- Harvest dollars are profile-owned and scale with account size: `10k` +$33, `50k` +$165, `100k` +$330 (0.33% of account size).
 - The existing account-day harvest remains a full, all-book harvest for profit earned during the current account day.
 - D-068 may **start a new plan only** inside **22:05–22:08 UTC on every profile**. That is `22:00 UTC + rolloverHarvestDelayMinutes` through that instant plus `rolloverHarvestWindowMinutes`. Every file in `config/profiles/` sets delay `5` and window `3`.
 - Inside that window, the rollover path has priority when the combined unrealised profit on **every open broker position in the configured Tradeify account**, calculated from each broker entry, is at least the profile harvest amount. This is explicitly **not** a per-coin requirement.
