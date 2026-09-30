@@ -22,7 +22,7 @@ function book(symbol) {
   return { definition, grid, state: grid.createInitialState() };
 }
 
-test("SOL status uses the live identity and $200,000 active-side cap", () => {
+test("SOL status uses the live identity and the profile's active-side cap", () => {
   const { definition, grid, state } = book("SOL/USD");
   const text = formatInstrumentStatus({
     definition,
@@ -50,7 +50,7 @@ test("SOL status uses the live identity and $200,000 active-side cap", () => {
   assert.match(text, /Binance SOLUSDT/);
   assert.doesNotMatch(text, /sol-outer-heavy-v1/);
   assert.doesNotMatch(text, /OUTER-HEAVY/);
-  assert.match(text, /\$200,000\.00/);
+  assert.match(text, /\$150,000\.00/);   // config/profiles/50k.json perCoinCapUsd
   assert.doesNotMatch(text, /\$6,600\.00/);
   assert.match(text, /Occupied rings: 0\/20/);
   assert.match(text, /DXtrade broker net: 0\.00/);
@@ -175,9 +175,9 @@ test("levels show the exact tier capacity, trigger-price units, and active-side 
 
   assert.match(text, /SOL\/USD \$99\.32 \| MA \$83\.3628 \| ABOVE MA/);
   assert.match(text, /Active side: SELL \| Open lots: 2/);
-  assert.match(text, /Open gross @ price: \$1,986\.40 \| Capacity remaining: \$198,013\.60 \/ \$200,000\.00/);
+  assert.match(text, /Open gross @ price: \$1,986\.40 \| Capacity remaining: \$148,013\.60 \/ \$150,000\.00/);
   assert.match(text, /Tier capacity: levels 1–5 = 1 lot \| levels 6–10 = 2 lots/);
-  assert.match(text, /SELL3 \$100\.0354 · \$2,108\.00 · ~21\.07 SOL · FULL 1\/1/);
-  assert.match(text, /SELL6 \$112\.5398 · \$7,114\.49 · ~63\.22 SOL · REARM REQUIRED 1\/2/);
-  assert.match(text, /BUY1 \$75\.026[45] · \$936\.89 · ~12\.49 SOL · BLOCKED — SELL inventory open/);
+  assert.match(text, /SELL3 \$100\.0354 · \$1,581\.00 · ~15\.80 SOL · FULL 1\/1/);
+  assert.match(text, /SELL6 \$112\.5398 · \$5,335\.87 · ~47\.41 SOL · REARM REQUIRED 1\/2/);
+  assert.match(text, /BUY1 \$75\.0265 · \$702\.67 · ~9\.37 SOL · BLOCKED — SELL inventory open/);
 });
