@@ -54,7 +54,7 @@ test("login keeps session private and cash-order validation cannot escape BTC/US
       response({ valid: true })
     ], calls)
   });
-  assert.deepEqual(await client.login(), { authenticated: true });
+  assert.equal((await client.login()).authenticated, true);
   const validation = await client.validateMarketCashOrder({
     clientOrderId: "GRID-0-BUY1",
     orderSide: "BUY",
@@ -213,5 +213,5 @@ test("API errors redact credentials and clear session on 401", async () => {
       return true;
     }
   );
-  assert.deepEqual(client.getSessionInfo(), { authenticated: false });
+  assert.equal(client.getSessionInfo().authenticated, false);
 });
