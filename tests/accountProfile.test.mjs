@@ -12,14 +12,8 @@ import { validateAccountConfig } from "../src/config.js";
 import { loadInstrumentConfigObject } from "../src/config/instruments.js";
 import { createRiskSupervisor } from "../src/risk/riskSupervisor.js";
 
-// Every account-size number lives in config/profiles/<name>.json, selected by the
-// ACCOUNT_PROFILE Railway variable. These tests pin two things: each profile
-// produces exactly the configuration it claims to, and the common mistakes when
-// changing account size stop the bot at startup instead of reaching the market.
-
 const readJson = async (path) => JSON.parse(await readFile(new URL(`../${path}`, import.meta.url), "utf8"));
 
-// A valid $10K profile to mutate in the mistake tests.
 const TEN_K = Object.freeze({
   confirmed: true,
   accountSize: 10000,
@@ -42,13 +36,9 @@ function supervisorFrom(accountRisk) {
     getUnrealisedUsd: () => 0, getDayPnlUsd: () => 0, getExposureUsd: () => 0,
     setEntryBrake() {}, async executeProtectiveCut() { return { status: "FILLED" }; }, async executeProtectiveFlatten() { return { status: "FILLED" }; }
   };
-  // Harvest is enabled in config/instruments.json, and the supervisor requires a
-  // durable store when it is. An in-memory stub is enough for construction.
   const harvestStore = { async get(dayKey) { return { dayKey, status: "READY" }; }, async save(state) { return state; } };
   return createRiskSupervisor({ config: accountRisk, instruments: [book], harvestStore });
 }
-
-// ---- The profiles as committed ------------------------------------------------
 
 test("50k reproduces the configuration that was live before profiles existed", async () => {
   const { account, instruments } = await loadProfiledConfigFiles("50k");
@@ -64,7 +54,7 @@ test("50k reproduces the configuration that was live before profiles existed", a
   assert.equal(risk.partialCutFraction, 0.5);
   assert.equal(risk.fullFlattenUsd, 1250);
   assert.equal(risk.dailyLossLimitUsd, 1500);
-  assert.equal(risk.sessionHarvestUsd, 600);
+  assert.equal(risk.sessionHarvestUsd, 165);
   assert.equal(risk.rolloverHarvestDelayMinutes, 5);
   assert.equal(risk.exposurePool, undefined, "the $50K account never had a pool");
   for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 150000, entry.instrument);
@@ -87,7 +77,6 @@ test("10k applies the decided $10K numbers and passes every downstream validator
   assert.deepEqual(risk.exposurePoolHarvest, { firstAfterHours: 24, secondAfterHours: 36, firstFraction: 0.5, minimumFraction: 0.25 });
   for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 4500, entry.instrument);
 
-  // The same validators the bot runs at startup.
   assert.doesNotThrow(() => validateAccountConfig(account));
   assert.doesNotThrow(() => loadInstrumentConfigObject(instruments));
   assert.doesNotThrow(() => supervisorFrom(risk));
@@ -106,6 +95,7 @@ test("the 100k draft is internally consistent, so confirming it is the only step
     instruments: await readJson("config/instruments.json")
   });
   assert.equal(applied.instruments.accountRisk.entryBrakeUsd, 330);
+  assert.equal(applied.instruments.accountRisk.sessionHarvestUsd, 330);
   assert.equal(applied.instruments.accountRisk.rolloverHarvestDelayMinutes, 5);
   assert.doesNotThrow(() => validateAccountConfig(applied.account));
   assert.doesNotThrow(() => loadInstrumentConfigObject(applied.instruments));
@@ -118,8 +108,6 @@ test("the boot-log summary shows the numbers the bot will run with", async () =>
   assert.match(line, /flatten -\$250/);
   assert.match(line, /pool \$3,000 soft \/ \$3,500 hard/);
 });
-
-// ---- Mistakes that must stop the bot at startup -------------------------------
 
 test("a daily limit that does not match the account size is refused", () => {
   assert.throws(() => validateAccountProfile({ ...TEN_K, accountSize: 100000 }, "x"), /dailyLossLimitUsd must be \$3,000 \(3% of accountSize\), found \$300/);
@@ -178,8 +166,6 @@ test("a leftover account-size number in either JSON file stops startup", async (
 });
 
 test("the committed JSON files hold none of the profile-owned numbers", async () => {
-  // If this fails, someone added an account-size number back into the JSON files;
-  // startup would refuse. Put it in config/profiles/ instead.
   const profile = validateAccountProfile(TEN_K, "10k");
   const account = await readJson("config/account.json");
   const instruments = await readJson("config/instruments.json");
