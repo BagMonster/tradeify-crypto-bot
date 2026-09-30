@@ -12,7 +12,8 @@
     { "thresholdUsd": 1000, "fraction": 0.5 }
   ],
   "fullFlattenUsd": 1250,
-  "harvestUsd": 600,
+  "harvestUsd": 165,
   "rolloverHarvestDelayMinutes": 5,
+  "rolloverHarvestWindowMinutes": 3,
   "perCoinCapUsd": 150000
 }
