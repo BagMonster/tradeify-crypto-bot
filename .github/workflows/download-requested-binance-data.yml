@@ -21,14 +21,128 @@ jobs:
         with:
           node-version: 22
 
-      - name: Retrieve and audit 5 minute Spot candles
+      - name: Retrieve archive segments
         run: |
           node --max-old-space-size=8192 scripts/research/fetch-binance-bars.mjs \
             --symbols 1INCH,ALGO,ATOM,BNB,CAKE \
             --interval 5m \
             --start 2024-10-01 \
+            --end 2026-07-31 \
+            --out staged/base
+
+          node --max-old-space-size=8192 scripts/research/fetch-binance-bars.mjs \
+            --symbols 1INCH,ALGO,ATOM,BNB,CAKE \
+            --interval 5m \
+            --start 2026-08-01 \
+            --end 2026-09-29 \
+            --out staged/recent
+
+          node --max-old-space-size=8192 scripts/research/fetch-binance-bars.mjs \
+            --symbols 1INCH,ALGO,ATOM,BNB,CAKE \
+            --interval 5m \
+            --start 2026-09-30 \
             --end 2026-09-30 \
-            --out artifacts
+            --out staged/final-day
+
+      - name: Merge and audit the exact requested range
+        run: |
+          node --input-type=module <<'NODE'
+          import { mkdir, readFile, writeFile } from "node:fs/promises";
+          import { join } from "node:path";
+
+          const symbols = ["1INCH", "ALGO", "ATOM", "BNB", "CAKE"];
+          const header = "timestamp_utc,open,high,low,close,volume,symbol,source";
+          const intervalMs = 300_000;
+          const readRows = async (path) => {
+            const lines = (await readFile(path, "utf8")).trim().split(/\r?\n/);
+            if (lines[0] !== header) throw new Error(`Unexpected header: ${path}`);
+            return lines.slice(1).filter(Boolean).map((line) => line.split(","));
+          };
+          const iso = (ms) => new Date(ms).toISOString().replace(".000Z", "Z");
+          const report = [];
+
+          for (const symbol of symbols) {
+            const lower = symbol.toLowerCase();
+            const files = [
+              join("staged/base", `research-bars-${lower}`, "5m-full.csv"),
+              join("staged/recent", `research-bars-${lower}`, "5m-full.csv"),
+              join("staged/final-day", `research-bars-${lower}`, "5m-full.csv")
+            ];
+            const rows = (await Promise.all(files.map(readRows))).flat();
+            rows.sort((a, b) => Date.parse(a[0]) - Date.parse(b[0]));
+
+            const seen = new Set();
+            let duplicates = 0;
+            let gaps = 0;
+            let ohlcViolations = 0;
+            let zeroVolume = 0;
+            let longestGapBars = 0;
+            let longestGapFrom = null;
+            let longestGapTo = null;
+            let previous = null;
+
+            for (const row of rows) {
+              const timestamp = Date.parse(row[0]);
+              if (!Number.isFinite(timestamp) || row.length !== 8 || row[6] !== `${symbol}USDT` || row[7] !== "binance-spot") {
+                ohlcViolations += 1;
+                continue;
+              }
+              if (seen.has(timestamp)) duplicates += 1;
+              seen.add(timestamp);
+              const [open, high, low, close, volume] = row.slice(1, 6).map(Number);
+              if (![open, high, low, close, volume].every(Number.isFinite) || open <= 0 || high <= 0 || low <= 0 || close <= 0 || volume < 0 || high < Math.max(open, close) || low > Math.min(open, close) || high < low) {
+                ohlcViolations += 1;
+              }
+              if (volume === 0) zeroVolume += 1;
+              if (previous !== null && timestamp !== previous + intervalMs) {
+                const missing = Math.round((timestamp - previous) / intervalMs) - 1;
+                if (missing > 0) {
+                  gaps += 1;
+                  if (missing > longestGapBars) {
+                    longestGapBars = missing;
+                    longestGapFrom = iso(previous);
+                    longestGapTo = iso(timestamp);
+                  }
+                }
+              }
+              previous = timestamp;
+            }
+
+            if (duplicates !== 0 || ohlcViolations !== 0) {
+              throw new Error(`${symbol} failed audit: duplicates ${duplicates}, OHLC violations ${ohlcViolations}`);
+            }
+
+            const directory = join("artifacts", `research-bars-${lower}`);
+            await mkdir(directory, { recursive: true });
+            const output = join(directory, "5m-full.csv");
+            await writeFile(output, `${header}\n${rows.map((row) => row.join(",")).join("\n")}\n`, "utf8");
+            const first = rows[0]?.[0] ?? null;
+            const last = rows.at(-1)?.[0] ?? null;
+            const calendarDays = first && last ? Math.round((Date.parse(last) - Date.parse(first)) / 86_400_000) : 0;
+            report.push({
+              symbol,
+              pair: `${symbol}USDT`,
+              status: "OK",
+              file: output,
+              bars: rows.length,
+              first,
+              last,
+              calendarDays,
+              tradeableAfter200dWarmup: Math.max(0, calendarDays - 200),
+              segments: ["2024-10-01..2026-07-31", "2026-08-01..2026-09-29", "2026-09-30"],
+              duplicates,
+              gaps,
+              ohlcViolations,
+              zeroVolume,
+              longestGapBars,
+              longestGapFrom,
+              longestGapTo
+            });
+          }
+
+          await writeFile("artifacts/research-bars-coverage.json", `${JSON.stringify(report, null, 2)}\n`, "utf8");
+          console.log(JSON.stringify(report, null, 2));
+          NODE
 
       - name: Package validated CSV files
         run: |
