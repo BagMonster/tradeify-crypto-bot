@@ -61,7 +61,8 @@ test("D-060 fill path enqueues a per-instrument entry alert after the fill is sa
   await runtime.init();
   await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 95, tradeTime: "2026-09-02T13:00:00.000Z" });
   assert.equal(queued.length, 0);
-  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 90, tradeTime: "2026-09-02T13:00:30.000Z" });
+  // SOL ring 1 sits at bandPct x (deadZoneBands + 1) = 5% x 4 = 20% below the MA.
+  await runtime.processTrade({ source: "binance", symbol: "SOLUSDT", price: 80, tradeTime: "2026-09-02T13:00:30.000Z" });
   assert.equal(queued.length, 1);
   assert.equal(queued[0].kind, "ENTRY_CONFIRMED");
   assert.equal(queued[0].instrument, "SOL/USD");

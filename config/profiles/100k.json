@@ -16,5 +16,5 @@
   "rolloverHarvestDelayMinutes": 5,
   "rolloverHarvestWindowMinutes": 3,
   "exposurePool": { "softUsd": 22000, "hardUsd": 22500 },
-  "perCoinCapUsd": 250000
+  "perCoinCapUsd": 50000
 }

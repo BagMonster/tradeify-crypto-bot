@@ -42,14 +42,14 @@ test("INJ/USD profile resolves to INJUSDT", () => {
   assert.equal(resolved.binanceSymbol, "INJUSDT");
 });
 
-test("INJ fitted geometry is ±20% to ±75% at the profile's active-side cap", () => {
+test("INJ fitted geometry is ±30% to ±85% at the profile's active-side cap", () => {
   const entry = raw.instruments.find((item) => item.instrument === "INJ/USD");
   const definition = buildGridDefinition(entry, 5.06);
-  // baseUsd = cap / unitGross, so it tracks config/profiles/50k.json perCoinCapUsd.
-  assert.equal(Number(definition.baseUsd.toFixed(2)), 303.52);
+  // baseUsd = cap / unitGross, so it tracks config/profiles/50k.json perCoinCapUsd (now $25,000).
+  assert.equal(Number(definition.baseUsd.toFixed(2)), 50.59);
   assert.equal(definition.levels, 12);
-  assert.equal(definition.innermostDistance, 0.20);
-  assert.equal(definition.outermostDistance, 0.75);
+  assert.equal(Number(definition.innermostDistance.toFixed(4)), 0.30);
+  assert.equal(Number(definition.outermostDistance.toFixed(4)), 0.85);
   assert.equal(definition.grossExposureCeilingUsd, raw.instruments.find((entry) => entry.instrument === "INJ/USD").sizing.capUsd);
   assert.ok(definition.innermostRingUsd > 0.01 * 5.06);
 });

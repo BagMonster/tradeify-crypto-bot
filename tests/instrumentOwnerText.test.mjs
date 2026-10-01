@@ -50,7 +50,7 @@ test("SOL status uses the live identity and the profile's active-side cap", () =
   assert.match(text, /Binance SOLUSDT/);
   assert.doesNotMatch(text, /sol-outer-heavy-v1/);
   assert.doesNotMatch(text, /OUTER-HEAVY/);
-  assert.match(text, /\$150,000\.00/);   // config/profiles/50k.json perCoinCapUsd
+  assert.match(text, /\$25,000\.00/);   // config/profiles/50k.json perCoinCapUsd
   assert.doesNotMatch(text, /\$6,600\.00/);
   assert.match(text, /Occupied rings: 0\/20/);
   assert.match(text, /DXtrade broker net: 0\.00/);
@@ -175,9 +175,9 @@ test("levels show the exact tier capacity, trigger-price units, and active-side 
 
   assert.match(text, /SOL\/USD \$99\.32 \| MA \$83\.3628 \| ABOVE MA/);
   assert.match(text, /Active side: SELL \| Open lots: 2/);
-  assert.match(text, /Open gross @ price: \$1,986\.40 \| Capacity remaining: \$148,013\.60 \/ \$150,000\.00/);
+  assert.match(text, /Open gross @ price: \$1,986\.40 \| Capacity remaining: \$23,013\.60 \/ \$25,000\.00/);
   assert.match(text, /Tier capacity: levels 1–5 = 1 lot \| levels 6–10 = 2 lots/);
-  assert.match(text, /SELL3 \$100\.0354 · \$1,581\.00 · ~15\.80 SOL · FULL 1\/1/);
-  assert.match(text, /SELL6 \$112\.5398 · \$5,335\.87 · ~47\.41 SOL · REARM REQUIRED 1\/2/);
-  assert.match(text, /BUY1 \$75\.0265 · \$702\.67 · ~9\.37 SOL · BLOCKED — SELL inventory open/);
+  assert.match(text, /SELL3 \$108\.3716 · \$263\.50 · ~2\.43 SOL · FULL 1\/1/);
+  assert.match(text, /SELL6 \$120\.8761 · \$889\.31 · ~7\.36 SOL · REARM REQUIRED 1\/2/);
+  assert.match(text, /BUY1 \$66\.6902 · \$117\.11 · ~1\.76 SOL · BLOCKED — SELL inventory open/);
 });
