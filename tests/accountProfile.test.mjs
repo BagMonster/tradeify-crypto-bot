@@ -57,7 +57,7 @@ test("50k reproduces the configuration that was live before profiles existed", a
   assert.equal(risk.sessionHarvestUsd, 165);
   assert.equal(risk.rolloverHarvestDelayMinutes, 5);
   assert.equal(risk.exposurePool, undefined, "the $50K account never had a pool");
-  for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 150000, entry.instrument);
+  for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 25000, entry.instrument);
 });
 
 test("10k applies the decided $10K numbers and passes every downstream validator", async () => {
@@ -75,7 +75,7 @@ test("10k applies the decided $10K numbers and passes every downstream validator
   assert.equal(risk.rolloverHarvestDelayMinutes, 5);
   assert.deepEqual(risk.exposurePool, { softUsd: 3000, hardUsd: 3500 });
   assert.deepEqual(risk.exposurePoolHarvest, { firstAfterHours: 24, secondAfterHours: 36, firstFraction: 0.5, minimumFraction: 0.25 });
-  for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 4500, entry.instrument);
+  for (const entry of instruments.instruments) assert.equal(entry.sizing.capUsd, 5000, entry.instrument);
 
   assert.doesNotThrow(() => validateAccountConfig(account));
   assert.doesNotThrow(() => loadInstrumentConfigObject(instruments));

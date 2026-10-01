@@ -15,5 +15,5 @@
   "harvestUsd": 165,
   "rolloverHarvestDelayMinutes": 5,
   "rolloverHarvestWindowMinutes": 3,
-  "perCoinCapUsd": 150000
+  "perCoinCapUsd": 25000
 }
