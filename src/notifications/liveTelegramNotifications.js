@@ -1,3 +1,4 @@
+import { formatPrice } from "../format/price.js";
 const KINDS = new Set([
   "ENTRY_CONFIRMED",
   "TRANCHE_EXIT_CONFIRMED",
@@ -134,6 +135,13 @@ function canonicalUtc(name, value) {
 
 function money(value) {
   return `$${finite("money", value).toFixed(2)}`;
+}
+
+// Prices keep the money() style, except sub-cent prices (PEPE), which would
+// otherwise print as $0.00 and are shown in scientific notation instead.
+function price(value) {
+  const n = finite("price", value);
+  return n !== 0 && Math.abs(n) < 0.01 ? formatPrice(n) : money(n);
 }
 
 function signedMoney(value) {
@@ -318,10 +326,10 @@ function formatEvent(event) {
         `Opening order: ${side} ${quantity(filledQuantity, event.instrument)}`,
         `Position opened: ${positionWord(side)}`,
         `Ring: ${tag}`,
-        `Fill: ${money(fillPrice)}`,
+        `Fill: ${price(fillPrice)}`,
         `Quantity: ${quantity(filledQuantity, event.instrument)}`,
         `Virtual lot: ${lotId}`,
-        `Current 200-day MA: ${money(ma)}`,
+        `Current 200-day MA: ${price(ma)}`,
         `Confirmed: ${timestamp(filledAt)}`
       ].join("\n")
     };
@@ -349,11 +357,11 @@ function formatEvent(event) {
         `Ring: ${tag}`,
         `Lot: ${lotId}`,
         `Tranche: ${tranche}/4`,
-        `Target touched: ${money(target)}`,
-        `Broker fill: ${money(fillPrice)}`,
+        `Target touched: ${price(target)}`,
+        `Broker fill: ${price(fillPrice)}`,
         `Closed: ${quantity(filledQuantity, event.instrument)}`,
         `Remaining: ${quantity(remainingQuantity, event.instrument)}`,
-        `Current 200-day MA: ${money(ma)}`,
+        `Current 200-day MA: ${price(ma)}`,
         `Confirmed: ${timestamp(filledAt)}`
       ].join("\n")
     };
@@ -377,9 +385,9 @@ function formatEvent(event) {
         `Position was: ${positionWord(virtualSide)}`,
         `Ring: ${tag}`,
         `Lot: ${lotId}`,
-        `Entry fill: ${money(entryPrice)}`,
+        `Entry fill: ${price(entryPrice)}`,
         `Original quantity: ${quantity(originalQuantity, event.instrument)}`,
-        `Final exit fill: ${money(finalFillPrice)}`,
+        `Final exit fill: ${price(finalFillPrice)}`,
         `Opened: ${timestamp(openedAt)}`,
         `Closed: ${timestamp(closedAt)}`
       ].join("\n")
@@ -398,8 +406,8 @@ function formatEvent(event) {
       message: [
         "\u2705 SOL INACTIVITY HEARTBEAT COMPLETE",
         `Quantity: ${quantity(heartbeatQuantity)}`,
-        `Open fill: ${money(openFillPrice)}`,
-        `Close fill: ${money(closeFillPrice)}`,
+        `Open fill: ${price(openFillPrice)}`,
+        `Close fill: ${price(closeFillPrice)}`,
         `Opened: ${timestamp(openedAt)}`,
         `Closed: ${timestamp(closedAt)}`,
         "Ring state was not changed."
@@ -516,7 +524,7 @@ function formatEvent(event) {
         "\uD83D\uDEA8 PROTECTIVE FLATTEN CONFIRMED",
         `Reason: ${event.reason}`,
         `Quantity closed: ${quantity(flattenQuantity, event.instrument)}`,
-        `Broker fill: ${money(fillPrice)}`,
+        `Broker fill: ${price(fillPrice)}`,
         `Confirmed: ${timestamp(filledAt)}`,
         "SOL grid state was reset and new entries remain subject to all account locks."
       ].join("\n")
@@ -540,7 +548,7 @@ function formatEvent(event) {
         `Daily drawdown at trigger: ${signedMoney(drawdownUsd)}`,
         `Fraction cut: ${(fraction * 100).toFixed(0)}% of each executable virtual lot`,
         `Broker quantity closed: ${quantity(filledQuantity, event.instrument)}`,
-        `Broker fill: ${money(fillPrice)}`,
+        `Broker fill: ${price(fillPrice)}`,
         `Virtual lots affected: ${lotsAffected}`,
         `Confirmed: ${timestamp(filledAt)}`,
         "New grid entries remain braked while the daily drawdown is below the entry-brake threshold."
@@ -556,7 +564,7 @@ function formatEvent(event) {
       "\uD83D\uDEA8 D-049 DAILY FULL FLATTEN COMPLETE",
       `Daily drawdown at trigger: ${signedMoney(drawdownUsd)}`
     ];
-    if (event.fillPrice != null) lines.push(`Broker fill: ${money(positive("fillPrice", event.fillPrice))}`);
+    if (event.fillPrice != null) lines.push(`Broker fill: ${price(positive("fillPrice", event.fillPrice))}`);
     if (Number(event.filledQuantity) > 0) lines.push(`Quantity closed: ${quantity(event.filledQuantity, event.instrument)}`);
     lines.push(
       "Broker account: FLAT",

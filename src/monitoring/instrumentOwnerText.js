@@ -1,4 +1,5 @@
 import { trustedSignedNetFor } from "../account/dxtradeSignedNet.js";
+import { formatPrice } from "../format/price.js";
 
 function money(value) {
   if (!Number.isFinite(value)) return "unavailable";
@@ -6,13 +7,7 @@ function money(value) {
 }
 
 function price(value) {
-  if (!Number.isFinite(value)) return "unavailable";
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 4
-  }).format(value);
+  return formatPrice(value);
 }
 
 function units(value) {
