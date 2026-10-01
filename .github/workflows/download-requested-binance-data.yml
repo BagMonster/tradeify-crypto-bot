@@ -1,0 +1,50 @@
+name: Download requested Binance Vision data
+
+on:
+  push:
+    branches:
+      - research/binance-5m-2024-10-01-to-2026-09-30
+    paths:
+      - .github/workflows/download-requested-binance-data.yml
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Retrieve and audit 5 minute Spot candles
+        run: |
+          node --max-old-space-size=8192 scripts/research/fetch-binance-bars.mjs \
+            --symbols 1INCH,ALGO,ATOM,BNB,CAKE \
+            --interval 5m \
+            --start 2024-10-01 \
+            --end 2026-09-30 \
+            --out artifacts
+
+      - name: Package validated CSV files
+        run: |
+          mkdir -p downloads
+          for symbol in 1inch algo atom bnb cake; do
+            csv="artifacts/research-bars-${symbol}/5m-full.csv"
+            test -s "${csv}"
+            zip -j "downloads/${symbol^^}-binance-spot-5m-bars.zip" "${csv}"
+            test "$(unzip -Z -1 "downloads/${symbol^^}-binance-spot-5m-bars.zip" | wc -l)" -eq 1
+          done
+          cp artifacts/research-bars-coverage.json downloads/
+          sha256sum downloads/* > downloads/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binance-spot-5m-2024-10-01-to-2026-09-30
+          path: downloads/
+          if-no-files-found: error
+          retention-days: 14
