@@ -69,6 +69,29 @@ const PROFILES = Object.freeze({
     binanceSymbol: "SUIUSDT",
     binanceStream: "suiusdt@trade",
     lotStep: 0.01
+  }),
+  // HBAR, FLOKI and CHZ: DXtrade order tickets (2026-10-01) show 1 lot = 1 coin,
+  // priced per coin, same basis as the other books. lotStep 0.01 matches them.
+  "HBAR/USD": Object.freeze({
+    asset: "HBAR",
+    dxtradeSymbol: "HBAR/USD",
+    binanceSymbol: "HBARUSDT",
+    binanceStream: "hbarusdt@trade",
+    lotStep: 0.01
+  }),
+  "FLOKI/USD": Object.freeze({
+    asset: "FLOKI",
+    dxtradeSymbol: "FLOKI/USD",
+    binanceSymbol: "FLOKIUSDT",
+    binanceStream: "flokiusdt@trade",
+    lotStep: 0.01
+  }),
+  "CHZ/USD": Object.freeze({
+    asset: "CHZ",
+    dxtradeSymbol: "CHZ/USD",
+    binanceSymbol: "CHZUSDT",
+    binanceStream: "chzusdt@trade",
+    lotStep: 0.01
   })
 });
 
