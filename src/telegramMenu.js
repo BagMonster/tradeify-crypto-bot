@@ -5,7 +5,7 @@
  * always name one instrument. Confirm* commands are never buttons.
  */
 
-export const DEFAULT_BOOKS = Object.freeze(["SOL", "DOGE", "INJ", "AAVE", "AVAX", "PEPE", "RUNE", "SUI"]);
+export const DEFAULT_BOOKS = Object.freeze(["SOL", "DOGE", "INJ", "AAVE", "AVAX", "PEPE", "RUNE", "SUI", "HBAR", "FLOKI", "CHZ"]);
 
 export const CONFIRM_ONLY_COMMANDS = Object.freeze([
   "confirmresume",
