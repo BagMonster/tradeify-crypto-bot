@@ -92,6 +92,43 @@ const PROFILES = Object.freeze({
     binanceSymbol: "CHZUSDT",
     binanceStream: "chzusdt@trade",
     lotStep: 0.01
+  }),
+  // 1INCH, ATOM, ALGO, BNB and CAKE: owner confirmed (2026-10-01) DXtrade quotes them
+  // per coin with 1 lot = 1 coin, the same basis as the other books.,
+  "1INCH/USD": Object.freeze({
+    asset: "1INCH",
+    dxtradeSymbol: "1INCH/USD",
+    binanceSymbol: "1INCHUSDT",
+    binanceStream: "1inchusdt@trade",
+    lotStep: 0.01
+  }),
+  "ATOM/USD": Object.freeze({
+    asset: "ATOM",
+    dxtradeSymbol: "ATOM/USD",
+    binanceSymbol: "ATOMUSDT",
+    binanceStream: "atomusdt@trade",
+    lotStep: 0.01
+  }),
+  "ALGO/USD": Object.freeze({
+    asset: "ALGO",
+    dxtradeSymbol: "ALGO/USD",
+    binanceSymbol: "ALGOUSDT",
+    binanceStream: "algousdt@trade",
+    lotStep: 0.01
+  }),
+  "BNB/USD": Object.freeze({
+    asset: "BNB",
+    dxtradeSymbol: "BNB/USD",
+    binanceSymbol: "BNBUSDT",
+    binanceStream: "bnbusdt@trade",
+    lotStep: 0.01
+  }),
+  "CAKE/USD": Object.freeze({
+    asset: "CAKE",
+    dxtradeSymbol: "CAKE/USD",
+    binanceSymbol: "CAKEUSDT",
+    binanceStream: "cakeusdt@trade",
+    lotStep: 0.01
   })
 });
 
