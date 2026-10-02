@@ -18,6 +18,10 @@ import { buildProportionalRolloverHarvestPlan } from "./rolloverHarvest.js";
 import { ACCOUNT_DAY_OFFSET_MS } from "./dailyRiskLadder.js";
 
 const DEFAULT_HARVEST_FRESH_DATA_GRACE_MS = 5 * 60 * 1000;
+// A shared DXtrade-read failure does not change trading behavior. It is only
+// worth interrupting the owner after it has persisted long enough to need
+// attention; brief provider flaps should remain entirely silent.
+const DEFAULT_FRESHNESS_ALERT_AFTER_MS = 5 * 60 * 1000;
 const DEFAULT_CUT_COOLDOWN_MS = 15 * 60 * 1000;
 const HARVEST_FLAT_CONFIRMATION_HALT = "D-064 harvest could not confirm every book flat; owner review required";
 const D068_ROLLOVER_CONFIRMATION_HALT = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
@@ -127,6 +131,7 @@ export function createRiskSupervisor({
   getExposurePoolSnapshot = null,
   onRolloverHarvestConfirmed = async () => {},
   freshnessEpisodeStore = null,
+  freshnessAlertAfterMs = DEFAULT_FRESHNESS_ALERT_AFTER_MS,
   freshnessRecoveredAfterMs = 60 * 1000,
   // requestHaltWarning is no longer used: the full flatten does not wait on a
   // warning cycle. index.mjs may still pass it; an unknown property is ignored.
@@ -138,6 +143,9 @@ export function createRiskSupervisor({
   }
   if (!Number.isSafeInteger(freshnessRecoveredAfterMs) || freshnessRecoveredAfterMs < 0) {
     throw new TypeError("freshnessRecoveredAfterMs must be a non-negative whole number");
+  }
+  if (!Number.isSafeInteger(freshnessAlertAfterMs) || freshnessAlertAfterMs < 0) {
+    throw new TypeError("freshnessAlertAfterMs must be a non-negative whole number");
   }
   for (const field of REQUIRED_CONFIG) {
     if (config[field] === undefined) throw new TypeError(`risk config ${field} is missing`);
@@ -255,7 +263,7 @@ export function createRiskSupervisor({
   let freshnessEpisode = null;
 
   function emptyFreshnessEpisode() {
-    return Object.freeze({ episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, instruments: Object.freeze([]) });
+    return Object.freeze({ episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, alertedAtMs: null, instruments: Object.freeze([]) });
   }
 
   async function loadFreshnessEpisode() {
@@ -280,9 +288,22 @@ export function createRiskSupervisor({
       startedAtMs: nowMs,
       lastUnreadAtMs: nowMs,
       freshSinceMs: null,
+      alertedAtMs: null,
       instruments
     });
     return Object.freeze({ started: true, episode });
+  }
+
+  async function noteFreshnessOutageAlert(nowMs) {
+    const prior = await loadFreshnessEpisode();
+    if (prior.status !== "ACTIVE" || prior.alertedAtMs != null || !Number.isFinite(prior.startedAtMs)) {
+      return Object.freeze({ alerted: false, episode: prior });
+    }
+    if (nowMs - prior.startedAtMs < freshnessAlertAfterMs) {
+      return Object.freeze({ alerted: false, episode: prior });
+    }
+    const episode = await saveFreshnessEpisode({ ...prior, alertedAtMs: nowMs });
+    return Object.freeze({ alerted: true, episode });
   }
 
   async function noteFreshnessRead(nowMs) {
@@ -804,19 +825,28 @@ export function createRiskSupervisor({
         const nowMs = now();
         if (unreadSinceMs === null) {
           unreadSinceMs = nowMs;
-          if (sessionHarvestEnabled && hasSuccessfulRead) {
-            const outage = await noteFreshnessOutage(nowMs, unreadable.map((r) => r.instrument));
-            if (outage.started) {
-              await addEvent("WARN", "D064_FRESH_DATA_OUTAGE_STARTED", {
+        }
+        if (sessionHarvestEnabled) {
+          const priorEpisode = await loadFreshnessEpisode();
+          // Do not create an operator alert episode until this worker has seen
+          // one complete snapshot. An existing persisted episode survives a
+          // Railway restart and must continue its original timer.
+          if (hasSuccessfulRead || priorEpisode.status === "ACTIVE") {
+            await noteFreshnessOutage(nowMs, unreadable.map((r) => r.instrument));
+            const outageAlert = await noteFreshnessOutageAlert(nowMs);
+            if (outageAlert.alerted) {
+              await addEvent("WARN", "D064_FRESH_DATA_OUTAGE_ALERTED", {
                 dayKey: incomingDayKey,
-                instruments: outage.episode.instruments,
-                episodeId: outage.episode.episodeId
+                instruments: outageAlert.episode.instruments,
+                episodeId: outageAlert.episode.episodeId,
+                alertAfterMs: freshnessAlertAfterMs
               });
               notifications?.enqueue?.({
                 kind: "HARVEST_FRESHNESS_GRACE",
-                eventKey: `D064-FRESH-OUTAGE:${outage.episode.episodeId}`,
-                instruments: outage.episode.instruments,
-                graceMs: freshnessRecoveredAfterMs
+                eventKey: `D064-FRESH-OUTAGE:${outageAlert.episode.episodeId}`,
+                instruments: outageAlert.episode.instruments,
+                graceMs: freshnessRecoveredAfterMs,
+                alertAfterMs: freshnessAlertAfterMs
               });
             }
           }
@@ -839,7 +869,7 @@ export function createRiskSupervisor({
       unreadSinceMs = null;
       if (sessionHarvestEnabled) {
         const recovery = await noteFreshnessRead(now());
-        if (recovery.restored) {
+        if (recovery.restored && recovery.episode.alertedAtMs !== null) {
           const outageMs = recovery.episode.startedAtMs === null ? null : Math.max(0, now() - recovery.episode.startedAtMs);
           await addEvent("WARN", "D064_FRESH_DATA_RESTORED", { episodeId: recovery.episode.episodeId, outageMs, instruments: recovery.episode.instruments });
           notifications?.enqueue?.({ kind: "HARVEST_FRESHNESS_RESTORED", eventKey: `D064-FRESH-RESTORED:${recovery.episode.episodeId}`, outageMs, instruments: recovery.episode.instruments });

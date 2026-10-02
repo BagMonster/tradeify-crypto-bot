@@ -365,6 +365,7 @@ test("10 - freshness episodes persist and runtime-history retention only targets
     started_at: "2026-08-01T00:00:00.000Z",
     last_unread_at: "2026-08-01T00:00:01.000Z",
     fresh_since: null,
+    alerted_at: "2026-08-01T00:05:00.000Z",
     instruments: ["SOL/USD", "INJ/USD"]
   };
   const pool = {
@@ -386,9 +387,11 @@ test("10 - freshness episodes persist and runtime-history retention only targets
     startedAtMs: Date.parse(saved.started_at),
     lastUnreadAtMs: Date.parse(saved.last_unread_at),
     freshSinceMs: null,
+    alertedAtMs: Date.parse(saved.alerted_at),
     instruments: saved.instruments
   });
   assert.deepEqual(active.instruments, saved.instruments);
+  assert.equal(active.alertedAtMs, Date.parse(saved.alerted_at));
 
   const retained = await database.pruneOperationalHistory({ nowMs: Date.parse("2026-09-30T00:00:00.000Z") });
   assert.equal(retained.totalDeleted, 10);
