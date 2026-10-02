@@ -253,6 +253,7 @@ function formatEvent(event) {
     if (!Array.isArray(event.instruments) || event.instruments.length === 0) throw new TypeError("freshness grace instruments are required");
     const instruments = event.instruments.map((value) => headingInstrument(value));
     const graceMs = positive("graceMs", event.graceMs);
+    const alertAfterMs = positive("alertAfterMs", event.alertAfterMs ?? 5 * 60 * 1000);
     return {
       kind,
       eventKey,
@@ -260,6 +261,7 @@ function formatEvent(event) {
         "⚠️ D-064 DXTRADE DATA OUTAGE",
         `DXtrade account data is temporarily unreadable for: ${instruments.join(", ")}.`,
         "This is an alert-only outage episode: D-064 will not apply an entry brake or safety halt.",
+        `This alert was held until the outage lasted ${Math.ceil(alertAfterMs / 60000)} minutes.`,
         `A fresh-data confirmation is sent after ${Math.ceil(graceMs / 60000)} minutes of stable reads.`,
         "Correction: check /status for fresh DXtrade data; do not use /resume."
       ].join("\n")
