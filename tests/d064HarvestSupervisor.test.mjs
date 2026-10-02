@@ -471,3 +471,42 @@ test("D-068 full-pool schedule floors at $8.25 after 36 hours", async () => {
   assert.equal(supervisor.getSnapshot().harvest.plan.targetUsd, 8.25);
   assert.ok(allocation.estimatedProfitUsd <= 8.25);
 });
+
+
+test("D-064 stops the pass and backs off after a DXtrade 429", async () => {
+  let nowMs = Date.parse("2026-10-02T18:47:36.000Z");
+  const sol = book("SOL/USD");
+  const doge = book("DOGE/USD");
+  let solAttempts = 0;
+  sol.executeProtectiveFlatten = async () => {
+    sol.calls.push(["flatten"]);
+    solAttempts += 1;
+    return solAttempts === 1
+      ? { status: "ACCOUNT_DATA_UNAVAILABLE", reason: "HTTP 429 Too Many Requests" }
+      : { status: "ALREADY_FLAT" };
+  };
+
+  const supervisor = createRiskSupervisor({
+    config,
+    instruments: [sol, doge],
+    harvestStore: memoryHarvestStore(),
+    getCombinedDayPnlUsd: () => 250,
+    now: () => nowMs
+  });
+
+  const first = await supervisor.evaluate({ dayKey: "2026-10-02" });
+  assert.equal(first.action, "HARVEST_PENDING");
+  assert.equal(sol.calls.filter(([kind]) => kind === "flatten").length, 1);
+  assert.equal(doge.calls.filter(([kind]) => kind === "flatten").length, 0, "a rate-limited read stops the batch before it probes every book");
+
+  nowMs += 59_999;
+  const waiting = await supervisor.evaluate({ dayKey: "2026-10-02" });
+  assert.equal(waiting.action, "HARVEST_RETRY_WAIT");
+  assert.equal(sol.calls.filter(([kind]) => kind === "flatten").length, 1);
+
+  nowMs += 1;
+  const completed = await supervisor.evaluate({ dayKey: "2026-10-02" });
+  assert.equal(completed.action, "HARVEST_CONFIRMED");
+  assert.equal(sol.calls.filter(([kind]) => kind === "flatten").length, 2);
+  assert.equal(doge.calls.filter(([kind]) => kind === "flatten").length, 1);
+});
