@@ -485,6 +485,11 @@ haltWarnings = createHaltWarningCycle({
     if (cycle.reasonCode === "D060_ACCOUNT_FULL_FLATTEN") {
       return riskSupervisor.executeDeferredFullFlatten({ dayKey: accountDayKey(Date.now()) });
     }
+    if (cycle.reasonCode === "HYBRID_UNEXPLAINED_NET") {
+      // Hybrid reconciliation is diagnostic. A past warning cycle must never
+      // convert into an account-wide trading pause, including after a restart.
+      return Object.freeze({ action: "NO_LONGER_REQUIRED" });
+    }
     if (cycle.reasonCode === "RUNTIME_ERROR") {
       const stack = stackByInstrument.get(cycle.instrument);
       if (stack) stack.runtimeErrorLatched = true;
@@ -964,7 +969,7 @@ void haltWarnings.advance().catch((error) => console.error(`Initial owner halt-w
 
 const HYBRID_RECONCILE_MS = 60 * 1000;
 const HYBRID_HALT_SIGNATURE = "diverged from the DXtrade book and no manual fill explains it";
-let lastHybridHaltReason = null;
+let activeHybridWarningScope = null;
 
 async function readFreshBrokerTickets(instruments) {
   try {
@@ -989,6 +994,15 @@ async function runHybridReconcileOnce() {
   if (Object.keys(books).length === 0) {
     console.log("HYBRID: no books expose a hybrid surface; pass skipped.");
     return;
+  }
+
+  // Remove a legacy hybrid halt or queued warning before inspecting again. Hybrid
+  // reconciliation may alert the owner, but it is never allowed to pause trading.
+  try {
+    const cleared = await clearHybridSafetyHalt();
+    if (cleared) console.log("HYBRID: cleared legacy hybrid safety halt; reconciliation is warning-only.");
+  } catch (error) {
+    console.error(`HYBRID: could not clear legacy hybrid halt: ${error.message}`);
   }
 
   const brokerRematch = await runBrokerAuthoritativeRematchPass({
@@ -1020,7 +1034,7 @@ async function runHybridReconcileOnce() {
     } catch (error) {
       console.error(`HYBRID REMATCH: post-rematch halt clear failed: ${error.message}`);
     }
-    lastHybridHaltReason = null;
+    activeHybridWarningScope = null;
     return;
   }
 
@@ -1091,7 +1105,7 @@ async function runHybridReconcileOnce() {
         console.error(`HYBRID: could not clear the hybrid safety halt: ${error.message}`);
       }
     }
-    lastHybridHaltReason = null;
+    activeHybridWarningScope = null;
     return;
   }
 
@@ -1105,22 +1119,29 @@ async function runHybridReconcileOnce() {
 
   const first = report.escalations[0];
   const names = report.escalations.map((e) => e.instrument).join(", ");
-  // The suffix matters: /rerun only clears halts whose reason ends with the
-  // runtime-error tail. Without it this halt would have no release path.
-  const haltReason = report.accountWide
-    ? `${names} diverged from the DXtrade book at the same time and no manual fill explains it; production runtime error; owner review required`
-    : `${first.instrument} diverged from the DXtrade book and no manual fill explains it: ${first.reason}; production runtime error; owner review required`;
-  lastHybridHaltReason = haltReason;
-  await database.addEvent("ERROR", "HYBRID_UNEXPLAINED_NET", {
+  const scope = report.accountWide ? "TRADEIFY ACCOUNT" : first.instrument;
+  const warningReason = report.accountWide
+    ? `${names} diverged from the DXtrade book at the same time and no manual fill explains it; owner review required`
+    : `${first.instrument} diverged from the DXtrade book and no manual fill explains it: ${first.reason}; owner review required`;
+
+  // One alert per unresolved scope per runtime prevents a one-minute probe from
+  // becoming Telegram spam. The daily event key keeps restarts from duplicating it.
+  if (activeHybridWarningScope === scope) return;
+  activeHybridWarningScope = scope;
+  const day = accountDayKey(Date.now()).replaceAll("-", "");
+  const scopeKey = scope.replaceAll(/[^A-Z0-9]+/g, "-");
+  await database.addEvent("WARN", "HYBRID_UNEXPLAINED_NET", {
     escalations: report.escalations,
-    accountWide: report.accountWide
+    accountWide: report.accountWide,
+    action: "WARNING_ONLY"
   });
-  await requestNonHarvestHalt({
-    key: "hybrid-reconciliation",
+  liveNotifications.enqueue({
+    kind: "RECONCILIATION_WARNING",
+    eventKey: `HYBRID-WARNING:${day}:${scopeKey}`,
     reasonCode: "HYBRID_UNEXPLAINED_NET",
-    reason: haltReason,
+    reason: warningReason,
     instrument: report.accountWide ? null : first.instrument,
-    correction: "Inspect /status and /rawhistory, then reconcile in DXtrade. /pausehalt defers this for a fresh 25-minute warning cycle, and /rerun clears it once every book matches."
+    correction: "Inspect /status and /rawhistory, then reconcile in DXtrade. Trading remains active; /rerun is not needed for this warning."
   });
 }
 
