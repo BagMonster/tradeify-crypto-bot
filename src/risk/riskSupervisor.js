@@ -23,6 +23,11 @@ const DEFAULT_HARVEST_FRESH_DATA_GRACE_MS = 5 * 60 * 1000;
 // attention; brief provider flaps should remain entirely silent.
 const DEFAULT_FRESHNESS_ALERT_AFTER_MS = 5 * 60 * 1000;
 const DEFAULT_CUT_COOLDOWN_MS = 15 * 60 * 1000;
+// A pending harvest close may be accepted by DXtrade while its confirmation
+// endpoint is rate-limited. Wait before retrying so a single harvest cannot
+// turn into a storm of identical account-wide close attempts.
+const DEFAULT_HARVEST_RETRY_MS = 30 * 1000;
+const RATE_LIMIT_HARVEST_RETRY_MS = 60 * 1000;
 const HARVEST_FLAT_CONFIRMATION_HALT = "D-064 harvest could not confirm every book flat; owner review required";
 const D068_ROLLOVER_CONFIRMATION_HALT = "D-068 rollover harvest could not confirm its planned profit closes; owner review required";
 
@@ -133,6 +138,7 @@ export function createRiskSupervisor({
   freshnessEpisodeStore = null,
   freshnessAlertAfterMs = DEFAULT_FRESHNESS_ALERT_AFTER_MS,
   freshnessRecoveredAfterMs = 60 * 1000,
+  harvestRetryMs = DEFAULT_HARVEST_RETRY_MS,
   // requestHaltWarning is no longer used: the full flatten does not wait on a
   // warning cycle. index.mjs may still pass it; an unknown property is ignored.
   now = () => Date.now()
@@ -146,6 +152,9 @@ export function createRiskSupervisor({
   }
   if (!Number.isSafeInteger(freshnessAlertAfterMs) || freshnessAlertAfterMs < 0) {
     throw new TypeError("freshnessAlertAfterMs must be a non-negative whole number");
+  }
+  if (!Number.isSafeInteger(harvestRetryMs) || harvestRetryMs < 1_000) {
+    throw new TypeError("harvestRetryMs must be a whole number of at least 1000");
   }
   for (const field of REQUIRED_CONFIG) {
     if (config[field] === undefined) throw new TypeError(`risk config ${field} is missing`);
@@ -257,6 +266,10 @@ export function createRiskSupervisor({
   let lastCutAtMs = null;
   const brakedToday = new Set();
   let evaluating = false;
+  // This promise is shared by every caller in this worker. It supplements the
+  // evaluation gate and makes the harvest operation itself single-flight.
+  let harvestRunInFlight = null;
+  let harvestRetryAtMs = null;
   let hasSuccessfulRead = false;
   let lastError = null;
   let unreadSinceMs = null;
@@ -447,6 +460,7 @@ export function createRiskSupervisor({
     lastCutAtMs = null;
     brakedToday.clear();
     unreadSinceMs = null;
+    harvestRetryAtMs = null;
     // protectionFailing deliberately survives the rollover. A broken broker
     // session does not heal at 22:00 UTC, and clearing the brake here would
     // silently re-arm entries into an execution path that still cannot cut.
@@ -524,11 +538,20 @@ export function createRiskSupervisor({
     }
     const results = [];
     for (const reading of readings) {
+      let result;
       try {
-        results.push({ instrument: reading.instrument, result: await reading.book.executeProtectiveFlatten({ reason: harvestReason(combined, sessionHarvestThreshold), dayKey: incomingDayKey, bypassSlippageCap: true }) });
+        result = await reading.book.executeProtectiveFlatten({
+          reason: harvestReason(combined, sessionHarvestThreshold),
+          dayKey: incomingDayKey,
+          bypassSlippageCap: true
+        });
       } catch (error) {
-        results.push({ instrument: reading.instrument, result: { status: "THREW", reason: error?.message ?? "harvest flatten threw" } });
+        result = { status: "THREW", reason: error?.message ?? "harvest flatten threw" };
       }
+      results.push({ instrument: reading.instrument, result });
+      // A broker read or confirmation is pending. Do not probe every remaining
+      // book in the same pass; the next single-flight retry resumes safely.
+      if (HARVEST_RETRYABLE_FLATTEN_STATUSES.has(result?.status)) break;
     }
     const terminal = results.filter((r) => {
       const status = r.result?.status;
@@ -748,10 +771,60 @@ export function createRiskSupervisor({
     return Object.freeze({ action: "HARVEST_CONFIRMED", combinedDayPnlUsd: combined, results: Object.freeze(results), harvest: confirmed });
   }
 
+  function harvestResultWasRateLimited(result) {
+    return Array.isArray(result?.results) && result.results.some((entry) => {
+      const detail = String(entry?.result?.reason ?? "");
+      return /\b429\b|rate[ -]?limit/i.test(detail);
+    });
+  }
+
   async function runHarvest(args) {
-    const prior = await loadHarvest(args.incomingDayKey);
-    if (prior.mode === "ROLLOVER_PARTIAL") return runRolloverHarvest(args);
-    return runFullHarvest(args);
+    const nowMs = now();
+    if (harvestRunInFlight !== null) return harvestRunInFlight;
+    if (harvestRetryAtMs !== null && nowMs < harvestRetryAtMs) {
+      const harvest = await loadHarvest(args.incomingDayKey);
+      applyHarvestGates();
+      return Object.freeze({
+        action: "HARVEST_RETRY_WAIT",
+        combinedDayPnlUsd: args.combined,
+        waitRemainingMs: harvestRetryAtMs - nowMs,
+        harvest
+      });
+    }
+
+    harvestRunInFlight = (async () => {
+      const prior = await loadHarvest(args.incomingDayKey);
+      const result = prior.mode === "ROLLOVER_PARTIAL"
+        ? await runRolloverHarvest(args)
+        : await runFullHarvest(args);
+
+      if (result.action === "HARVEST_PENDING") {
+        const rateLimited = harvestResultWasRateLimited(result);
+        const retryMs = rateLimited
+          ? Math.max(harvestRetryMs, RATE_LIMIT_HARVEST_RETRY_MS)
+          : harvestRetryMs;
+        harvestRetryAtMs = now() + retryMs;
+        if (rateLimited) {
+          await addEvent("WARN", "D064_HARVEST_RATE_LIMIT_BACKOFF", {
+            dayKey: args.incomingDayKey,
+            retryMs,
+            results: result.results?.map((entry) => ({
+              instrument: entry.instrument,
+              status: entry.result?.status ?? "UNKNOWN"
+            })) ?? []
+          });
+        }
+      } else {
+        harvestRetryAtMs = null;
+      }
+      return result;
+    })();
+
+    try {
+      return await harvestRunInFlight;
+    } finally {
+      harvestRunInFlight = null;
+    }
   }
 
   async function executeFullFlatten({ incomingDayKey, combined, readings }) {
@@ -1136,6 +1209,7 @@ export function createRiskSupervisor({
       sessionHarvestFreshDataGraceMs: sessionHarvestEnabled ? sessionHarvestFreshDataGraceMs : null,
       rolloverHarvestDelayMinutes: sessionHarvestEnabled ? rolloverHarvestDelayMinutes : null,
       rolloverHarvestDelayRemainingMs,
+      harvestRetryRemainingMs: harvestRetryAtMs === null ? 0 : Math.max(0, harvestRetryAtMs - now()),
       freshDataGrace: unreadSinceMs === null
         ? null
         : Object.freeze({
