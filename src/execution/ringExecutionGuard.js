@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 // only difference is that the instrument and order-code prefix are injected.
 
 const FINAL_NONFILL = ["REJECTED", "CANCELED", "EXPIRED", "PARTIAL", "FAILED"];
+const RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([1_000, 2_000]);
 const DEFAULT_LOT_STEP = 0.01;
 
 function text(name, value, max = 128) {
@@ -23,6 +24,11 @@ function positive(name, value) {
 
 function fixed8(value) {
   return Number(value.toFixed(8));
+}
+
+function isRateLimited(error) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  return status === 429 || /\b429\b|rate[ -]?limit/i.test(String(error?.message ?? error ?? ""));
 }
 
 let LOT_STEP_LOCAL = DEFAULT_LOT_STEP;
@@ -574,10 +580,16 @@ export function createRingExecutionGuard({
   // strategy fault.
   async function readAllSolPositions() {
     let payload;
-    try {
-      payload = await client.getOpenPositions();
-    } catch (error) {
-      return Object.freeze({ ok: false, reason: error?.message ?? "DXtrade positions read failed" });
+    for (let attempt = 0; attempt <= RATE_LIMIT_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        payload = await client.getOpenPositions();
+        break;
+      } catch (error) {
+        if (!isRateLimited(error) || attempt === RATE_LIMIT_RETRY_DELAYS_MS.length) {
+          return Object.freeze({ ok: false, reason: error?.message ?? "DXtrade positions read failed" });
+        }
+        await sleep(RATE_LIMIT_RETRY_DELAYS_MS[attempt]);
+      }
     }
     try {
       const legs = mapSolPositions(payload);
@@ -627,8 +639,22 @@ export function createRingExecutionGuard({
 
   async function reconcileProtectiveClose({ code, quantity, reason, actionType, legPositionCode = null }) {
     const deadline = Date.now() + confirmationTimeoutMs;
+    let rateLimitAttempt = 0;
     while (true) {
-      const result = await client.reconcileQuantityOrder({ orderCode: code, requestedQuantity: quantity });
+      let result;
+      try {
+        result = await client.reconcileQuantityOrder({ orderCode: code, requestedQuantity: quantity });
+      } catch (error) {
+        if (isRateLimited(error) && Date.now() < deadline) {
+          const delay = RATE_LIMIT_RETRY_DELAYS_MS[Math.min(rateLimitAttempt, RATE_LIMIT_RETRY_DELAYS_MS.length - 1)];
+          rateLimitAttempt += 1;
+          await sleep(delay);
+          continue;
+        }
+        const reasonText = error?.message ?? "Protective close confirmation failed";
+        await persistence.markStatus(code, "PENDING", { lastError: reasonText });
+        return Object.freeze({ status: "PENDING", orderCode: code, legPositionCode, reason: reasonText });
+      }
       if (result.status === "FILLED") {
         await persistence.markStatus(code, "FILLED", {
           fillPrice: result.fillPrice,
@@ -725,8 +751,10 @@ export function createRingExecutionGuard({
               positionCode: leg.positionCode
             });
         await persistence.markSubmitted(code, response?.orderId ?? null);
-      } catch {
-        await persistence.markStatus(code, "PENDING", { lastError: `Protective ${actionType} submission outcome is uncertain` });
+      } catch (error) {
+        const lastError = error?.message ?? `Protective ${actionType} submission outcome is uncertain`;
+        await persistence.markStatus(code, "PENDING", { lastError });
+        if (isRateLimited(error)) await sleep(RATE_LIMIT_RETRY_DELAYS_MS[0]);
       }
     }
 
