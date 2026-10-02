@@ -79,14 +79,14 @@ test("D-064 durable execution failure remains fail-closed", async () => {
   assert.equal(halts.length, 1);
 });
 
-test("D-064 stale data is warning-only and sends one outage/restored pair per durable episode", async () => {
+test("D-064 stays silent for short outages and sends one delayed outage/restored pair for a durable episode", async () => {
   const sol = book("SOL/USD");
   let unread = false;
   let nowMs = Date.parse("2026-09-09T12:00:00.000Z");
   sol.getDayPnlUsd = () => { if (unread) throw new Error("broker metrics unavailable"); return 0; };
   const halts = [];
   const notifications = [];
-  let episode = { episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, instruments: [] };
+  let episode = { episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, alertedAtMs: null, instruments: [] };
   const supervisor = createRiskSupervisor({
     config,
     instruments: [sol],
@@ -107,7 +107,7 @@ test("D-064 stale data is warning-only and sends one outage/restored pair per du
   assert.equal(first.outageMs, 0);
   assert.equal(supervisor.getSnapshot().freshDataGrace.outageMs, 0);
   assert.equal(halts.length, 0);
-  assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_GRACE").length, 1);
+  assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_GRACE").length, 0, "short outages do not notify Telegram");
   assert.equal(sol.calls.at(-1)[1], false, "stale data does not engage the entry brake");
   nowMs += 299999;
   assert.equal((await supervisor.evaluate({ dayKey: "2026-09-09" })).action, "ACCOUNT_DATA_UNAVAILABLE");
@@ -118,19 +118,52 @@ test("D-064 stale data is warning-only and sends one outage/restored pair per du
   assert.equal(supervisor.getSnapshot().harvest.status, "READY");
   assert.equal(supervisor.getSnapshot().trancheExitsPaused, false);
   assert.equal(halts.length, 0);
-  assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_GRACE").length, 1);
+  assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_GRACE").length, 1, "the warning starts only after five full minutes");
 
   unread = false;
   await supervisor.evaluate({ dayKey: "2026-09-09" });
   nowMs += 30_000;
   unread = true;
   await supervisor.evaluate({ dayKey: "2026-09-09" });
-  assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_GRACE").length, 1, "a brief fresh/unread flap remains the same outage episode");
+  assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_GRACE").length, 1, "a brief fresh/unread flap remains the same warned outage episode");
   unread = false;
   await supervisor.evaluate({ dayKey: "2026-09-09" });
   nowMs += 60_000;
   await supervisor.evaluate({ dayKey: "2026-09-09" });
   assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_RESTORED").length, 1);
+});
+
+test("D-064 does not send a restored message for an outage that resolves before five minutes", async () => {
+  const sol = book("SOL/USD");
+  let unread = false;
+  let nowMs = Date.parse("2026-09-09T12:00:00.000Z");
+  sol.getDayPnlUsd = () => { if (unread) throw new Error("broker metrics unavailable"); return 0; };
+  const notifications = [];
+  let episode = { episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, alertedAtMs: null, instruments: [] };
+  const supervisor = createRiskSupervisor({
+    config,
+    instruments: [sol],
+    harvestStore: memoryHarvestStore(),
+    getCombinedDayPnlUsd: () => 0,
+    notifications: { enqueue: (event) => notifications.push(event) },
+    freshnessEpisodeStore: {
+      async get() { return episode; },
+      async save(next) { episode = { ...next }; return episode; }
+    },
+    now: () => nowMs
+  });
+  await supervisor.evaluate({ dayKey: "2026-09-09" });
+  unread = true;
+  await supervisor.evaluate({ dayKey: "2026-09-09" });
+  nowMs += 120_000;
+  await supervisor.evaluate({ dayKey: "2026-09-09" });
+  unread = false;
+  await supervisor.evaluate({ dayKey: "2026-09-09" });
+  nowMs += 60_000;
+  await supervisor.evaluate({ dayKey: "2026-09-09" });
+  assert.equal(episode.status, "RESOLVED");
+  assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_GRACE").length, 0);
+  assert.equal(notifications.filter((event) => event.kind === "HARVEST_FRESHNESS_RESTORED").length, 0);
 });
 
 test("D-064 first cold read waits without creating a durable halt, then recovers on fresh data", async () => {
