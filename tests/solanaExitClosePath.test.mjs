@@ -589,3 +589,45 @@ test("D-057 compatibility: ENTRY on the same side as an existing ticket still pr
   assert.equal(placed[0].side, "SELL");
   assert.equal(placed[0].quantity, 0.10);
 });
+
+
+test("protective flatten backs off and recovers when DXtrade confirmation returns HTTP 429", async () => {
+  let positionReads = 0;
+  let reconciliationCalls = 0;
+  const sleeps = [];
+  const guard = createRingExecutionGuard({
+    instrument: "SOL/USD",
+    orderPrefix: "SOL",
+    strategyId: "sol-outer-heavy-v1",
+    autoExecute: true,
+    strategyAutoExecute: true,
+    adapter: { place: async () => { throw new Error("not expected"); } },
+    persistence: persistenceMap(),
+    sleep: async (ms) => { sleeps.push(ms); },
+    client: {
+      getOpenPositions: async () => {
+        positionReads += 1;
+        return positionReads === 1
+          ? { positions: [{ symbol: "SOL/USD", quantity: -0.12, side: "SELL", positionCode: "rate-limited-flat" }] }
+          : { positions: [] };
+      },
+      placePositionPartialClose: async () => { throw new Error("flatten must use full close"); },
+      placePositionClose: async () => ({ orderId: "rate-limited-flat-order" }),
+      reconcileQuantityOrder: async ({ requestedQuantity }) => {
+        reconciliationCalls += 1;
+        if (reconciliationCalls === 1) {
+          const error = new Error("HTTP 429 Too Many Requests");
+          error.status = 429;
+          throw error;
+        }
+        return { status: "FILLED", fillPrice: 88, filledQuantity: requestedQuantity, filledAt: "2026-10-02T18:47:36.000Z" };
+      }
+    }
+  });
+
+  const result = await guard.executeProtectiveFlatten({ stateVersion: 16, dayKey: "2026-10-02", reason: "harvest", bypassSlippageCap: true });
+
+  assert.equal(result.status, "FILLED");
+  assert.equal(reconciliationCalls, 2);
+  assert.deepEqual(sleeps, [1_000]);
+});
