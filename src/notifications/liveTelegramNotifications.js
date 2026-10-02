@@ -18,6 +18,7 @@ const KINDS = new Set([
   "HARVEST_FRESHNESS_RESTORED",
   "HARVEST_RESET",
   "HALT_WARNING",
+  "RECONCILIATION_WARNING",
   // Enqueued by riskSupervisor.js and index.mjs since the 2026-09-20 session-recovery
   // work, but missing from this list, so every one was rejected before delivery.
   "PROTECTION_FAILED",
@@ -286,6 +287,24 @@ function formatEvent(event) {
     const dayKey = safeText("dayKey", event.dayKey, { max: 10, pattern: /^\d{4}-\d{2}-\d{2}$/ });
     return { kind, eventKey, message: ["D-064 ACCOUNT-DAY RESET", `New Tradeify account day: ${dayKey}`, "Harvest state cleared. Ordinary tranche exits are enabled again."].join("\n") };
   }
+  if (kind === "RECONCILIATION_WARNING") {
+    const reasonCode = safeText("reconciliation warning reason code", event.reasonCode, { max: 64, pattern: /^[A-Z0-9_]+$/ });
+    if (reasonCode !== "HYBRID_UNEXPLAINED_NET") throw new TypeError("reconciliation warning reason is unsupported");
+    const reason = displayText(event.reason, { max: 300, fallback: REASON_WITHHELD });
+    const correction = displayText(event.correction, { max: 400, fallback: CORRECTION_WITHHELD });
+    const scope = event.instrument == null ? "TRADEIFY ACCOUNT" : headingInstrument(event.instrument);
+    return {
+      kind,
+      eventKey,
+      message: [
+        `⚠️ ${scope} RECONCILIATION WARNING — ${reasonCode}`,
+        `Reason: ${reason}`,
+        "Trading remains active; this warning will not pause the bot.",
+        `Correction: ${correction}`
+      ].join("\n")
+    };
+  }
+
   if (kind === "HALT_WARNING") {
     const reasonCode = safeText("halt warning reason code", event.reasonCode, { max: 64, pattern: /^[A-Z0-9_]+$/ });
     if (!SAFETY_HALT_REASONS.has(reasonCode)) throw new TypeError("halt warning reason is unsupported");

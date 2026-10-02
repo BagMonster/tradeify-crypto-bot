@@ -19,7 +19,8 @@
 // absorber can retire the exact affected lot; bot OPEN fills remain escalations
 // because inventing their ring placement would be unsafe.
 
-const NET_TOLERANCE = 1e-8;
+import { NET_TOLERANCE } from "../account/dxtradeSignedNet.js";
+
 const BOT_ORDER_CODE_PREFIX = "dxsca-integration-session-code:";
 const BOT_USER_AGENT = "node";
 

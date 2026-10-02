@@ -97,3 +97,28 @@ test("a bot OPEN remains unexplained and cannot be adopted automatically", () =>
   );
   assert.equal(decision.verdict, VERDICT.UNEXPLAINED);
 });
+
+
+test("sub-lot floating-point residual is a match", () => {
+  const decision = classifyBook({
+    instrument: "PEPE/USD",
+    ok: true,
+    virtualNet: -40054738.24,
+    brokerNet: -40054738.240000015
+  });
+
+  assert.equal(decision.verdict, VERDICT.MATCH);
+  assert.equal(decision.delta, 0);
+});
+
+test("a tradable net difference remains unexplained", () => {
+  const decision = classifyBook({
+    instrument: "PEPE/USD",
+    ok: true,
+    virtualNet: 0,
+    brokerNet: 0.01
+  });
+
+  assert.equal(decision.verdict, VERDICT.UNEXPLAINED);
+  assert.match(decision.reason, /does not match/);
+});
