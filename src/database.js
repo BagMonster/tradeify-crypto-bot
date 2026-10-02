@@ -160,7 +160,7 @@ function normalizeState(row) {
 }
 
 function normalizeFreshnessEpisode(row) {
-  if (!row) return Object.freeze({ episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, instruments: Object.freeze([]) });
+  if (!row) return Object.freeze({ episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, alertedAtMs: null, instruments: Object.freeze([]) });
   const status = requiredText("freshness episode status", row.status, 16);
   if (status !== "ACTIVE" && status !== "RESOLVED") throw new Error("freshness episode status is invalid");
   const episodeId = toNonNegativeInteger("freshness episode id", row.episode_id);
@@ -172,6 +172,7 @@ function normalizeFreshnessEpisode(row) {
     startedAtMs: dateMs("freshness episode started at", row.started_at),
     lastUnreadAtMs: dateMs("freshness episode last unread at", row.last_unread_at),
     freshSinceMs: dateMs("freshness episode fresh since", row.fresh_since),
+    alertedAtMs: dateMs("freshness episode alerted at", row.alerted_at),
     instruments: Object.freeze(instruments)
   });
 }
@@ -273,10 +274,14 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
         started_at TIMESTAMPTZ,
         last_unread_at TIMESTAMPTZ,
         fresh_since TIMESTAMPTZ,
+        alerted_at TIMESTAMPTZ,
         instruments JSONB NOT NULL DEFAULT '[]'::jsonb,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    // Single-row operational state only. This lightweight compatibility
+    // migration has no index build or table rewrite.
+    await pool.query("ALTER TABLE broker_freshness_episode ADD COLUMN IF NOT EXISTS alerted_at TIMESTAMPTZ");
     await pool.query(`
       CREATE TABLE IF NOT EXISTS daily_dust_cleanup (
         day_key TEXT PRIMARY KEY CHECK (day_key ~ '^\\d{4}-\\d{2}-\\d{2}$'),
@@ -718,7 +723,7 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
   }
 
   async function getBrokerFreshnessEpisode() {
-    const result = await pool.query("SELECT episode_id, status, started_at, last_unread_at, fresh_since, instruments FROM broker_freshness_episode WHERE id=1");
+    const result = await pool.query("SELECT episode_id, status, started_at, last_unread_at, fresh_since, alerted_at, instruments FROM broker_freshness_episode WHERE id=1");
     if (result.rowCount === 0) return normalizeFreshnessEpisode(null);
     if (result.rowCount !== 1) throw new Error("broker freshness episode lookup returned an invalid row count");
     return normalizeFreshnessEpisode(result.rows[0]);
@@ -734,23 +739,25 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
       throw new Error("freshness episode instruments are invalid");
     }
     const result = await pool.query(
-      `INSERT INTO broker_freshness_episode (id, episode_id, status, started_at, last_unread_at, fresh_since, instruments)
-       VALUES (1,$1,$2,$3,$4,$5,$6::jsonb)
+      `INSERT INTO broker_freshness_episode (id, episode_id, status, started_at, last_unread_at, fresh_since, alerted_at, instruments)
+       VALUES (1,$1,$2,$3,$4,$5,$6,$7::jsonb)
        ON CONFLICT (id) DO UPDATE SET
          episode_id=EXCLUDED.episode_id,
          status=EXCLUDED.status,
          started_at=EXCLUDED.started_at,
          last_unread_at=EXCLUDED.last_unread_at,
          fresh_since=EXCLUDED.fresh_since,
+         alerted_at=EXCLUDED.alerted_at,
          instruments=EXCLUDED.instruments,
          updated_at=NOW()
-       RETURNING episode_id, status, started_at, last_unread_at, fresh_since, instruments`,
+       RETURNING episode_id, status, started_at, last_unread_at, fresh_since, alerted_at, instruments`,
       [
         episodeId,
         status,
         asTimestamp("freshness episode started at", current.startedAtMs),
         asTimestamp("freshness episode last unread at", current.lastUnreadAtMs),
         asTimestamp("freshness episode fresh since", current.freshSinceMs),
+        asTimestamp("freshness episode alerted at", current.alertedAtMs),
         JSON.stringify(current.instruments.map((value) => value.trim()))
       ]
     );
