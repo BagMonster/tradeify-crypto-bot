@@ -176,17 +176,18 @@ test("runtime-error warning is delivered with its exception detail stripped", ()
   assert.doesNotMatch(message, /Cannot read properties/);
 });
 
-test("hybrid reconciliation warning and halt are both delivered", () => {
-  const warned = format(warning({
+test("hybrid reconciliation sends a warning without an automatic halt", () => {
+  const warned = format({
+    kind: "RECONCILIATION_WARNING",
+    eventKey: "HYBRID-WARNING:20261002:INJ-USD",
     reasonCode: "HYBRID_UNEXPLAINED_NET",
     instrument: "INJ/USD",
-    reason: "INJ/USD diverged from the DXtrade book and no manual fill explains it: book reported a null net; production runtime error; owner review required",
-    correction: "Inspect /status and /rawhistory, then reconcile in DXtrade. /pausehalt defers this for a fresh 25-minute warning cycle, and /rerun clears it once every book matches."
-  }));
-  assert.match(warned.message, /HYBRID_UNEXPLAINED_NET/);
-  const halted = format({ kind: "SAFETY_HALT", eventKey: "HALT-FIRED:hybrid:1", reasonCode: "HYBRID_UNEXPLAINED_NET", instrument: "INJ/USD" });
-  assert.match(halted.message, /SAFETY HALT — HYBRID_UNEXPLAINED_NET/);
-  assert.match(halted.message, /\/rerun/);
+    reason: "INJ/USD diverged from the DXtrade book and no manual fill explains it: broker net unavailable; owner review required",
+    correction: "Inspect /status and /rawhistory, then reconcile in DXtrade. Trading remains active; /rerun is not needed for this warning."
+  });
+  assert.match(warned.message, /RECONCILIATION WARNING — HYBRID_UNEXPLAINED_NET/);
+  assert.match(warned.message, /Trading remains active; this warning will not pause the bot/);
+  assert.doesNotMatch(warned.message, /Automatic halt eligible|\/pausehalt/);
 });
 
 test("unsafe reason text is withheld, never echoed, and never drops the warning", () => {
