@@ -1,6 +1,10 @@
 name: Export bStocks research bars
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/export-bstocks-research.yml
   push:
     branches: [research/bstocks-5m-through-2026-10-01]
 
