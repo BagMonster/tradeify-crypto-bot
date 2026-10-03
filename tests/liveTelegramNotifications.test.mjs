@@ -92,6 +92,7 @@ test("live notification formatting supports D-049 ring 10 and approved useful-mi
   assert.match(entry.message, /🟢 SOL ENTRY CONFIRMED/);
   assert.match(entry.message, /Ring: BUY10/);
   assert.match(entry.message, /Fill: \$93\.83/);
+  assert.match(entry.message, /Order value: \$5\.63/);
   assert.match(entry.message, /Quantity: 0\.06 SOL/);
   assert.match(entry.message, /Virtual lot: BUY10-V1/);
   assert.match(entry.message, /Current 200-day MA: \$120\.00/);
@@ -113,6 +114,7 @@ test("live notification formatting supports D-049 ring 10 and approved useful-mi
   assert.match(exit.message, /💰 SOL TRANCHE EXIT CONFIRMED/);
   assert.match(exit.message, /Ring: SELL10/);
   assert.match(exit.message, /Tranche: 1\/4/);
+  assert.match(exit.message, /Closed value: \$1\.00/);
 
   const safety = formatLiveTelegramNotification({
     kind: "RECONCILIATION_MISMATCH",
