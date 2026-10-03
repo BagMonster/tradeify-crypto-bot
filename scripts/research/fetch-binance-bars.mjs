@@ -44,6 +44,8 @@ const START = Date.parse(`${START_TEXT}T00:00:00Z`);
 const END = Date.parse(`${END_TEXT}T23:55:00Z`);
 const OUT_ROOT = arg("out", "artifacts");
 const DELAY_MS = Number(arg("delay", "50"));
+const DAILY_FROM_TEXT = arg("daily-from", "");
+const DAILY_FROM = DAILY_FROM_TEXT ? Date.parse(`${DAILY_FROM_TEXT}T00:00:00Z`) : null;
 
 const INTERVAL_MS = {
   "1m": 60_000,
@@ -58,6 +60,7 @@ if (!Number.isFinite(START) || !Number.isFinite(END) || END < START) {
   throw new Error(`Invalid UTC date range: ${START_TEXT} through ${END_TEXT}`);
 }
 if (!Number.isFinite(DELAY_MS) || DELAY_MS < 0) throw new Error("delay must be a non-negative number");
+if (DAILY_FROM_TEXT && !Number.isFinite(DAILY_FROM)) throw new Error(`Invalid --daily-from date: ${DAILY_FROM_TEXT}`);
 if (SYMBOLS.length === 0) throw new Error("At least one symbol is required");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -85,7 +88,7 @@ function archiveTasks(pair) {
     const monthEndExclusive = Date.UTC(year, month + 1, 1);
     const coveredStart = Math.max(START, monthStart);
     const coveredEnd = Math.min(END, monthEndExclusive - INTERVAL_MS);
-    const fullMonth = coveredStart === monthStart && coveredEnd === monthEndExclusive - INTERVAL_MS;
+    const fullMonth = coveredStart === monthStart && coveredEnd === monthEndExclusive - INTERVAL_MS && (DAILY_FROM === null || monthStart < DAILY_FROM);
 
     if (fullMonth) {
       const period = `${year.toString().padStart(4, "0")}-${String(month + 1).padStart(2, "0")}`;
