@@ -42,7 +42,7 @@ jobs:
           (
             cd deliverable
             sha256sum *.zip research-bars-coverage.json > SHA256SUMS.txt
-            unzip -t *.zip
+            for archive in *.zip; do unzip -t "$archive"; done
           )
 
       - uses: actions/upload-artifact@v4
