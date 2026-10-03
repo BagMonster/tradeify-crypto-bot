@@ -29,6 +29,7 @@ jobs:
             --interval 5m \
             --start 2024-10-02 \
             --end 2026-10-01 \
+            --daily-from 2026-08-01 \
             --out artifacts
 
       - name: Package validated datasets
