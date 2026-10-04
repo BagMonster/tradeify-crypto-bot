@@ -168,6 +168,7 @@ export function createDxtradeAccountMonitor({
   getPersistedPeakClosedBalance,
   onSnapshot = async () => {},
   onError = () => {},
+  onPublishError = () => {},
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   freshAfterMs = DEFAULT_FRESH_AFTER_MS,
   now = () => Date.now()
@@ -183,6 +184,7 @@ export function createDxtradeAccountMonitor({
   const getPeak = requireFunction("getPersistedPeakClosedBalance", getPersistedPeakClosedBalance);
   const publish = requireFunction("onSnapshot", onSnapshot);
   const reportError = requireFunction("onError", onError);
+  const reportPublishError = requireFunction("onPublishError", onPublishError);
   const clock = requireFunction("now", now);
   finite("startingBalance", startingBalance);
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000 || pollIntervalMs > 60_000) {
@@ -197,15 +199,56 @@ export function createDxtradeAccountMonitor({
   let stopped = true;
   let latest = null;
   let lastError = null;
+  let publishing = null;
+  let pendingPublish = null;
+  let cachedPeak = null;
+  let peakRefreshing = false;
+  let peakRefreshedAtMs = 0;
+
+  function queuePublish(snapshot) {
+    pendingPublish = snapshot;
+    if (!publishing) publishing = drainPublish().finally(() => { publishing = null; });
+  }
+
+  async function drainPublish() {
+    while (pendingPublish) {
+      const next = pendingPublish;
+      pendingPublish = null;
+      try {
+        await publish(next);
+      } catch (error) {
+        reportPublishError(error instanceof Error ? error : new Error("account snapshot publish failed"));
+      }
+    }
+  }
+
+  function refreshPeakInBackground() {
+    if (peakRefreshing || cachedPeak === null) return;
+    peakRefreshing = true;
+    void getPeak()
+      .then((value) => {
+        cachedPeak = Math.max(cachedPeak, finite("persistedPeakClosedBalance", value));
+        peakRefreshedAtMs = clock();
+      })
+      .catch((error) => {
+        reportPublishError(error instanceof Error ? error : new Error("account peak refresh failed"));
+      })
+      .finally(() => {
+        peakRefreshing = false;
+      });
+  }
 
   async function pollOnce() {
     if (busy) return latest;
     busy = true;
+    const firstPeakRead = cachedPeak === null;
+    if (!firstPeakRead && clock() - peakRefreshedAtMs >= 60_000) refreshPeakInBackground();
+
     async function loadAccountViews() {
       await client.login();
       return Promise.all([
         client.getAccountMetrics({ includePositions: true }),
-        getPeak(),
+        firstPeakRead ? getPeak() : Promise.resolve(cachedPeak),
         client.getOpenPositions().then((payload) => Object.freeze({ ok: true, payload })).catch((error) => Object.freeze({
           ok: false,
           error: error instanceof Error ? error.message : "open-positions read failed"
@@ -229,9 +272,13 @@ export function createDxtradeAccountMonitor({
           throw error;
         }
       }
+      if (firstPeakRead) {
+        cachedPeak = finite("persistedPeakClosedBalance", persistedPeak);
+        peakRefreshedAtMs = clock();
+      }
       let snapshot = normalizeDxtradeAccountMetrics(payload, {
         startingBalance,
-        persistedPeakClosedBalance: persistedPeak,
+        persistedPeakClosedBalance: cachedPeak,
         instrument: activeInstrument,
         instruments: enabledInstruments,
         fetchedAtMs: clock()
@@ -291,9 +338,10 @@ export function createDxtradeAccountMonitor({
           signedNetReadOk: false
         });
       }
+      cachedPeak = Math.max(cachedPeak, snapshot.peakClosedBalance);
       latest = snapshot;
       lastError = null;
-      await publish(snapshot);
+      queuePublish(snapshot);
       return snapshot;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error("DXtrade account monitor failed");
@@ -337,5 +385,11 @@ export function createDxtradeAccountMonitor({
     });
   }
 
-  return Object.freeze({ start, stop, pollOnce, getSnapshot });
+  return Object.freeze({
+    start,
+    stop,
+    pollOnce,
+    getSnapshot,
+    flushPublish: () => publishing ?? Promise.resolve()
+  });
 }

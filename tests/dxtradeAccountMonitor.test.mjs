@@ -199,3 +199,179 @@ test("an unreadable positions envelope keeps the metrics snapshot and marks the 
   assert.equal(snapshot.positionSource, "open-positions-unreadable");
   assert.equal(monitor.getSnapshot().healthy, false);
 });
+
+
+test("slow snapshot publishing does not age the broker snapshot", async () => {
+  let now = 1_000_000;
+  let metricsCalls = 0;
+  const never = new Promise(() => {});
+  const monitor = createDxtradeAccountMonitor({
+    client: {
+      async login() {},
+      async getAccountMetrics() {
+        metricsCalls += 1;
+        return payload();
+      },
+      async getOpenPositions() {
+        return { positions: payload().metrics[0].positions };
+      }
+    },
+    startingBalance: 50_000,
+    getPersistedPeakClosedBalance: async () => 50_000,
+    onSnapshot: () => never,
+    now: () => now
+  });
+
+  await monitor.pollOnce();
+  now += 2_000;
+  await monitor.pollOnce();
+
+  assert.equal(metricsCalls, 2);
+  assert.equal(monitor.getSnapshot().healthy, true);
+});
+
+test("a failed snapshot publish leaves broker data healthy", async () => {
+  let publishErrors = 0;
+  const monitor = createDxtradeAccountMonitor({
+    client: {
+      async login() {},
+      async getAccountMetrics() { return payload(); },
+      async getOpenPositions() {
+        return { positions: payload().metrics[0].positions };
+      }
+    },
+    startingBalance: 50_000,
+    getPersistedPeakClosedBalance: async () => 50_000,
+    onSnapshot: async () => {
+      throw new Error("Postgres write failed");
+    },
+    onPublishError: () => {
+      publishErrors += 1;
+    },
+    now: () => 1_000_000
+  });
+
+  await monitor.pollOnce();
+  await monitor.flushPublish();
+
+  assert.equal(monitor.getSnapshot().healthy, true);
+  assert.equal(monitor.getSnapshot().error, null);
+  assert.equal(publishErrors, 1);
+});
+
+test("snapshot publishing coalesces intermediate account states", async () => {
+  let now = 1_000_000;
+  let metricsCalls = 0;
+  let releaseFirstPublish;
+  const firstPublishBlocked = new Promise((resolve) => {
+    releaseFirstPublish = resolve;
+  });
+  const publishedVersions = [];
+  const monitor = createDxtradeAccountMonitor({
+    client: {
+      async login() {},
+      async getAccountMetrics() {
+        metricsCalls += 1;
+        return payload({ version: metricsCalls });
+      },
+      async getOpenPositions() {
+        return { positions: payload().metrics[0].positions };
+      }
+    },
+    startingBalance: 50_000,
+    getPersistedPeakClosedBalance: async () => 50_000,
+    onSnapshot: async (snapshot) => {
+      publishedVersions.push(snapshot.version);
+      if (publishedVersions.length === 1) await firstPublishBlocked;
+    },
+    now: () => now
+  });
+
+  await monitor.pollOnce();
+  now += 2_000;
+  await monitor.pollOnce();
+  now += 2_000;
+  await monitor.pollOnce();
+  releaseFirstPublish();
+  await monitor.flushPublish();
+
+  assert.deepEqual(publishedVersions, [1, 3]);
+});
+
+test("the account peak is cached, never lowered, and a background refresh failure preserves health", async () => {
+  let now = 1_000_000;
+  let peakCalls = 0;
+  let secondPeakRead;
+  const secondPeakStarted = new Promise((resolve) => {
+    secondPeakRead = resolve;
+  });
+  let reportBackgroundFailure;
+  const backgroundFailureReported = new Promise((resolve) => {
+    reportBackgroundFailure = resolve;
+  });
+  const monitor = createDxtradeAccountMonitor({
+    client: {
+      async login() {},
+      async getAccountMetrics() { return payload(); },
+      async getOpenPositions() {
+        return { positions: payload().metrics[0].positions };
+      }
+    },
+    startingBalance: 50_000,
+    getPersistedPeakClosedBalance: async () => {
+      peakCalls += 1;
+      if (peakCalls === 1) return 60_000;
+      if (peakCalls === 2) {
+        secondPeakRead();
+        return 50_000;
+      }
+      throw new Error("Postgres peak read failed");
+    },
+    onPublishError: (error) => {
+      if (error.message === "Postgres peak read failed") reportBackgroundFailure();
+    },
+    now: () => now
+  });
+
+  await monitor.pollOnce();
+  for (let i = 0; i < 4; i += 1) {
+    now += 2_000;
+    await monitor.pollOnce();
+  }
+  assert.equal(peakCalls, 1);
+
+  now += 60_000;
+  await monitor.pollOnce();
+  await secondPeakStarted;
+  assert.equal(peakCalls, 2);
+  assert.equal(monitor.getSnapshot().snapshot.peakClosedBalance, 60_000);
+
+  now += 60_000;
+  await monitor.pollOnce();
+  await backgroundFailureReported;
+  assert.equal(peakCalls, 3);
+  assert.equal(monitor.getSnapshot().snapshot.peakClosedBalance, 60_000);
+  assert.equal(monitor.getSnapshot().healthy, true);
+});
+
+test("an unreadable startup peak still fails the monitor closed", async () => {
+  const monitor = createDxtradeAccountMonitor({
+    client: {
+      async login() {},
+      async getAccountMetrics() { return payload(); },
+      async getOpenPositions() {
+        return { positions: payload().metrics[0].positions };
+      }
+    },
+    startingBalance: 50_000,
+    getPersistedPeakClosedBalance: async () => {
+      throw new Error("Postgres startup read failed");
+    },
+    onError: () => {},
+    now: () => 1_000_000
+  });
+
+  await monitor.pollOnce();
+
+  assert.equal(monitor.getSnapshot().healthy, false);
+});

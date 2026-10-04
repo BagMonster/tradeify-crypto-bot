@@ -126,6 +126,7 @@ function accountLockReasonCode(invariantError) {
 }
 
 let accountErrorLogged = false;
+let accountSnapshotSyncFailures = 0;
 let accountLockLatched = false;
 const accountMonitor = createDxtradeAccountMonitor({
   client: dxtradeClient,
@@ -134,7 +135,6 @@ const accountMonitor = createDxtradeAccountMonitor({
   getPersistedPeakClosedBalance: database.getPersistedPeakClosedBalance,
   onSnapshot: async (snapshot) => {
     accountErrorLogged = false;
-    await database.syncAccountSnapshot(snapshot, account);
     if (exposureGate) {
       const exposureUsd = enabledInstruments.reduce((sum, cfg) => sum + bookExposure(snapshot, cfg.instrument), 0);
       if (exposureGate.observe({ exposureUsd, observedAtMs: Number(snapshot.fetchedAtMs) })) {
@@ -159,11 +159,23 @@ const accountMonitor = createDxtradeAccountMonitor({
       await clearNonHarvestHalt("ACCOUNT_LOCKOUT:FOREIGN_POSITION");
       await clearNonHarvestHalt("ACCOUNT_LOCKOUT:POSITION_COUNT_MISMATCH");
     }
+    try {
+      await database.syncAccountSnapshot(snapshot, account);
+      accountSnapshotSyncFailures = 0;
+    } catch (error) {
+      throw error;
+    }
   },
   onError: (error) => {
     if (!accountErrorLogged) {
       accountErrorLogged = true;
       console.error(`DXtrade account state is unavailable; new actions remain blocked on every instrument. ${formatDxtradeAccountDiagnostic(error)}`);
+    }
+  },
+  onPublishError: (error) => {
+    accountSnapshotSyncFailures += 1;
+    if (accountSnapshotSyncFailures === 1 || accountSnapshotSyncFailures % 10 === 0) {
+      console.error(`Account snapshot DB sync failed (${accountSnapshotSyncFailures} in a row): ${error?.message ?? "unknown error"}. Broker data stays live; persisted balance/high-water may lag.`);
     }
   }
 });
