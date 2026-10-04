@@ -279,6 +279,13 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS daily_entry_brake_state (
+        day_key TEXT PRIMARY KEY CHECK (day_key ~ '^\\d{4}-\\d{2}-\\d{2}$'),
+        instruments JSONB NOT NULL DEFAULT '[]'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
     // Single-row operational state only. This lightweight compatibility
     // migration has no index build or table rewrite.
     await pool.query("ALTER TABLE broker_freshness_episode ADD COLUMN IF NOT EXISTS alerted_at TIMESTAMPTZ");
@@ -886,6 +893,37 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     return Object.freeze({ dayKey: row.day_key, status: row.status, mode: row.mode ?? "FULL", plan: row.plan ?? null, triggerPnlUsd: row.trigger_pnl_usd == null ? null : toFiniteNumber("session harvest trigger P&L", row.trigger_pnl_usd), confirmedAt: row.confirmed_at == null ? null : toDate("session harvest confirmation", row.confirmed_at).toISOString(), haltReason: row.halt_reason });
   }
 
+  function normalizeDailyEntryBrakeState(row, dayKey) {
+    const key = requiredText("entry-brake day key", row?.day_key ?? dayKey, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("entry-brake day key is invalid");
+    const input = row?.instruments ?? [];
+    if (!Array.isArray(input)) throw new Error("entry-brake instruments must be an array");
+    const instruments = [...new Set(input.map((instrument) => requiredText("entry-brake instrument", instrument, 32)))];
+    return Object.freeze({ dayKey: key, instruments: Object.freeze(instruments) });
+  }
+
+  async function getDailyEntryBrakeState(dayKey) {
+    const key = requiredText("entry-brake day key", dayKey, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("entry-brake day key is invalid");
+    const result = await pool.query("SELECT day_key, instruments FROM daily_entry_brake_state WHERE day_key=$1", [key]);
+    if (result.rowCount === 0) return normalizeDailyEntryBrakeState(null, key);
+    if (result.rowCount !== 1) throw new Error("entry-brake state lookup returned an invalid row count");
+    return normalizeDailyEntryBrakeState(result.rows[0], key);
+  }
+
+  async function saveDailyEntryBrakeState(input) {
+    const state = normalizeDailyEntryBrakeState({ day_key: input?.dayKey, instruments: input?.instruments }, input?.dayKey);
+    const result = await pool.query(
+      `INSERT INTO daily_entry_brake_state (day_key, instruments)
+       VALUES ($1,$2::jsonb)
+       ON CONFLICT (day_key) DO UPDATE SET instruments=EXCLUDED.instruments, updated_at=NOW()
+       RETURNING day_key, instruments`,
+      [state.dayKey, JSON.stringify(state.instruments)]
+    );
+    if (result.rowCount !== 1) throw new Error("entry-brake state save failed");
+    return normalizeDailyEntryBrakeState(result.rows[0], state.dayKey);
+  }
+
   function normalizeDailyDustCleanupState(row, dayKey) {
     const key = requiredText("daily dust cleanup day key", row?.day_key ?? dayKey, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) throw new Error("daily dust cleanup day key is invalid");
@@ -1164,6 +1202,8 @@ export function createDatabase(environment, { PoolClass = Pool } = {}) {
     saveBrokerFreshnessEpisode,
     pruneOperationalHistory,
     getSessionHarvestState,
+    getDailyEntryBrakeState,
+    saveDailyEntryBrakeState,
     getExposurePoolEpisode,
     saveExposurePoolEpisode,
     saveSessionHarvestState,

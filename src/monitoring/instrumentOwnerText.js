@@ -136,8 +136,8 @@ export function formatInstrumentStatus({
   ];
   if (supervisorBook) {
     lines.push(
-      `Supervisor day P&L: ${money(supervisorBook.dayPnlUsd)}`,
-      `Supervisor brake: ${supervisorBook.braked ? "ACTIVE" : "READY"}${supervisorBook.readFailed ? " (book unread)" : ""}`
+      `Supervisor entry-brake P&L: ${money(supervisorBook.unrealisedUsd)}${supervisorBook.entryBrakePnlSource ? ` (${supervisorBook.entryBrakePnlSource})` : ""}`,
+      `Supervisor brake: ${supervisorBook.braked ? "ACTIVE — latched through rollover" : "READY"}${supervisorBook.readFailed ? " (book unread)" : ""}`
     );
   }
   if (botState?.operator_killed) {

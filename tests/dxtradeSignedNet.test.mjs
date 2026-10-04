@@ -51,6 +51,19 @@ test("multiple SOL tickets sum to one signed net and do not lock", () => {
   assert.equal(result.instrumentPosition.ticketCount, 2);
 });
 
+test("multi-instrument grouping retains each ticket's signed quantity and entry price", async () => {
+  const { signedNetByInstrument } = await import("../src/account/dxtradeSignedNet.js");
+  const result = signedNetByInstrument({ positions: [
+    { symbol: "RUNE/USD", quantity: 772.73, side: "SELL", openPrice: 0.7543, positionCode: "RUNE-1" },
+    { symbol: "RUNE/USD", quantity: 530.61, side: "SELL", avgOpenPrice: 0.7320, positionCode: "RUNE-2" }
+  ] }, ["RUNE/USD"]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.byInstrument["RUNE/USD"].tickets, [
+    { positionCode: "RUNE-1", quantity: -772.73, entryPrice: 0.7543 },
+    { positionCode: "RUNE-2", quantity: -530.61, entryPrice: 0.7320 }
+  ]);
+});
+
 test("open-positions parser rejects a foreign instrument", () => {
   const result = signedNetFromOpenPositions({
     positions: [{ symbol: "XRP/USD", quantity: 10, side: "BUY" }]

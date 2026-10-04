@@ -58,3 +58,34 @@ test("unread shared data is alert-only and does not brake either book", async ()
   assert.equal(recoveredZec.calls.at(-1)[1], false);
   assert.equal(recoveredAvax.calls.at(-1)[1], false);
 });
+
+test("entry brake uses an instrument's open ticket P&L, not its account-day allocation", async () => {
+  const rune = book("RUNE/USD", { unrealised: -71.54, day: 3.25, exposure: 965 });
+  const supervisor = createRiskSupervisor({
+    config: { ...config, entryBrakeUsd: 33 },
+    instruments: [rune]
+  });
+
+  const result = await supervisor.evaluate({ dayKey: "2026-10-04" });
+  assert.equal(result.action, "BRAKE");
+  assert.deepEqual(result.instruments, ["RUNE/USD"]);
+  assert.equal(supervisor.getSnapshot().perInstrument[0].braked, true);
+});
+
+test("daily entry brakes are restored after a worker restart", async () => {
+  let row = { dayKey: "2026-10-04", instruments: ["RUNE/USD"] };
+  const store = {
+    async get(dayKey) { return { ...row, dayKey }; },
+    async save(next) { row = { ...next, instruments: [...next.instruments] }; return row; }
+  };
+  const rune = book("RUNE/USD", { unrealised: -1, day: -1, exposure: 965 });
+  const supervisor = createRiskSupervisor({
+    config: { ...config, entryBrakeUsd: 33 },
+    instruments: [rune],
+    entryBrakeStore: store
+  });
+
+  await supervisor.evaluate({ dayKey: "2026-10-04" });
+  assert.equal(supervisor.getSnapshot().brakedInstruments.includes("RUNE/USD"), true);
+  assert.equal(rune.calls.some(([kind, on]) => kind === "brake" && on === true), true);
+});

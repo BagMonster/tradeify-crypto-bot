@@ -136,6 +136,7 @@ export function createRiskSupervisor({
   getExposurePoolSnapshot = null,
   onRolloverHarvestConfirmed = async () => {},
   freshnessEpisodeStore = null,
+  entryBrakeStore = null,
   freshnessAlertAfterMs = DEFAULT_FRESHNESS_ALERT_AFTER_MS,
   freshnessRecoveredAfterMs = 60 * 1000,
   harvestRetryMs = DEFAULT_HARVEST_RETRY_MS,
@@ -146,6 +147,9 @@ export function createRiskSupervisor({
   if (!config || typeof config !== "object") throw new TypeError("risk config is required");
   if (freshnessEpisodeStore !== null && (typeof freshnessEpisodeStore?.get !== "function" || typeof freshnessEpisodeStore?.save !== "function")) {
     throw new TypeError("freshnessEpisodeStore must provide get() and save()");
+  }
+  if (entryBrakeStore !== null && (typeof entryBrakeStore?.get !== "function" || typeof entryBrakeStore?.save !== "function")) {
+    throw new TypeError("entryBrakeStore must provide get() and save()");
   }
   if (!Number.isSafeInteger(freshnessRecoveredAfterMs) || freshnessRecoveredAfterMs < 0) {
     throw new TypeError("freshnessRecoveredAfterMs must be a non-negative whole number");
@@ -274,6 +278,7 @@ export function createRiskSupervisor({
   let lastError = null;
   let unreadSinceMs = null;
   let freshnessEpisode = null;
+  let entryBrakeState = null;
 
   function emptyFreshnessEpisode() {
     return Object.freeze({ episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, alertedAtMs: null, instruments: Object.freeze([]) });
@@ -288,6 +293,38 @@ export function createRiskSupervisor({
   async function saveFreshnessEpisode(next) {
     freshnessEpisode = freshnessEpisodeStore === null ? Object.freeze(next) : await freshnessEpisodeStore.save(next);
     return freshnessEpisode;
+  }
+
+  function normalizeEntryBrakeState(input, expectedDayKey) {
+    const stateDayKey = typeof input?.dayKey === "string" ? input.dayKey : expectedDayKey;
+    if (stateDayKey !== expectedDayKey) throw new Error("entry-brake state day key does not match the requested account day");
+    const allowed = new Set(instruments.map((book) => book.instrument));
+    const names = Array.isArray(input?.instruments) ? input.instruments : [];
+    const unique = [...new Set(names)];
+    if (unique.some((instrument) => typeof instrument !== "string" || !allowed.has(instrument))) {
+      throw new Error("entry-brake state contains an unsupported instrument");
+    }
+    return Object.freeze({ dayKey: expectedDayKey, instruments: Object.freeze(unique) });
+  }
+
+  async function loadEntryBrakes(incomingDayKey) {
+    if (entryBrakeState?.dayKey === incomingDayKey) return entryBrakeState;
+    const stored = entryBrakeStore === null
+      ? { dayKey: incomingDayKey, instruments: [] }
+      : await entryBrakeStore.get(incomingDayKey);
+    entryBrakeState = normalizeEntryBrakeState(stored, incomingDayKey);
+    brakedToday.clear();
+    for (const instrument of entryBrakeState.instruments) brakedToday.add(instrument);
+    return entryBrakeState;
+  }
+
+  async function saveEntryBrakes(incomingDayKey) {
+    const proposed = { dayKey: incomingDayKey, instruments: [...brakedToday] };
+    const saved = entryBrakeStore === null ? proposed : await entryBrakeStore.save(proposed);
+    entryBrakeState = normalizeEntryBrakeState(saved, incomingDayKey);
+    brakedToday.clear();
+    for (const instrument of entryBrakeState.instruments) brakedToday.add(instrument);
+    return entryBrakeState;
   }
 
   async function noteFreshnessOutage(nowMs, instruments) {
@@ -461,6 +498,7 @@ export function createRiskSupervisor({
     brakedToday.clear();
     unreadSinceMs = null;
     harvestRetryAtMs = null;
+    entryBrakeState = null;
     // protectionFailing deliberately survives the rollover. A broken broker
     // session does not heal at 22:00 UTC, and clearing the brake here would
     // silently re-arm entries into an execution path that still cannot cut.
@@ -868,14 +906,16 @@ export function createRiskSupervisor({
       let dayPnlUsd = 0;
       let exposureUsd = 0;
       let readFailed = false;
+      let entryBrakePnlSource = "UNAVAILABLE";
       try {
         unrealisedUsd = Number(book.getUnrealisedUsd()) || 0;
         dayPnlUsd = Number(book.getDayPnlUsd()) || 0;
         exposureUsd = Number(book.getExposureUsd()) || 0;
+        if (typeof book.getEntryBrakePnlSource === "function") entryBrakePnlSource = String(book.getEntryBrakePnlSource());
       } catch {
         readFailed = true;
       }
-      return { book, instrument: book.instrument, unrealisedUsd, dayPnlUsd, exposureUsd, readFailed };
+      return { book, instrument: book.instrument, unrealisedUsd, dayPnlUsd, exposureUsd, entryBrakePnlSource, readFailed };
     });
   }
 
@@ -891,6 +931,11 @@ export function createRiskSupervisor({
         rollover(incomingDayKey);
         if (sessionHarvestEnabled && priorKey !== null) notifications?.enqueue?.({ kind: "HARVEST_RESET", eventKey: `D064-RESET:${incomingDayKey.replaceAll("-", "")}`, dayKey: incomingDayKey });
       }
+
+      await loadEntryBrakes(incomingDayKey);
+      // A Railway restart creates fresh grid instances. Reapply any durable
+      // account-day brakes before considering the first broker snapshot.
+      for (const book of instruments) applyEntryBrake(book, stickyBrake(book.instrument));
 
       const readings = readBooks();
       const unreadable = readings.filter((r) => r.readFailed);
@@ -1057,12 +1102,14 @@ export function createRiskSupervisor({
       const newlyBraked = [];
       for (const reading of readings) {
         if (brakedToday.has(reading.instrument)) continue;
-        if (reading.dayPnlUsd <= -entryBrakeUsd) {
+        if (reading.unrealisedUsd <= -entryBrakeUsd) {
           brakedToday.add(reading.instrument);
           applyEntryBrake(reading.book, true);
           newlyBraked.push(reading.instrument);
         }
       }
+
+      if (newlyBraked.length > 0) await saveEntryBrakes(incomingDayKey);
 
       for (const reading of readings) {
         if (!stickyBrake(reading.instrument)) applyEntryBrake(reading.book, false);
@@ -1072,7 +1119,12 @@ export function createRiskSupervisor({
         await addEvent("WARN", "RISK_SUPERVISOR_ENTRY_BRAKE", {
           instruments: newlyBraked,
           threshold: -entryBrakeUsd,
-          combinedDayPnlUsd: combined
+          combinedDayPnlUsd: combined,
+          readings: readings.filter((reading) => newlyBraked.includes(reading.instrument)).map((reading) => ({
+            instrument: reading.instrument,
+            unrealisedUsd: fixed2(reading.unrealisedUsd),
+            source: reading.entryBrakePnlSource
+          }))
         });
         return Object.freeze({ action: "BRAKE", instruments: Object.freeze(newlyBraked), combinedDayPnlUsd: combined });
       }
@@ -1238,6 +1290,7 @@ export function createRiskSupervisor({
         dayPnlUsd: fixed2(r.dayPnlUsd),
         unrealisedUsd: fixed2(r.unrealisedUsd),
         exposureUsd: fixed2(r.exposureUsd),
+        entryBrakePnlSource: r.entryBrakePnlSource,
         braked: brakedToday.has(r.instrument),
         // Whether this book would be cut if a tier fired right now.
         cuttable: r.unrealisedUsd < 0,
