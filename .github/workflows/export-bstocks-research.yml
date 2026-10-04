@@ -1,0 +1,52 @@
+name: Export bStocks research bars
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/export-bstocks-research.yml
+  push:
+    branches: [research/bstocks-5m-through-2026-10-01]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download and validate Binance Vision bars
+        run: |
+          node --max-old-space-size=8192 scripts/research/fetch-binance-bars.mjs \
+            --symbols MSTRB,COINB,PLTRB,GMEB,RKLBB \
+            --interval 5m \
+            --start 2024-10-02 \
+            --end 2026-10-01 \
+            --daily-from 2026-08-01 \
+            --out artifacts
+
+      - name: Package validated datasets
+        run: |
+          mkdir -p deliverable
+          for symbol in MSTRB COINB PLTRB GMEB RKLBB; do
+            zip -j "deliverable/${symbol}-binance-spot-5m-bars.zip" "artifacts/research-bars-${symbol,,}/5m-full.csv"
+          done
+          cp artifacts/research-bars-coverage.json deliverable/
+          (
+            cd deliverable
+            sha256sum *.zip research-bars-coverage.json > SHA256SUMS.txt
+            for archive in *.zip; do unzip -t "$archive"; done
+          )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binance-bstocks-5m-2024-10-02-to-2026-10-01
+          path: deliverable/
+          retention-days: 14
