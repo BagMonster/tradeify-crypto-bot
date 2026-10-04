@@ -64,7 +64,7 @@ test("two tickets of the active instrument stay unlocked and net together", () =
   assert.equal(two.currentNotional, 0.01 * 67_000 + 0.005 * 67_000);
 });
 
-test("monitor uses one metrics request with positions and reports freshness", async () => {
+test("default monitor cadence uses one metrics request with positions and a six-second freshness window", async () => {
   let now = 1_000_000;
   let loginCalls = 0;
   let metricsCalls = 0;
@@ -84,8 +84,6 @@ test("monitor uses one metrics request with positions and reports freshness", as
     startingBalance: 50_000,
     getPersistedPeakClosedBalance: async () => 50_000,
     onSnapshot: async (snapshot) => { saved = snapshot; },
-    pollIntervalMs: 1_000,
-    freshAfterMs: 3_000,
     now: () => now
   });
 
@@ -95,7 +93,9 @@ test("monitor uses one metrics request with positions and reports freshness", as
   assert.equal(saved.equity, 50_100);
   assert.equal(monitor.getSnapshot().healthy, true);
 
-  now += 3_001;
+  now += 6_000;
+  assert.equal(monitor.getSnapshot().fresh, true);
+  now += 1;
   assert.equal(monitor.getSnapshot().fresh, false);
   assert.equal(monitor.getSnapshot().healthy, false);
 });
