@@ -1,8 +1,12 @@
 import { applyOpenPositionsOverlay, signedNetByInstrument, signedPositionQuantity } from "./dxtradeSignedNet.js";
 
 const DEFAULT_INSTRUMENT = "BTC/USD";
-const DEFAULT_POLL_INTERVAL_MS = 1_000;
-const DEFAULT_FRESH_AFTER_MS = 3_000;
+
+// The account monitor is shared by every book. A two-second cadence halves the
+// baseline DXtrade request rate while a six-second freshness window preserves
+// three missed-poll opportunities before the snapshot is considered stale.
+const DEFAULT_POLL_INTERVAL_MS = 2_000;
+const DEFAULT_FRESH_AFTER_MS = 6_000;
 
 function instrumentSymbol(value) {
   if (typeof value !== "string" || !/^[A-Z0-9]+\/[A-Z0-9]+$/.test(value.trim())) {
