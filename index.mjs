@@ -21,6 +21,7 @@ import { createSolanaHeartbeat } from "./src/runtime/solanaHeartbeat.js";
 import { createLiveTelegramNotifications } from "./src/notifications/liveTelegramNotifications.js";
 import { accountDayKey } from "./src/risk/dailyRiskLadder.js";
 import { createRiskSupervisor } from "./src/risk/riskSupervisor.js";
+import { ticketMarkedOpenPnlUsd } from "./src/risk/ticketMarkedPnl.js";
 import { buildGridDefinition } from "./src/strategies/ringGridDefinition.js";
 import { createRingGrid } from "./src/strategies/ringGrid.js";
 import { createSolanaOwnerService } from "./src/solanaOwnerService.js";
@@ -289,13 +290,18 @@ async function buildInstrumentStack(cfg) {
     getRiskSnapshot: async () => {
       const accountStatus = accountMonitor.getSnapshot();
       const snapshot = accountStatus.snapshot;
-      const book = snapshot?.signedNetByInstrument?.[cfg.instrument] ?? null;
+      let ticketRisk = null;
+      try {
+        ticketRisk = instrumentTicketRisk(cfg.instrument);
+      } catch {
+        // The runtime will turn unavailable risk data into an entry block.
+      }
       return Object.freeze({
         accountDataFresh: accountStatus.healthy === true,
         brokerNetUnits: trustedSignedNetFor(accountStatus, cfg.instrument),
-        instrumentUnrealisedUsd: book?.openPl,
-        instrumentDayPnlUsd: book ? Number(book.dayClosedPl) + Number(book.openPl) : null,
-        instrumentExposureUsd: book?.notional
+        instrumentUnrealisedUsd: ticketRisk?.unrealisedUsd ?? null,
+        instrumentDayPnlUsd: ticketRisk?.unrealisedUsd ?? null,
+        instrumentExposureUsd: snapshot?.signedNetByInstrument?.[cfg.instrument]?.notional ?? null
       });
     }
   });
@@ -344,13 +350,13 @@ async function runDailyDustCleanup({ immediate = false } = {}) {
 // positions were open. Nets survived only because quantity and symbol have fallbacks.
 //
 // P&L for the whole account comes from /metrics, which is exact and is what the cut
-// and flatten act on. Per-instrument figures are needed only for the proportional
-// allocation and the per-instrument brake, so the account figure is apportioned by
-// each book's share of live exposure. Exposure is computed from broker net units at
-// the book's own last traded price, because the broker gives no mark.
+// and flatten act on. Per-instrument entry brakes instead mark each DXtrade ticket
+// at that instrument's fresh Binance price.  A single account-wide P&L cannot be
+// apportioned by notional: doing so can hide a losing RUNE book behind profitable
+// or larger books and fails the per-instrument -$33 contract.
 //
-// D-054 is preserved: an unread account THROWS. The supervisor catches it, marks the
-// books unreadable, and brakes. Unknown is never reported as zero.
+// D-054 is preserved: an unread account THROWS. The supervisor reports the books
+// unread and blocks that processing pass; unknown is never reported as zero.
 // Balance captured at the last 22:00 UTC rollover. Day P&L is measured against it.
 let dayOpenBalance = null;
 let dayOpenBalanceKey = null;
@@ -421,30 +427,34 @@ function bookExposure(snapshot, instrument) {
   return units * price;
 }
 
-// Share of account P&L attributed to one book. Exposure-weighted when exposure is
-// known; otherwise split equally across the books that actually hold a position, so
-// the per-instrument figures always sum to the exact account P&L rather than to zero.
-function plShare(snapshot, instrument) {
-  const totalExposure = stacks.reduce((sum, s) => sum + bookExposure(snapshot, s.cfg.instrument), 0);
-  if (totalExposure > 0) return bookExposure(snapshot, instrument) / totalExposure;
-  const holding = stacks.filter((s) => bookNetUnits(snapshot, s.cfg.instrument) > 0);
-  if (holding.length === 0) return 0;
-  return bookNetUnits(snapshot, instrument) > 0 ? 1 / holding.length : 0;
-}
-
-function instrumentPl(instrument, field) {
-  const { snapshot, openPl, dayClosedPl } = accountMetrics();
-  const direct = Number(snapshot.signedNetByInstrument?.[instrument]?.[field]);
-  if (Number.isFinite(direct) && direct !== 0) return direct;   // broker gave a real figure
-  return (field === "openPl" ? openPl : dayClosedPl) * plShare(snapshot, instrument);
+function instrumentTicketRisk(instrument) {
+  const { snapshot } = accountMetrics();
+  const book = snapshot.signedNetByInstrument?.[instrument];
+  if (!book) throw new Error(`${instrument} ticket book is unavailable`);
+  const tickets = Array.isArray(book.tickets) ? book.tickets : null;
+  if (tickets === null) throw new Error(`${instrument} ticket details are unavailable`);
+  if (tickets.length === 0) return Object.freeze({ unrealisedUsd: 0, source: "BROKER_FLAT" });
+  const stack = stackByInstrument.get(instrument);
+  const markPrice = Number(stack?.lastTrade?.price);
+  if (!Number.isFinite(markPrice) || markPrice <= 0 || stack?.feedState?.connected !== true || stack.feedState.stale === true) {
+    throw new Error(`${instrument} fresh Binance mark is unavailable`);
+  }
+  return Object.freeze({
+    unrealisedUsd: ticketMarkedOpenPnlUsd({ tickets, markPrice }),
+    source: "BINANCE_TICKET_MARK"
+  });
 }
 
 const riskSupervisor = createRiskSupervisor({
   config: accountRisk,
   instruments: stacks.map((s) => Object.freeze({
     instrument: s.cfg.instrument,
-    getUnrealisedUsd: () => instrumentPl(s.cfg.instrument, "openPl"),
-    getDayPnlUsd: () => instrumentPl(s.cfg.instrument, "dayClosedPl") + instrumentPl(s.cfg.instrument, "openPl"),
+    getUnrealisedUsd: () => instrumentTicketRisk(s.cfg.instrument).unrealisedUsd,
+    // The entry-brake input is open ticket P&L, then latched durably for the
+    // remainder of the account day. DXtrade does not expose closed P&L by
+    // instrument through this account-monitor endpoint.
+    getDayPnlUsd: () => instrumentTicketRisk(s.cfg.instrument).unrealisedUsd,
+    getEntryBrakePnlSource: () => instrumentTicketRisk(s.cfg.instrument).source,
     getExposureUsd: () => bookExposure(accountMetrics().snapshot, s.cfg.instrument),
     setEntryBrake: (on) => s.runtime.setEntryBrake(on),
     setTrancheExitsPaused: (on) => s.runtime.setTrancheExitsPaused(on),
@@ -468,6 +478,10 @@ const riskSupervisor = createRiskSupervisor({
   freshnessEpisodeStore: Object.freeze({
     get: () => database.getBrokerFreshnessEpisode(),
     save: (episode) => database.saveBrokerFreshnessEpisode(episode)
+  }),
+  entryBrakeStore: Object.freeze({
+    get: (dayKey) => database.getDailyEntryBrakeState(dayKey),
+    save: (state) => database.saveDailyEntryBrakeState(state)
   }),
   getCombinedDayPnlUsd: () => {
     const { openPl, dayClosedPl } = accountMetrics();

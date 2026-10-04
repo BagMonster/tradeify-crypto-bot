@@ -222,6 +222,7 @@ export function createMultiInstrumentOwnerService({
       lines.push("  Combined figures above are NOT reliable. The ladder cannot act on an unread book.");
     } else if (per.length > 0) {
       lines.push(`  risk reads: ${per.length}/${per.length} OK`);
+      lines.push(`  entry-brake P&L (ticket-marked): ${per.map((entry) => `${entry.instrument} ${money(entry.unrealisedUsd)}`).join(" · ")}`);
     }
     lines.push(`  supervisor day: ${snapshot.dayKey ?? "not yet evaluated (no price tick processed since start)"}`);
 

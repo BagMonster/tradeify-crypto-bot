@@ -14,6 +14,14 @@ export function signedPositionQuantity(position) {
   return qty;
 }
 
+function positionEntryPrice(position) {
+  for (const value of [position?.openPrice, position?.avgOpenPrice, position?.entryPrice]) {
+    const price = Number(value);
+    if (Number.isFinite(price) && price > 0) return price;
+  }
+  return null;
+}
+
 export function positionRows(payload) {
   if (payload == null) return [];
   if (Array.isArray(payload)) return payload;
@@ -74,6 +82,7 @@ export function signedNetFromOpenPositions(payload, instrument = SOL_INSTRUMENT)
       openPl: Number(row?.openPl ?? 0),
       dayClosedPl: Number(row?.dayClosedPl ?? 0),
       avgOpenPrice: Number(row?.avgOpenPrice ?? 0),
+      entryPrice: positionEntryPrice(row),
       raw: row
     });
   }
@@ -124,6 +133,8 @@ export function signedNetByInstrument(payload, instruments) {
       openPl: Number(row?.openPl ?? 0),
       dayClosedPl: Number(row?.dayClosedPl ?? 0),
       avgOpenPrice: Number(row?.avgOpenPrice ?? 0),
+      entryPrice: positionEntryPrice(row),
+      positionCode: typeof row?.positionCode === "string" ? row.positionCode : null,
       raw: row
     });
   }
@@ -152,6 +163,11 @@ export function signedNetByInstrument(payload, instruments) {
       openPl: own.reduce((sum, row) => sum + (Number.isFinite(row.openPl) ? row.openPl : 0), 0),
       dayClosedPl: own.reduce((sum, row) => sum + (Number.isFinite(row.dayClosedPl) ? row.dayClosedPl : 0), 0),
       notional: Number.isFinite(notional) ? notional : 0,
+      tickets: Object.freeze(own.map((row) => Object.freeze({
+        positionCode: row.positionCode,
+        quantity: row.quantity,
+        entryPrice: row.entryPrice
+      }))),
       // D-059: both directions open on ONE instrument is the prohibited state.
       // Across different instruments it is not hedging and is expected.
       hedged: own.some((row) => row.quantity > 0) && own.some((row) => row.quantity < 0)
