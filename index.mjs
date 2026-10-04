@@ -560,10 +560,12 @@ async function applyReconciliationBlocked(stack, result) {
 async function processLatestTrade(stack, trade) {
   const preflight = await riskSupervisor.evaluate({ dayKey: accountDayKey(Date.now()) });
   liveness.noteEvaluation(preflight);
-  // An unavailable shared account snapshot is reported by D-064, but is not a
-  // grid gate. Individual executions still perform their normal broker-side
-  // validation before an order can be sent.
-  if (["FLATTEN", "CUT", "HARVEST_PENDING", "HARVEST_CONFIRMED", "HARVEST_HALTED"].includes(preflight.action)) {
+  // D-064 remains alert-only: it does not set an entry brake, pause, or safety
+  // halt. A normal grid pass still needs a readable shared broker snapshot before
+  // it can validate and submit an order, though. Defer this price tick until the
+  // next one after freshness returns instead of converting one DXtrade outage into
+  // a runtime-error warning cycle for every book.
+  if (["FLATTEN", "CUT", "HARVEST_PENDING", "HARVEST_CONFIRMED", "HARVEST_HALTED", "ACCOUNT_DATA_UNAVAILABLE"].includes(preflight.action)) {
     return preflight;
   }
   const result = await stack.runtime.processTrade(trade);
