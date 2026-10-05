@@ -236,9 +236,9 @@ export function createExposureGate({
     r.filledAtMs = now();
   }
 
-  // The account monitor calls this on every fresh broker snapshot.  Unlike an
-  // entry request it does not page the owner: it only keeps the full-pool
-  // episode accurate (and durable) when price moves without a new entry.
+  // The account monitor calls this on every fresh broker snapshot. It keeps the
+  // full-pool episode accurate when price moves or a protective cut changes
+  // exposure without a new entry, and announces a resulting reopen once.
   function observe({ exposureUsd, observedAtMs = NaN } = {}) {
     const brokerUsd = Number(exposureUsd);
     if (!Number.isFinite(brokerUsd) || brokerUsd < 0) return false;
@@ -253,7 +253,22 @@ export function createExposureGate({
       return true;
     }
     if (closed === null) return false;
+    const episode = closed;
     closed = null;
+    safeAudit("INFO", "EXPOSURE_GATE_REOPENED", {
+      exposureUsd: fixed2(exposure),
+      closedForMs: now() - episode.sinceMs,
+      refusals: episode.refusals,
+      source: "BROKER_SNAPSHOT"
+    });
+    safeEnqueue({
+      kind: "EXPOSURE_GATE_REOPENED",
+      eventKey: `EXPOSURE-REOPENED:${episode.sinceMs}`,
+      exposureUsd: fixed2(exposure),
+      softUsd: soft,
+      closedForMs: now() - episode.sinceMs,
+      refusals: episode.refusals
+    });
     return true;
   }
 

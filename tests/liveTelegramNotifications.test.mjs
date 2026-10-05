@@ -155,6 +155,28 @@ test("D-049 partial-cut and full-flatten notifications contain protective detail
   assert.match(flat.message, /next 22:00 UTC account-day rollover/);
 });
 
+test("account-wide protective-cut notification explains the trigger and affected books", () => {
+  const cut = formatLiveTelegramNotification({
+    kind: "ACCOUNT_PROTECTIVE_CUT",
+    eventKey: "ACCOUNT-CUT:2026-10-05:123:1",
+    fraction: 0.1,
+    thresholdUsd: 100,
+    totalUnrealisedUsd: -104.23,
+    combinedDayPnlUsd: -118.5,
+    exposureBeforeUsd: 3064.88,
+    cutNumber: 1,
+    books: [
+      { instrument: "RUNE/USD", ticketCount: 2 },
+      { instrument: "AAVE/USD", ticketCount: 1 }
+    ]
+  });
+  assert.match(cut.message, /ACCOUNT 10% PROTECTIVE CUT CONFIRMED/);
+  assert.match(cut.message, /Open P&L at trigger: −\$104\.23/);
+  assert.match(cut.message, /Exposure before cut: \$3064\.88/);
+  assert.match(cut.message, /Books reduced: RUNE\/USD \(2 tickets\), AAVE\/USD \(1 ticket\)/);
+  assert.match(cut.message, /separate alert confirms if entries reopen/);
+});
+
 test("durable notification identity suppresses duplicate delivery across notifier restarts", async () => {
   const persistence = memoryNotificationPersistence();
   const firstMessages = [];

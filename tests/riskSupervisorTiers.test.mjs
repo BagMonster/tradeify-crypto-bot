@@ -41,7 +41,8 @@ function cutFraction(instrumentBook) {
 test("D-063 selects the 10% tier at combined -$550", async () => {
   const sol = book("SOL/USD", { unrealised: -280, day: -280 });
   const doge = book("DOGE/USD", { unrealised: -270, day: -270 });
-  const supervisor = createRiskSupervisor({ config: tiered, instruments: [sol, doge] });
+  const notifications = [];
+  const supervisor = createRiskSupervisor({ config: tiered, instruments: [sol, doge], notifications: { enqueue: (event) => notifications.push(event) } });
   const result = await supervisor.evaluate({ dayKey: "2026-09-03" });
   assert.equal(result.action, "CUT");
   assert.equal(result.combinedDayPnlUsd, -550);
@@ -49,6 +50,10 @@ test("D-063 selects the 10% tier at combined -$550", async () => {
   assert.equal(result.tier.fraction, 0.10);
   assert.equal(cutFraction(sol), 0.10);
   assert.equal(cutFraction(doge), 0.10);
+  const alert = notifications.find((event) => event.kind === "ACCOUNT_PROTECTIVE_CUT");
+  assert.equal(alert.fraction, 0.10);
+  assert.equal(alert.thresholdUsd, 500);
+  assert.deepEqual(alert.books.map((book) => book.instrument), ["SOL/USD", "DOGE/USD"]);
 });
 
 test("D-063 selects the 20% tier at combined -$800", async () => {
