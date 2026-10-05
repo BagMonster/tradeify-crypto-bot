@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createMultiInstrumentOwnerService } from "../src/multiInstrumentOwnerService.js";
 
-test("status puts the exact reconcile and rerun recovery plan above the book details", async () => {
+test("compact status retains the exact reconcile and rerun recovery plan", async () => {
   const service = createMultiInstrumentOwnerService({
     instrumentConfigs: [
       { enabled: true, instrument: "SOL/USD", orderPrefix: "SOL" },
@@ -22,10 +22,10 @@ test("status puts the exact reconcile and rerun recovery plan above the book det
   assert.match(text, /1\. Send \/reconcile INJ/);
   assert.match(text, /2\. Send \/confirmreconcile CODE INJ/);
   assert.match(text, /After every listed book shows virtual 0\.00, broker 0\.00, and 0 lots, send \/rerun again/);
-  assert.ok(text.indexOf("VIRTUAL INVENTORY RECONCILIATION REQUIRED") < text.indexOf("SOL/USD STATUS"));
+  assert.doesNotMatch(text, /SOL\/USD STATUS/);
 });
 
-test("status remains readable when a book inspection throws", async () => {
+test("compact status remains readable when a book inspection throws", async () => {
   const service = createMultiInstrumentOwnerService({
     instrumentConfigs: [{ enabled: true, instrument: "SOL/USD", orderPrefix: "SOL" }],
     buildOwnerService: () => ({
@@ -38,5 +38,5 @@ test("status remains readable when a book inspection throws", async () => {
 
   const text = await service.statusText();
   assert.match(text, /ACCOUNT RISK: supervisor snapshot unavailable/);
-  assert.match(text, /SOL\/USD STATUS/);
+  assert.doesNotMatch(text, /SOL\/USD STATUS/);
 });

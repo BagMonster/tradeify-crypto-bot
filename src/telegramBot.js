@@ -23,7 +23,8 @@ export { buildMenuKeyboard, menuActionIds, CONFIRM_ONLY_COMMANDS };
 const HELP_TEXT = [
   "TRADEIFY BOT COMMANDS",
   "",
-  "/status [INSTRUMENT] - account risk, then every book; add SOL or AAVE for one book",
+  "/status [INSTRUMENT] - compact account dashboard; add SOL or AAVE for one book",
+  "/risk [INSTRUMENT] - detailed ticket-mark P&L, exposure, brakes and mark source",
   "/health [INSTRUMENT] - worker, PostgreSQL, MA, execution",
   "/levels [INSTRUMENT] - ring ladder; omit for all five",
   "/rings [INSTRUMENT] - where price sits versus each book",
@@ -229,6 +230,10 @@ export async function startTelegramBot({
     await sendLatched(message.chat.id, "/status", await service.statusText(match?.[1]));
   }));
 
+  bot.onText(/^\/risk(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/risk", await service.riskText(match?.[1]));
+  }));
+
   bot.onText(/^\/health(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
     await sendLatched(message.chat.id, "/health", await service.healthText(match?.[1]));
   }));
@@ -360,6 +365,7 @@ export async function startTelegramBot({
 
   const MENU_ACTIONS = {
     status: (chatId, _query, symbol) => runLatched(chatId, "/status", () => service.statusText(instrumentArg(symbol))),
+    risk: (chatId, _query, symbol) => runLatched(chatId, "/risk", () => service.riskText(instrumentArg(symbol))),
     health: (chatId, _query, symbol) => runLatched(chatId, "/health", () => service.healthText(instrumentArg(symbol))),
     levels: (chatId, _query, symbol) => runLatched(chatId, "/levels", () => service.levelsText(instrumentArg(symbol))),
     rings: (chatId, _query, symbol) => runLatched(chatId, "/rings", () => service.ringsText(instrumentArg(symbol))),
@@ -513,6 +519,7 @@ export async function startTelegramBot({
 
   await bot.setMyCommands([
     { command: "status", description: "Show bot and risk status" },
+    { command: "risk", description: "Show detailed account risk by coin" },
     { command: "health", description: "Check worker and database" },
     { command: "levels", description: "Show ring levels" },
     { command: "rings", description: "Show live position versus rings" },

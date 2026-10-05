@@ -60,8 +60,12 @@ test("status names a local pending mark without mislabeling DXtrade as D-064", a
     }
   });
   const status = await service.statusText();
-  assert.match(status, /market marks pending: RUNE\/USD/);
+  assert.match(status, /Marks pending: RUNE\/USD/);
   assert.match(status, /entries blocked only on those books/);
-  assert.match(status, /account-wide protection remain active/);
+  assert.match(status, /Account-wide protection remains active/);
   assert.doesNotMatch(status, /D-064 broker-data outage/);
+  const risk = service.riskText();
+  assert.match(risk, /RISK DETAIL/);
+  assert.match(risk, /RUNE\/USD/);
+  assert.match(risk, /MARK PENDING/);
 });

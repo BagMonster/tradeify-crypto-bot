@@ -262,7 +262,7 @@ test("/status says UNKNOWN, not zero, when broker data is unavailable", () => {
   assert.match(line, /UNKNOWN \(broker account data unavailable\).*new entries refused/);
 });
 
-test("the real /status message carries the pool line under combined exposure", async () => {
+test("the compact /status dashboard carries the pool state beside exposure", async () => {
   const { gate, state } = harness({ broker: 1540 });
   const service = createMultiInstrumentOwnerService({
     riskSupervisor: {
@@ -277,10 +277,8 @@ test("the real /status message carries the pool line under combined exposure", a
     exposurePoolLine: () => formatExposurePoolLine({ gate, readExposure: () => ({ exposureUsd: state.broker }) })
   });
   const text = await service.statusText();
-  const lines = text.split("\n");
-  const at = lines.findIndex((l) => l.includes("combined exposure"));
-  assert.ok(at >= 0, "status has the combined exposure line");
-  assert.match(lines[at + 1], /^  exposure pool: \$1,540\.00 .* OPEN/);
+  assert.match(text, /Exposure: \$1540\.00/);
+  assert.match(text, /Entry pool: OPEN — \$1,540\.00 \/ \$2,200\.00 soft/);
 });
 
 test("a broken pool line cannot break /status", async () => {
@@ -290,7 +288,7 @@ test("a broken pool line cannot break /status", async () => {
     buildOwnerService: (cfg) => ({ statusText: async () => cfg.instrument }),
     exposurePoolLine: () => { throw new Error("boom"); }
   });
-  assert.match(await service.statusText(), /exposure pool: unavailable/);
+  assert.match(await service.statusText(), /Entry pool: unavailable/);
 });
 
 // ---- 2026-09-22 incident: rejections must not consume the pool -----------------------
