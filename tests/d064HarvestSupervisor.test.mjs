@@ -35,6 +35,25 @@ function book(instrument, status = "ALREADY_FLAT") {
   };
 }
 
+test("snapshot exposes the two full-pool harvest countdowns", () => {
+  const nowMs = Date.parse("2026-10-05T12:00:00.000Z");
+  const supervisor = createRiskSupervisor({
+    config: { ...config, sessionHarvestUsd: 33, exposurePoolHarvest: { firstAfterHours: 24, secondAfterHours: 36, firstFraction: 0.5, minimumFraction: 0.25 } },
+    instruments: [book("SOL/USD")],
+    harvestStore: memoryHarvestStore(),
+    now: () => nowMs,
+    getExposurePoolSnapshot: () => ({ closed: true, closedSinceMs: nowMs - 2 * 60 * 60 * 1000 })
+  });
+  assert.deepEqual(supervisor.getSnapshot().poolClosedHarvest, {
+    closedSinceMs: nowMs - 2 * 60 * 60 * 1000,
+    ageMs: 2 * 60 * 60 * 1000,
+    firstAfterMs: 24 * 60 * 60 * 1000,
+    secondAfterMs: 36 * 60 * 60 * 1000,
+    firstTargetUsd: 16.5,
+    minimumTargetUsd: 8.25
+  });
+});
+
 test("D-064 banks an already-flat +$250 account once and pauses ordinary exits", async () => {
   const sol = book("SOL/USD");
   const doge = book("DOGE/USD");
