@@ -79,7 +79,8 @@ export function buildHomeKeyboard(books = DEFAULT_BOOKS) {
   }
   return [
     header("\u2014 Account \u2014"),
-    pair(btn("All Status", "status"), btn("All Health", "health")),
+    pair(btn("All Status", "status")),
+    pair(btn("Risk Detail", "risk"), btn("All Health", "health")),
     pair(btn("All Rings", "rings"), btn("All Levels", "levels")),
     pair(btn("Exit Targets", "targets")),
     pair(btn("Pause Bot", "kill"), btn("Re-run Halt", "rerun")),

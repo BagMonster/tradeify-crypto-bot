@@ -43,6 +43,7 @@ export function createMultiInstrumentOwnerService({
   brokerAccountLine = null,
   // Account-wide exposure pool line for /status (supplied by index.mjs).
   exposurePoolLine = null,
+  getRiskDataStatus = null,
   instrumentConfigs,
   buildOwnerService = createSolanaOwnerService,
   riskSupervisor = null,
@@ -200,71 +201,136 @@ export function createMultiInstrumentOwnerService({
     }
   }
 
+  function compactPoolLine() {
+    const raw = safePoolLine().trim();
+    const match = raw.match(/^exposure pool:\s+(.+?) of soft (\$[\d,.]+) \/ hard (\$[\d,.]+).*·\s*(FULL|OPEN)/i);
+    if (!match) return `Entry pool: ${raw.replace(/^exposure pool:\s*/i, "")}`;
+    const [, exposure, soft, hard, state] = match;
+    return state.toUpperCase() === "FULL"
+      ? `Entry pool: CLOSED — ${exposure} / ${soft} soft (hard ${hard})`
+      : `Entry pool: OPEN — ${exposure} / ${soft} soft (hard ${hard})`;
+  }
+
+  function sourceSummary(per) {
+    const counts = new Map();
+    for (const entry of per) {
+      const source = entry.markUnavailable ? "PENDING" : String(entry.entryBrakePnlSource ?? "UNAVAILABLE");
+      counts.set(source, (counts.get(source) ?? 0) + 1);
+    }
+    const label = (source) => source === "BINANCE_REST_MARK" ? "REST" :
+      source === "BINANCE_TRADE_MARK" ? "trade" :
+        source === "BROKER_FLAT" ? "flat" :
+          source === "PENDING" ? "pending" : "unavailable";
+    const summary = [...counts.entries()].map(([source, count]) => `${count} ${label(source)}`).join(" · ");
+    return summary || "unavailable";
+  }
+
+  function nextProtectionLine(snapshot) {
+    const openLoss = Math.max(0, -Number(snapshot.totalUnrealisedUsd ?? snapshot.unrealisedUsd ?? 0));
+    const tiers = Array.isArray(snapshot.cutTiers) ? snapshot.cutTiers : [];
+    const nextCut = tiers
+      .map((tier) => Number(tier?.thresholdUsd))
+      .filter((threshold) => Number.isFinite(threshold) && threshold > openLoss)
+      .sort((a, b) => a - b)[0] ?? null;
+    const flatten = Number(snapshot.fullFlattenUsd);
+    const cutText = nextCut === null ? "all cut tiers reached" : `first cut in ${money(nextCut - openLoss)}`;
+    const flattenText = Number.isFinite(flatten) ? `flatten in ${money(Math.max(0, flatten - openLoss))}` : "flatten unavailable";
+    return `Next protection: ${cutText} · ${flattenText}`;
+  }
+
+  function compactAttentionLines(snapshot, per) {
+    const lines = [];
+    const losses = per.filter((entry) => !entry.markUnavailable && Number(entry.unrealisedUsd) <= -Number(snapshot.entryBrakeUsd ?? Infinity));
+    for (const entry of losses) lines.push(`• ${entry.instrument}: ${money(entry.unrealisedUsd)} — loss brake active`);
+    const pending = per.filter((entry) => entry.markUnavailable).map((entry) => entry.instrument);
+    if (pending.length > 0) lines.push(`• Marks pending: ${pending.join(", ")} — entries blocked only on those books`);
+    const braked = Array.isArray(snapshot.brakedInstruments) ? snapshot.brakedInstruments : [];
+    const latchedEarlier = braked.filter((instrument) => !losses.some((entry) => entry.instrument === instrument));
+    if (latchedEarlier.length > 0) lines.push(`• ${latchedEarlier.length} earlier brake latch${latchedEarlier.length === 1 ? "" : "es"} — full list in /risk`);
+    return lines;
+  }
+
   function accountSummaryLines() {
     const snapshot = riskSupervisor?.getSnapshot?.() ?? null;
     if (!snapshot) return ["ACCOUNT RISK: supervisor snapshot unavailable"];
-    const lines = [
-      "ACCOUNT RISK",
-      `  instruments enabled: ${books.length} (${books.map((b) => b.instrument).join(", ")})`,
-      `  combined day P&L: ${money(snapshot.dayPnlUsd)}`,
-      `  combined exposure: ${money(snapshot.exposureUsd)}`,
-      ...(typeof exposurePoolLine === "function" ? [safePoolLine()] : []),
-      `  daily loss limit: ${money(-Math.abs(snapshot.dailyLossLimitUsd ?? 1500))}   margin: ${money(snapshot.marginToLimitUsd)}`,
-      formatRiskLadderLine(snapshot)
-    ];
-    const braked = Array.isArray(snapshot.brakedInstruments) ? snapshot.brakedInstruments : [];
-    lines.push(`  braked today: ${braked.length === 0 ? "none" : braked.join(", ")}`);
-
     const per = Array.isArray(snapshot.perInstrument) ? snapshot.perInstrument : [];
+    const data = typeof getRiskDataStatus === "function" ? getRiskDataStatus() : null;
+    const poolClosed = /\bFULL\b/i.test(safePoolLine());
     const unread = per.filter((entry) => entry.readFailed === true).map((entry) => entry.instrument);
+    const attention = compactAttentionLines(snapshot, per);
+    const lines = [
+      `ACCOUNT RISK — ${snapshot.flattenedToday ? "ACCOUNT FLATTENED" : poolClosed ? "ENTRIES CLOSED" : "OPERATING NORMALLY"}`,
+      snapshot.flattenedToday ? "Reason: account flatten latched through rollover" : poolClosed ? "Reason: exposure pool full" : "Reason: no account-wide entry block",
+      "",
+      `Day: ${money(snapshot.dayPnlUsd)}  •  Open: ${money(snapshot.totalUnrealisedUsd ?? snapshot.unrealisedUsd)}  •  Exposure: ${money(snapshot.exposureUsd)}  •  Loss room: ${money(snapshot.marginToLimitUsd)}`,
+      compactPoolLine(),
+      `Limits: brake ${money(-Math.abs(snapshot.entryBrakeUsd ?? 0))}/book · cuts ${(Array.isArray(snapshot.cutTiers) ? snapshot.cutTiers : []).slice().sort((a, b) => a.thresholdUsd - b.thresholdUsd).map((tier) => `${Math.round(tier.fraction * 100)}% at ${money(-tier.thresholdUsd)}`).join(", ")} · flatten ${money(-Math.abs(snapshot.fullFlattenUsd ?? 0))}`,
+      "",
+      `Data: ${data?.brokerHealthy === true ? `DXtrade fresh ${Math.ceil(Number(data.brokerAgeMs ?? 0) / 1000)}s` : "DXtrade unavailable"} · marks ${sourceSummary(per)}`,
+      `Open positions: ${Number.isFinite(data?.openBooks) ? `${data.openBooks} books · ${data.ticketCount} tickets` : "unavailable"}`,
+      nextProtectionLine(snapshot),
+      `Account day: ${snapshot.dayKey ?? "not evaluated"} · reset 22:00 UTC · cuts today: ${Number(snapshot.cutsToday ?? 0)}`
+    ];
     const marksUnavailable = per.filter((entry) => entry.markUnavailable === true).map((entry) => entry.instrument);
+    lines.push("", "Attention");
     if (unread.length > 0) {
-      lines.push(`  *** RISK DATA UNREADABLE on ${unread.length}/${per.length}: ${unread.join(", ")} ***`);
-      lines.push("  Combined figures above are NOT reliable. The ladder cannot act on an unread book.");
-    } else if (per.length > 0) {
-      lines.push(`  risk reads: ${per.length}/${per.length} OK`);
-      if (marksUnavailable.length > 0) {
-        lines.push(`  market marks pending: ${marksUnavailable.join(", ")} · entries blocked only on those books`);
-        lines.push("  DXtrade account figures and account-wide protection remain active.");
-      }
-      lines.push(`  entry-brake P&L: ${per.map((entry) => `${entry.instrument} ${entry.markUnavailable ? "mark unavailable" : `${money(entry.unrealisedUsd)} (${entry.entryBrakePnlSource})`}`).join(" · ")}`);
+      lines.push(`• Broker risk data unread: ${unread.join(", ")}`);
+    } else if (attention.length > 0) {
+      lines.push(...attention);
+    } else {
+      lines.push("• None — all books readable and no current loss brake");
     }
-    lines.push(`  supervisor day: ${snapshot.dayKey ?? "not yet evaluated (no price tick processed since start)"}`);
-
-    if (typeof brokerAccountLine === "function") {
-      const raw = brokerAccountLine();
-      if (raw) lines.push(raw);
-    }
-    if (snapshot.lastError) lines.push(`  supervisor note: ${snapshot.lastError}`);
+    if (marksUnavailable.length > 0 && unread.length === 0) lines.push("• Account-wide protection remains active while those marks refresh");
+    if (snapshot.lastError && unread.length > 0) lines.push(`• Supervisor: ${snapshot.lastError}`);
     if (snapshot.freshDataGrace) {
-      lines.push(`  D-064 broker-data outage: account snapshot unavailable for ${Math.ceil(snapshot.freshDataGrace.outageMs / 1000)}s; Telegram warning only, no D-064 entry block`);
+      lines.push(`• D-064 broker-data outage: ${Math.ceil(snapshot.freshDataGrace.outageMs / 1000)}s`);
     }
     const pendingHalt = haltWarnings?.snapshot ? haltWarnings.snapshot() : null;
     if (pendingHalt && typeof pendingHalt.then !== "function") {
-      lines.push(`  pending owner-warning halt: ${pendingHalt.reasonCode} · warning ${pendingHalt.warningNumber}/5 · eligible ${pendingHalt.haltAt}`);
+      lines.push(`• Pending owner-warning halt: ${pendingHalt.reasonCode} · warning ${pendingHalt.warningNumber}/5`);
     }
     if (snapshot.flattenedToday === true) {
-      lines.push("  *** ACCOUNT FLATTENED TODAY - all entries blocked until 22:00 UTC rollover ***");
+      lines.push("• All entries blocked until 22:00 UTC rollover");
     }
     const harvestUsd = Number(snapshot.sessionHarvestUsd);
     if (snapshot.sessionHarvestEnabled === true && Number.isFinite(harvestUsd)) {
       const harvest = snapshot.harvest ?? { status: snapshot.harvestedToday === true ? "CONFIRMED" : "READY" };
       const exits = snapshot.trancheExitsPaused === true ? "OFF" : "ON";
-      lines.push(`  harvest: +${harvestUsd.toFixed(2)} · ${harvest.status} · tranche exits ${exits}`);
+      lines.push("", `Harvest: ${harvest.status} · target +${harvestUsd.toFixed(2)} · tranche exits ${exits}`);
       const rolloverWaitMs = Number(snapshot.rolloverHarvestDelayRemainingMs);
       if (Number.isFinite(rolloverWaitMs) && rolloverWaitMs > 0) {
-        lines.push(`  D-068 settlement wait: ${Math.ceil(rolloverWaitMs / 60_000)}m remaining; new entries and ordinary exits resume after the configured ${snapshot.rolloverHarvestDelayMinutes}-minute post-rollover window`);
+        lines.push(`Settlement wait: ${Math.ceil(rolloverWaitMs / 60_000)}m remaining`);
       }
-      if (Number.isFinite(Number(harvest.triggerPnlUsd))) lines.push(`  harvest trigger P&L: ${money(Number(harvest.triggerPnlUsd))}`);
-      if (harvest.confirmedAt) lines.push(`  harvest confirmed: ${harvest.confirmedAt}`);
-      if (harvest.haltReason) lines.push(`  harvest halt: ${harvest.haltReason}`);
-    } else {
-      lines.push("  harvest: OFF");
-    }
-    if (Number.isFinite(snapshot.cutsToday) && snapshot.cutsToday > 0) {
-      lines.push(`  partial cuts today: ${snapshot.cutsToday}`);
+      if (Number.isFinite(Number(harvest.triggerPnlUsd)) && Number(harvest.triggerPnlUsd) !== 0) lines.push(`Trigger P&L: ${money(Number(harvest.triggerPnlUsd))}`);
+      if (harvest.haltReason) lines.push(`Harvest halt: ${harvest.haltReason}`);
     }
     return lines;
+  }
+
+  function riskDetailText(arg) {
+    const snapshot = riskSupervisor?.getSnapshot?.() ?? null;
+    if (!snapshot) return "RISK DETAIL: supervisor snapshot unavailable";
+    const target = normaliseInstrument(arg);
+    const per = (Array.isArray(snapshot.perInstrument) ? snapshot.perInstrument : [])
+      .filter((entry) => target === null || entry.instrument === target);
+    if (target !== null && per.length === 0) return `Unknown instrument "${arg}".`;
+    const braked = new Set(Array.isArray(snapshot.brakedInstruments) ? snapshot.brakedInstruments : []);
+    const rows = per.map((entry) => {
+      const mark = entry.markUnavailable ? "MARK PENDING" : String(entry.entryBrakePnlSource ?? "unavailable").replace("BINANCE_", "").replace("_MARK", "");
+      const brake = braked.has(entry.instrument)
+        ? Number(entry.unrealisedUsd) <= -Number(snapshot.entryBrakeUsd) ? "BRAKE: LOSS" : "BRAKE: LATCHED"
+        : entry.entryBlockedForMark ? "ENTRY BLOCK: MARK" : "READY";
+      return `${entry.instrument.padEnd(9)} P&L ${entry.markUnavailable ? "unavailable" : money(entry.unrealisedUsd).padStart(8)} · exposure ${money(entry.exposureUsd).padStart(8)} · ${brake} · ${mark}`;
+    });
+    return [
+      "RISK DETAIL",
+      `Account day: ${snapshot.dayKey ?? "not evaluated"} · open P&L: ${money(snapshot.totalUnrealisedUsd ?? snapshot.unrealisedUsd)}`,
+      `Entry brakes: ${braked.size === 0 ? "none" : `${braked.size} active`}`,
+      "",
+      ...rows,
+      "",
+      "Brake: LOSS means current ticket P&L is at or below the threshold. LATCHED means the daily brake was already set; it clears at rollover."
+    ].join("\n");
   }
 
   return Object.freeze({
@@ -272,10 +338,12 @@ export function createMultiInstrumentOwnerService({
     inspectBooks,
 
     async statusText(arg) {
-      const [per, rows] = await Promise.all([fanOut("statusText", arg), inspectBooks()]);
+      if (normaliseInstrument(arg) !== null) return fanOut("statusText", arg);
+      const rows = await inspectBooks();
       const recovery = virtualInventoryRecoveryPlan(rows);
-      return `${accountSummaryLines().join("\n")}${recovery ? `\n\n${recovery}` : ""}\n\n${per}`;
+      return `${accountSummaryLines().join("\n")}${recovery ? `\n\n${recovery}` : ""}`;
     },
+    riskText: riskDetailText,
     async healthText(arg) {
       // The execution probe goes FIRST and on its own line. On 2026-09-19
       // /status and /health both reported 5/5 OK while every protective cut

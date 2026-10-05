@@ -830,6 +830,23 @@ async function flattenEveryBook() {
 const service = createMultiInstrumentOwnerService({
   // Exposure pool usage and state, directly under "combined exposure" in /status.
   exposurePoolLine: () => formatExposurePoolLine({ gate: exposureGate, readExposure: readAccountExposure }),
+  getRiskDataStatus: () => {
+    const accountStatus = accountMonitor.getSnapshot();
+    const booksWithTickets = enabledInstruments.reduce((count, cfg) => {
+      const tickets = accountStatus.snapshot?.signedNetByInstrument?.[cfg.instrument]?.tickets;
+      return count + (Array.isArray(tickets) && tickets.length > 0 ? 1 : 0);
+    }, 0);
+    const ticketCount = enabledInstruments.reduce((count, cfg) => {
+      const tickets = accountStatus.snapshot?.signedNetByInstrument?.[cfg.instrument]?.tickets;
+      return count + (Array.isArray(tickets) ? tickets.length : 0);
+    }, 0);
+    return Object.freeze({
+      brokerHealthy: accountStatus?.healthy === true,
+      brokerAgeMs: Number(accountStatus?.ageMs),
+      openBooks: booksWithTickets,
+      ticketCount
+    });
+  },
   // Surfaces the raw /metrics figures in /status. equity - balance is the account's
   // open P&L; if that gap is non-zero while combined day P&L reads $0.00, the ladder
   // is not reading the broker and the numbers above it cannot be trusted.

@@ -20,6 +20,10 @@ test("home panel lists every live book and account reads", () => {
   }
   assert.ok(!labels.includes("ZEC"));
   assert.ok(labels.includes("All Status"));
+  assert.ok(labels.includes("Risk Detail"));
+  const statusRow = rows.findIndex((row) => row.some((button) => button.text === "All Status"));
+  const riskRow = rows.findIndex((row) => row.some((button) => button.text === "Risk Detail"));
+  assert.equal(riskRow, statusRow + 1, "risk detail stays directly below status");
   assert.ok(labels.includes("Pause Bot"));
   assert.equal(rows.find((row) => row[0]?.callback_data === "resume"), undefined, "home must not resume without a book");
 });
@@ -86,7 +90,7 @@ test("instrument callback maps to the live book name", () => {
 });
 
 test("every slash command still registered after adding buttons", () => {
-  for (const cmd of ["status", "health", "levels", "rings", "dxpreflight", "solcanary", "kill", "resume",
+  for (const cmd of ["status", "risk", "health", "levels", "rings", "dxpreflight", "solcanary", "kill", "resume",
                      "confirmresume", "reconcile", "confirmreconcile", "rematch", "confirmrematch",
                      "flat", "code", "devstatus", "devreset", "devexit", "whoami"]) {
     assert.match(SOURCE, new RegExp(`\\\\/${cmd}\\b`), `slash command /${cmd} disappeared`);
