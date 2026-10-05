@@ -5,7 +5,7 @@
  * always name one instrument. Confirm* commands are never buttons.
  */
 
-export const DEFAULT_BOOKS = Object.freeze(["SOL", "DOGE", "INJ", "AAVE", "AVAX", "PEPE", "RUNE", "SUI", "HBAR", "FLOKI", "CHZ", "1INCH", "ATOM", "ALGO", "BNB", "CAKE"]);
+export const DEFAULT_BOOKS = Object.freeze(["SOL", "DOGE", "ZEC", "INJ", "AAVE", "AVAX", "PEPE", "RUNE", "SUI", "HBAR", "FLOKI", "CHZ", "1INCH", "ATOM", "ALGO", "BNB", "CAKE"]);
 
 export const CONFIRM_ONLY_COMMANDS = Object.freeze([
   "confirmresume",
@@ -81,6 +81,8 @@ export function buildHomeKeyboard(books = DEFAULT_BOOKS) {
     header("\u2014 Account \u2014"),
     pair(btn("All Status", "status")),
     pair(btn("Risk Detail", "risk"), btn("All Health", "health")),
+    pair(btn("Anchors", "anchors"), btn("Anchor History", "anchorhistory")),
+    pair(btn("Anchor Stats", "anchorstats")),
     pair(btn("All Rings", "rings"), btn("All Levels", "levels")),
     pair(btn("Exit Targets", "targets")),
     pair(btn("Pause Bot", "kill"), btn("Re-run Halt", "rerun")),
@@ -100,6 +102,8 @@ export function buildBookKeyboard(symbol) {
     header(`\u2014 ${tag}/USD \u2014`),
     pair(btn("Status", `status:${tag}`), btn("Health", `health:${tag}`)),
     pair(btn("Rings", `rings:${tag}`), btn("Levels", `levels:${tag}`)),
+    pair(btn("Anchor", `anchor:${tag}`), btn("Anchor History", `anchorhistory:${tag}`)),
+    pair(btn("Anchor Stats", `anchorstats:${tag}`)),
     pair(btn("Exit Targets", `targets:${tag}`)),
     pair(btn("Request Resume", `resume:${tag}`), btn("Request Reconcile", `reconcile:${tag}`)),
     pair(btn("Request Rematch", `rematch:${tag}`), btn("Flatten Info", `flat:${tag}`)),

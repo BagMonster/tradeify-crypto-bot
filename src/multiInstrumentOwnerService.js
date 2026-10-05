@@ -378,6 +378,23 @@ export function createMultiInstrumentOwnerService({
       return `${accountSummaryLines().join("\n")}${recovery ? `\n\n${recovery}` : ""}`;
     },
     riskText: riskDetailText,
+    async anchorsText() {
+      const rows = [];
+      for (const book of books) {
+        try {
+          rows.push(await book.service.anchorSummaryLine());
+        } catch (error) {
+          rows.push(`${book.instrument}  anchor unavailable (${error?.message ?? "read failed"})`);
+        }
+      }
+      return ["ANCHORS", ...rows].join("\n");
+    },
+    anchorText: async (arg) => {
+      if (normaliseInstrument(arg) === null) return "Specify a coin: /anchor <COIN>";
+      return fanOut("anchorText", arg);
+    },
+    anchorHistoryText: (arg) => fanOut("anchorHistoryText", arg),
+    anchorStatsText: (arg) => fanOut("anchorStatsText", arg),
     async healthText(arg) {
       // The execution probe goes FIRST and on its own line. On 2026-09-19
       // /status and /health both reported 5/5 OK while every protective cut

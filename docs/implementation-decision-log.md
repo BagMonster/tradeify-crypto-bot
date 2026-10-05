@@ -4,6 +4,20 @@ This log records approved and proposed changes to the production bot.
 
 > **Current production:** Five ring grids from `config/instruments.json` under **D-060** + **D-062** (INJ in place of ZEC). One-sided per instrument with position-linked exits under **D-059**. Live continuity: `docs/6th_AUTHORITATIVE_PROJECT_STATE_Tradeify_Crypto_Bot.md`. **D-063 (DRAFT)** adds shallow cut tiers, a $10,000 cap, and a −$600 brake.
 
+## D-069 — Ring anchor recenter after a confirmed flat account
+
+**Status:** Owner-approved for live validation on 2026-10-05; implementation awaiting PR review and merge.
+
+Each grid tracks literal Binance trade extremes beyond its current outer boundary.
+After the whole account has been flat, healthy, virtual-lot-free, and order-free
+through a nine-second entry hold, the first outer ring is placed exactly at the
+recorded extreme by changing a persistent anchor multiplier. Shifts stack up or
+down and never move an open lot. The PR also adds `/anchors`, `/anchor`,
+`/anchorhistory`, and `/anchorstats`. No geometry, sizing, cap, exposure pool,
+risk-ladder, harvest, or flatten rule changes.
+
+Full decision: `docs/decisions/D-069-ring-anchor-recenter.md`.
+
 ## D-068 — $33 proportional rollover harvest
 
 **Status:** Approved by owner on 2026-09-26; implementation pending review, merge, and Railway deployment.

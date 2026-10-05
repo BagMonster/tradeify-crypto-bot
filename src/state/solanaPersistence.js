@@ -1,6 +1,7 @@
 import pg from "pg";
 import { createPostgresSolanaGridStateStore } from "./solanaGridState.js";
 import { createPostgresRingGridStateStore } from "./ringGridState.js";
+import { normalizeAnchorShiftState } from "../strategies/anchorShift.js";
 
 const { Pool } = pg;
 
@@ -70,6 +71,8 @@ CHECK (kind IN (
   'CUT_TIER_INERT',
   'EXPOSURE_GATE_CLOSED',
   'EXPOSURE_GATE_REOPENED',
+  'ANCHOR_EXCURSION_STARTED',
+  'ANCHOR_SHIFT_CONFIRMED',
   'DUST_CLEANUP_SUMMARY'
 ))
 `;
@@ -84,6 +87,33 @@ CREATE TABLE IF NOT EXISTS sol_risk_ladder_state (
   halted_for_day BOOLEAN NOT NULL DEFAULT FALSE,
   worst_drawdown_usd NUMERIC(18,6) NOT NULL DEFAULT 0 CHECK (worst_drawdown_usd <= 0),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`;
+
+const ANCHOR_SHIFT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS ring_anchor_shift_state (
+  instrument TEXT PRIMARY KEY,
+  multiplier NUMERIC(30,16) NOT NULL CHECK (multiplier > 0),
+  upper_extreme NUMERIC(30,12),
+  lower_extreme NUMERIC(30,12),
+  upper_started_at TIMESTAMPTZ,
+  lower_started_at TIMESTAMPTZ,
+  upper_boundary_at_extreme NUMERIC(30,12),
+  lower_boundary_at_extreme NUMERIC(30,12),
+  last_shift_at TIMESTAMPTZ,
+  post_shift_high NUMERIC(30,12),
+  post_shift_low NUMERIC(30,12),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS ring_anchor_shift_history (
+  id BIGSERIAL PRIMARY KEY,
+  shifted_at TIMESTAMPTZ NOT NULL,
+  instrument TEXT NOT NULL,
+  side TEXT NOT NULL CHECK (side IN ('UPPER','LOWER')),
+  extreme NUMERIC(30,12) NOT NULL,
+  ma_now NUMERIC(30,12) NOT NULL,
+  old_multiplier NUMERIC(30,16) NOT NULL,
+  new_multiplier NUMERIC(30,16) NOT NULL
 )`;
 
 function text(name, value, max = 128) {
@@ -161,6 +191,23 @@ function normalizeRiskLadder(row) {
   });
 }
 
+function anchorRecord(row) {
+  if (!row) return null;
+  const state = normalizeAnchorShiftState({
+    multiplier: Number(row.multiplier),
+    upperExtreme: row.upper_extreme == null ? null : Number(row.upper_extreme),
+    lowerExtreme: row.lower_extreme == null ? null : Number(row.lower_extreme),
+    upperStartedAt: row.upper_started_at == null ? null : new Date(row.upper_started_at).toISOString(),
+    lowerStartedAt: row.lower_started_at == null ? null : new Date(row.lower_started_at).toISOString(),
+    upperBoundaryAtExtreme: row.upper_boundary_at_extreme == null ? null : Number(row.upper_boundary_at_extreme),
+    lowerBoundaryAtExtreme: row.lower_boundary_at_extreme == null ? null : Number(row.lower_boundary_at_extreme),
+    lastShiftAt: row.last_shift_at == null ? null : new Date(row.last_shift_at).toISOString(),
+    postShiftHigh: row.post_shift_high == null ? null : Number(row.post_shift_high),
+    postShiftLow: row.post_shift_low == null ? null : Number(row.post_shift_low)
+  });
+  return Object.freeze({ ...state, createdAt: new Date(row.created_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString() });
+}
+
 export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) {
   const pool = new PoolClass({
     connectionString: environment.databaseUrl,
@@ -183,6 +230,89 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     await query(TELEGRAM_NOTIFICATION_SCHEMA);
     await query(TELEGRAM_KIND_CONSTRAINT);
     await query(RISK_LADDER_SCHEMA);
+    await query(ANCHOR_SHIFT_SCHEMA);
+  }
+
+  async function loadAnchorState(instrument) {
+    const market = text("instrument", instrument, 64);
+    const result = await query("SELECT * FROM ring_anchor_shift_state WHERE instrument=$1", [market]);
+    if (result.rowCount === 0) return null;
+    if (result.rowCount !== 1) throw new Error("anchor state lookup returned an invalid row count");
+    return anchorRecord(result.rows[0]);
+  }
+
+  async function saveAnchorState(instrument, input) {
+    const market = text("instrument", instrument, 64);
+    const state = normalizeAnchorShiftState(input);
+    const result = await query(
+      `INSERT INTO ring_anchor_shift_state (
+        instrument, multiplier, upper_extreme, lower_extreme, upper_started_at,
+        lower_started_at, upper_boundary_at_extreme, lower_boundary_at_extreme,
+        last_shift_at, post_shift_high, post_shift_low, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+      ON CONFLICT (instrument) DO UPDATE SET
+        multiplier=EXCLUDED.multiplier, upper_extreme=EXCLUDED.upper_extreme,
+        lower_extreme=EXCLUDED.lower_extreme, upper_started_at=EXCLUDED.upper_started_at,
+        lower_started_at=EXCLUDED.lower_started_at, upper_boundary_at_extreme=EXCLUDED.upper_boundary_at_extreme,
+        lower_boundary_at_extreme=EXCLUDED.lower_boundary_at_extreme, last_shift_at=EXCLUDED.last_shift_at,
+        post_shift_high=EXCLUDED.post_shift_high, post_shift_low=EXCLUDED.post_shift_low, updated_at=NOW()
+      RETURNING *`,
+      [market, state.multiplier, state.upperExtreme, state.lowerExtreme, state.upperStartedAt, state.lowerStartedAt, state.upperBoundaryAtExtreme, state.lowerBoundaryAtExtreme, state.lastShiftAt, state.postShiftHigh, state.postShiftLow]
+    );
+    if (result.rowCount !== 1) throw new Error("anchor state save failed");
+    return anchorRecord(result.rows[0]);
+  }
+
+  async function appendAnchorShift(input) {
+    const instrument = text("instrument", input?.instrument, 64);
+    const side = text("side", input?.side, 8).toUpperCase();
+    if (side !== "UPPER" && side !== "LOWER") throw new TypeError("anchor shift side is invalid");
+    const shiftedAt = new Date(input?.shiftedAt);
+    if (!Number.isFinite(shiftedAt.getTime())) throw new TypeError("shiftedAt is invalid");
+    const values = [positive("extreme", input?.extreme), positive("maNow", input?.maNow), positive("oldMultiplier", input?.oldMultiplier), positive("newMultiplier", input?.newMultiplier)];
+    const result = await query(
+      `INSERT INTO ring_anchor_shift_history (shifted_at, instrument, side, extreme, ma_now, old_multiplier, new_multiplier)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [shiftedAt, instrument, side, ...values]
+    );
+    if (result.rowCount !== 1) throw new Error("anchor shift history append failed");
+    const row = result.rows[0];
+    return Object.freeze({ shiftedAt: new Date(row.shifted_at).toISOString(), instrument: row.instrument, side: row.side, extreme: Number(row.extreme), maNow: Number(row.ma_now), oldMultiplier: Number(row.old_multiplier), newMultiplier: Number(row.new_multiplier) });
+  }
+
+  async function listAnchorShiftHistory(instrument = null, limit = 10) {
+    const size = Math.max(1, Math.min(10, Number.isInteger(limit) ? limit : 10));
+    const result = instrument == null
+      ? await query("SELECT * FROM ring_anchor_shift_history ORDER BY shifted_at DESC, id DESC LIMIT $1", [size])
+      : await query("SELECT * FROM ring_anchor_shift_history WHERE instrument=$1 ORDER BY shifted_at DESC, id DESC LIMIT $2", [text("instrument", instrument, 64), size]);
+    return Object.freeze(result.rows.map((row) => Object.freeze({ shiftedAt: new Date(row.shifted_at).toISOString(), instrument: row.instrument, side: row.side, extreme: Number(row.extreme), maNow: Number(row.ma_now), oldMultiplier: Number(row.old_multiplier), newMultiplier: Number(row.new_multiplier) })));
+  }
+
+  async function countAnchorShiftHistory(instrument) {
+    const result = await query("SELECT COUNT(*) AS count FROM ring_anchor_shift_history WHERE instrument=$1", [text("instrument", instrument, 64)]);
+    if (result.rowCount !== 1) throw new Error("anchor shift history count failed");
+    return Number(result.rows[0].count);
+  }
+
+  async function listFilledOrdersSince(instrument, since) {
+    const result = await query(
+      `SELECT * FROM solana_execution_orders WHERE instrument=$1 AND status='FILLED'
+        AND filled_at >= $2 ORDER BY filled_at ASC`,
+      [text("instrument", instrument, 64), new Date(since)]
+    );
+    return Object.freeze(result.rows.map(normalizeOrder));
+  }
+
+  function createAnchorStore(instrument) {
+    const market = text("instrument", instrument, 64);
+    return Object.freeze({
+      load: () => loadAnchorState(market),
+      save: (state) => saveAnchorState(market, state),
+      appendHistory: (shift) => appendAnchorShift({ ...shift, instrument: market }),
+      history: (limit = 10) => listAnchorShiftHistory(market, limit),
+      count: () => countAnchorShiftHistory(market),
+      ordersSince: (since) => listFilledOrdersSince(market, since)
+    });
   }
 
   async function getOrder(orderCode) {
@@ -396,6 +526,8 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
       "CUT_TIER_INERT",
       "EXPOSURE_GATE_CLOSED",
       "EXPOSURE_GATE_REOPENED",
+      "ANCHOR_EXCURSION_STARTED",
+      "ANCHOR_SHIFT_CONFIRMED",
       "DUST_CLEANUP_SUMMARY"
     ];
     if (!allowed.includes(kind)) throw new TypeError("notification kind is invalid");
@@ -455,6 +587,13 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     init,
     state,
     createStateStore,
+    createAnchorStore,
+    loadAnchorState,
+    saveAnchorState,
+    appendAnchorShift,
+    listAnchorShiftHistory,
+    countAnchorShiftHistory,
+    listFilledOrdersSince,
     getOrder,
     getUniqueFilledEntryOrder,
     claimOrder,
