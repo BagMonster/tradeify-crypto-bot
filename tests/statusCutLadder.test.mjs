@@ -97,3 +97,28 @@ test("risk lists the highest-exposure books first with concise mark labels", () 
   assert.match(risk, /SOL\s+P&L.*MARK: BINANCE STREAM/);
   assert.doesNotMatch(risk, /RUNE\/USD/);
 });
+
+test("status shows both pool-closed harvest countdowns", async () => {
+  const service = createMultiInstrumentOwnerService({
+    instrumentConfigs: [{ enabled: true, instrument: "SOL/USD", orderPrefix: "SOL" }],
+    buildOwnerService: () => ({ async inspectForRerun() { return { ok: true, match: true, virtualNet: 0, brokerNet: 0, openLots: 0 }; } }),
+    riskSupervisor: {
+      getSnapshot: () => ({
+        dayKey: "2026-10-05", dayPnlUsd: -1, totalUnrealisedUsd: -1, exposureUsd: 3001,
+        marginToLimitUsd: 299, dailyLossLimitUsd: 300, entryBrakeUsd: 33,
+        cutTiers: [], fullFlattenUsd: 250, brakedInstruments: [], perInstrument: [],
+        sessionHarvestEnabled: true, sessionHarvestUsd: 33, harvestedToday: false,
+        poolClosedHarvest: {
+          ageMs: 2 * 60 * 60 * 1000,
+          firstAfterMs: 24 * 60 * 60 * 1000,
+          secondAfterMs: 36 * 60 * 60 * 1000,
+          firstTargetUsd: 16.5,
+          minimumTargetUsd: 8.25
+        }
+      })
+    },
+    exposurePoolLine: () => "exposure pool: $3,001.00 of soft $3,000.00 / hard $3,500.00 · FULL, new entries refused"
+  });
+  const status = await service.statusText();
+  assert.match(status, /Pool harvest: −50% \(\$16\.50\) in 22h 0m · −75% \(\$8\.25\) in 34h 0m/);
+});

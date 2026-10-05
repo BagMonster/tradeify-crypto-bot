@@ -238,6 +238,28 @@ export function createMultiInstrumentOwnerService({
     return `Next protection: ${cutText} · ${flattenText}`;
   }
 
+  function remainingDuration(ms) {
+    const minutes = Math.max(0, Math.ceil(Number(ms) / 60_000));
+    const hours = Math.floor(minutes / 60);
+    const remainder = minutes % 60;
+    return hours > 0 ? `${hours}h ${remainder}m` : `${remainder}m`;
+  }
+
+  function poolClosedHarvestLine(snapshot) {
+    const schedule = snapshot.poolClosedHarvest;
+    if (!schedule || !Number.isFinite(Number(schedule.ageMs))) return null;
+    const firstRemaining = Math.max(0, Number(schedule.firstAfterMs) - Number(schedule.ageMs));
+    const secondRemaining = Math.max(0, Number(schedule.secondAfterMs) - Number(schedule.ageMs));
+    const first = Number(schedule.firstTargetUsd);
+    const second = Number(schedule.minimumTargetUsd);
+    if (!Number.isFinite(first) || !Number.isFinite(second)) return null;
+    if (secondRemaining === 0) return `Pool harvest: −75% ACTIVE (${money(second)})`;
+    const firstText = firstRemaining === 0
+      ? `−50% ACTIVE (${money(first)})`
+      : `−50% (${money(first)}) in ${remainingDuration(firstRemaining)}`;
+    return `Pool harvest: ${firstText} · −75% (${money(second)}) in ${remainingDuration(secondRemaining)}`;
+  }
+
   function compactAttentionLines(snapshot, per) {
     const lines = [];
     const losses = per.filter((entry) => !entry.markUnavailable && Number(entry.unrealisedUsd) <= -Number(snapshot.entryBrakeUsd ?? Infinity));
@@ -294,6 +316,8 @@ export function createMultiInstrumentOwnerService({
       const harvest = snapshot.harvest ?? { status: snapshot.harvestedToday === true ? "CONFIRMED" : "READY" };
       const exits = snapshot.trancheExitsPaused === true ? "OFF" : "ON";
       lines.push("", `Harvest: ${harvest.status} · target +${harvestUsd.toFixed(2)} · tranche exits ${exits}`);
+      const poolHarvest = poolClosedHarvestLine(snapshot);
+      if (poolHarvest) lines.push(poolHarvest);
       const rolloverWaitMs = Number(snapshot.rolloverHarvestDelayRemainingMs);
       if (Number.isFinite(rolloverWaitMs) && rolloverWaitMs > 0) {
         lines.push(`Settlement wait: ${Math.ceil(rolloverWaitMs / 60_000)}m remaining`);

@@ -228,23 +228,34 @@ export function createRiskSupervisor({
     : DEFAULT_HARVEST_FRESH_DATA_GRACE_MS;
   const exposurePoolHarvest = config.exposurePoolHarvest ?? null;
 
-  function rolloverHarvestTarget() {
+  function poolClosedHarvestSchedule() {
     const policy = exposurePoolHarvest;
-    if (!policy || typeof getExposurePoolSnapshot !== "function") return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD" });
+    if (!policy || typeof getExposurePoolSnapshot !== "function") return null;
     let snapshot;
     try {
       snapshot = getExposurePoolSnapshot();
     } catch {
-      return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD" });
+      return null;
     }
     const sinceMs = Number(snapshot?.closedSinceMs);
-    if (snapshot?.closed !== true || !Number.isFinite(sinceMs)) return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD" });
+    if (snapshot?.closed !== true || !Number.isFinite(sinceMs)) return null;
     const ageMs = Math.max(0, now() - sinceMs);
-    const firstMs = Number(policy.firstAfterHours) * 60 * 60 * 1000;
-    const secondMs = Number(policy.secondAfterHours) * 60 * 60 * 1000;
-    if (ageMs >= secondMs) return Object.freeze({ thresholdUsd: fixed2(sessionHarvestThreshold * Number(policy.minimumFraction)), phase: "FULL_36H", ageMs });
-    if (ageMs >= firstMs) return Object.freeze({ thresholdUsd: fixed2(sessionHarvestThreshold * Number(policy.firstFraction)), phase: "FULL_24H", ageMs });
-    return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD", ageMs });
+    return Object.freeze({
+      closedSinceMs: sinceMs,
+      ageMs,
+      firstAfterMs: Number(policy.firstAfterHours) * 60 * 60 * 1000,
+      secondAfterMs: Number(policy.secondAfterHours) * 60 * 60 * 1000,
+      firstTargetUsd: fixed2(sessionHarvestThreshold * Number(policy.firstFraction)),
+      minimumTargetUsd: fixed2(sessionHarvestThreshold * Number(policy.minimumFraction))
+    });
+  }
+
+  function rolloverHarvestTarget() {
+    const schedule = poolClosedHarvestSchedule();
+    if (schedule === null) return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD" });
+    if (schedule.ageMs >= schedule.secondAfterMs) return Object.freeze({ thresholdUsd: schedule.minimumTargetUsd, phase: "FULL_36H", ageMs: schedule.ageMs });
+    if (schedule.ageMs >= schedule.firstAfterMs) return Object.freeze({ thresholdUsd: schedule.firstTargetUsd, phase: "FULL_24H", ageMs: schedule.ageMs });
+    return Object.freeze({ thresholdUsd: sessionHarvestThreshold, phase: "STANDARD", ageMs: schedule.ageMs });
   }
   if (sessionHarvestEnabled && (!harvestStore || typeof harvestStore.get !== "function" || typeof harvestStore.save !== "function")) {
     throw new TypeError("enabled session harvest requires a durable harvestStore");
@@ -1256,6 +1267,7 @@ export function createRiskSupervisor({
     const rolloverHarvestDelayRemainingMs = sessionHarvestEnabled && harvestState?.status === "READY" && dayKey !== null
       ? rolloverHarvestWaitRemainingMs(dayKey, rolloverHarvestDelayMs, now())
       : 0;
+    const poolClosedHarvest = poolClosedHarvestSchedule();
     return Object.freeze({
       dayKey,
       dayPnlUsd,
@@ -1276,6 +1288,7 @@ export function createRiskSupervisor({
       sessionHarvestFreshDataGraceMs: sessionHarvestEnabled ? sessionHarvestFreshDataGraceMs : null,
       rolloverHarvestDelayMinutes: sessionHarvestEnabled ? rolloverHarvestDelayMinutes : null,
       rolloverHarvestDelayRemainingMs,
+      poolClosedHarvest,
       harvestRetryRemainingMs: harvestRetryAtMs === null ? 0 : Math.max(0, harvestRetryAtMs - now()),
       freshDataGrace: unreadSinceMs === null
         ? null
