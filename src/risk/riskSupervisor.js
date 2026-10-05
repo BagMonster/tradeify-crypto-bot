@@ -1136,6 +1136,27 @@ export function createRiskSupervisor({
             consecutiveFailedCuts,
             allocations: statuses
           });
+          if (anyFilled) {
+            const books = results
+              .filter((entry) => entry.result?.status === "FILLED")
+              .map((entry) => Object.freeze({
+                instrument: entry.instrument,
+                ticketCount: Array.isArray(entry.result?.legs)
+                  ? entry.result.legs.filter((leg) => leg?.status === "FILLED").length
+                  : null
+              }));
+            notifications?.enqueue?.({
+              kind: "ACCOUNT_PROTECTIVE_CUT",
+              eventKey: `ACCOUNT-CUT:${incomingDayKey}:${cutStartedAtMs}:${cutsToday}`,
+              fraction: activeTier.fraction,
+              thresholdUsd: activeTier.thresholdUsd,
+              totalUnrealisedUsd,
+              combinedDayPnlUsd: combined,
+              exposureBeforeUsd: fixed2(readings.reduce((sum, reading) => sum + reading.exposureUsd, 0)),
+              cutNumber: cutsToday,
+              books
+            });
+          }
           return Object.freeze({
             action: anyFilled ? "CUT" : "CUT_FAILED",
             totalUnrealisedUsd,

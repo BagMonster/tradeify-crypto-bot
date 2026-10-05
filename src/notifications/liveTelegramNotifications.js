@@ -23,6 +23,7 @@ const KINDS = new Set([
   // work, but missing from this list, so every one was rejected before delivery.
   "PROTECTION_FAILED",
   "PROTECTION_RECOVERED",
+  "ACCOUNT_PROTECTIVE_CUT",
   "SESSION_ROTATION_FAILED",
   // Alerting build, 2026-09-20: blocked broker reads and an inert cut tier.
   "EXECUTION_BLOCKED",
@@ -626,6 +627,42 @@ function formatEvent(event) {
     if (combined !== null) lines.push(`Account-day P&L: ${signedMoney(combined)}`);
     if (unrealised !== null) lines.push(`Unrealised: ${signedMoney(unrealised)}`);
     lines.push("A protective cut has filled. Entry brakes return to their normal rules; check /status.");
+    return { kind, eventKey, message: lines.join("\n") };
+  }
+
+  if (kind === "ACCOUNT_PROTECTIVE_CUT") {
+    const fraction = positive("protective-cut fraction", event.fraction);
+    if (fraction > 1) throw new TypeError("protective-cut fraction cannot exceed one");
+    const threshold = positive("protective-cut threshold", event.thresholdUsd);
+    const openPnl = finite("protective-cut open P&L", event.totalUnrealisedUsd);
+    const dayPnl = optionalFinite(event.combinedDayPnlUsd);
+    const exposureBefore = optionalFinite(event.exposureBeforeUsd);
+    const cutNumber = optionalFinite(event.cutNumber);
+    const books = Array.isArray(event.books) ? event.books : [];
+    const affected = books
+      .map((book) => {
+        try {
+          const instrument = requiredInstrument(book?.instrument);
+          const tickets = optionalFinite(book?.ticketCount);
+          return tickets !== null && tickets > 0
+            ? `${instrument} (${Math.trunc(tickets)} ticket${Math.trunc(tickets) === 1 ? "" : "s"})`
+            : instrument;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .slice(0, 12);
+    const lines = [
+      `⚠️ ACCOUNT ${Math.round(fraction * 100)}% PROTECTIVE CUT CONFIRMED`,
+      `Open P&L at trigger: ${signedMoney(openPnl)}`,
+      `Tier: −${money(threshold)}`
+    ];
+    if (dayPnl !== null) lines.push(`Account-day P&L: ${signedMoney(dayPnl)}`);
+    if (exposureBefore !== null) lines.push(`Exposure before cut: ${money(exposureBefore)}`);
+    if (cutNumber !== null && cutNumber > 0) lines.push(`Protective cut number today: ${Math.trunc(cutNumber)}`);
+    if (affected.length > 0) lines.push(`Books reduced: ${affected.join(", ")}`);
+    lines.push("The entry pool will be re-evaluated from the next fresh DXtrade snapshot; a separate alert confirms if entries reopen.");
     return { kind, eventKey, message: lines.join("\n") };
   }
 
