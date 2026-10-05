@@ -482,9 +482,8 @@ const riskSupervisor = createRiskSupervisor({
     instrument: s.cfg.instrument,
     getRiskReading: () => instrumentTicketReading(s.cfg.instrument),
     getUnrealisedUsd: () => instrumentTicketRisk(s.cfg.instrument).unrealisedUsd,
-    // The entry-brake input is open ticket P&L, then latched durably for the
-    // remainder of the account day. DXtrade does not expose closed P&L by
-    // instrument through this account-monitor endpoint.
+    // The entry-brake input is live open ticket P&L. DXtrade does not expose
+    // closed P&L by instrument through this account-monitor endpoint.
     getDayPnlUsd: () => instrumentTicketRisk(s.cfg.instrument).unrealisedUsd,
     getEntryBrakePnlSource: () => instrumentTicketRisk(s.cfg.instrument).source,
     getExposureUsd: () => bookExposure(accountMetrics().snapshot, s.cfg.instrument),
@@ -507,10 +506,6 @@ const riskSupervisor = createRiskSupervisor({
   freshnessEpisodeStore: Object.freeze({
     get: () => database.getBrokerFreshnessEpisode(),
     save: (episode) => database.saveBrokerFreshnessEpisode(episode)
-  }),
-  entryBrakeStore: Object.freeze({
-    get: (dayKey) => database.getDailyEntryBrakeState(dayKey),
-    save: (state) => database.saveDailyEntryBrakeState(state)
   }),
   getCombinedDayPnlUsd: () => {
     const { openPl, dayClosedPl } = accountMetrics();
