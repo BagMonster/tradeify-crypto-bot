@@ -3,6 +3,7 @@ import { createDatabase } from "./src/database.js";
 import { createDevCompanionStore } from "./src/devCompanionStore.js";
 import { wrapCompanionWithChronicleControl } from "./src/devCompanionChronicleWiring.js";
 import { createBinanceLiveFeed } from "./src/market/binanceLiveFeed.js";
+import { createBinanceMarkCache } from "./src/market/binanceMarkCache.js";
 import { createBinanceDailyMaProvider } from "./src/market/binanceDailyMa.js";
 import { DxtradeExecutionClient } from "./src/execution/dxtradeExecutionClient.js";
 import { createPinnedDxtradeFetch } from "./src/execution/pinnedDxtradeFetch.js";
@@ -266,6 +267,7 @@ async function buildInstrumentStack(cfg) {
     pendingTrade: null,
     draining: false,
     lastTrade: null,
+    markCache: createBinanceMarkCache({ symbol: cfg.marketSymbol }),
     feedState: Object.freeze({ running: false, connected: false, stale: true }),
     persistedFeedStale: true,
     runtimeErrorLatched: false,
@@ -414,41 +416,71 @@ async function clearNonHarvestHalt(key) {
   return haltWarnings.clear(key);
 }
 
-// Broker notional when the broker supplies one; otherwise net units at this book's
-// own last traded price. Exposure is reported, never used to trigger a rung, so a
-// price that is a few seconds old is acceptable here.
+// Broker notional when the broker supplies one; otherwise net units at a live
+// mark, then the latest known mark, then the ticket entry price.  Unknown
+// exposure is never allowed to look flat merely because Railway restarted before
+// a first market message arrived.
 function bookExposure(snapshot, instrument) {
   const brokerNotional = Number(snapshot.signedNetByInstrument?.[instrument]?.notional ?? 0);
   if (Number.isFinite(brokerNotional) && brokerNotional > 0) return Math.abs(brokerNotional);
-  const stack = stackByInstrument.get(instrument);
-  const price = Number(stack?.lastTrade?.price);
+  const book = snapshot.signedNetByInstrument?.[instrument];
   const units = bookNetUnits(snapshot, instrument);
-  if (!Number.isFinite(price) || price <= 0 || units === 0) return 0;
-  return units * price;
+  if (units === 0) return 0;
+  const stack = stackByInstrument.get(instrument);
+  const cached = stack?.markCache?.read({ connected: stack.feedState?.connected === true, tradeQuiet: stack.feedState?.tradeQuiet === true, lastTrade: stack.lastTrade });
+  const livePrice = Number(cached?.price ?? stack?.lastTrade?.price);
+  if (Number.isFinite(livePrice) && livePrice > 0) return units * livePrice;
+  const tickets = Array.isArray(book?.tickets) ? book.tickets : [];
+  const entryNotional = tickets.reduce((sum, ticket) => sum + Math.abs(Number(ticket.quantity) || 0) * Math.max(0, Number(ticket.entryPrice) || 0), 0);
+  if (entryNotional > 0) return entryNotional;
+  return 0;
 }
 
-function instrumentTicketRisk(instrument) {
+function instrumentTicketReading(instrument) {
   const { snapshot } = accountMetrics();
   const book = snapshot.signedNetByInstrument?.[instrument];
   if (!book) throw new Error(`${instrument} ticket book is unavailable`);
   const tickets = Array.isArray(book.tickets) ? book.tickets : null;
   if (tickets === null) throw new Error(`${instrument} ticket details are unavailable`);
-  if (tickets.length === 0) return Object.freeze({ unrealisedUsd: 0, source: "BROKER_FLAT" });
+  const exposureUsd = bookExposure(snapshot, instrument);
+  if (tickets.length === 0) return Object.freeze({ unrealisedUsd: 0, dayPnlUsd: 0, exposureUsd, source: "BROKER_FLAT", markUnavailable: false, hasOpenPosition: false, markPrice: null });
   const stack = stackByInstrument.get(instrument);
-  const markPrice = Number(stack?.lastTrade?.price);
-  if (!Number.isFinite(markPrice) || markPrice <= 0 || stack?.feedState?.connected !== true || stack.feedState.stale === true) {
-    throw new Error(`${instrument} fresh Binance mark is unavailable`);
+  const mark = stack?.markCache?.read({ connected: stack.feedState?.connected === true, tradeQuiet: stack.feedState?.tradeQuiet === true, lastTrade: stack.lastTrade }) ?? null;
+  const markPrice = Number(mark?.price);
+  if (!Number.isFinite(markPrice) || markPrice <= 0) {
+    return Object.freeze({
+      unrealisedUsd: 0,
+      dayPnlUsd: 0,
+      exposureUsd,
+      source: "MARK_UNAVAILABLE",
+      markUnavailable: true,
+      hasOpenPosition: true,
+      markPrice: null
+    });
   }
+  const unrealisedUsd = ticketMarkedOpenPnlUsd({ tickets, markPrice });
   return Object.freeze({
-    unrealisedUsd: ticketMarkedOpenPnlUsd({ tickets, markPrice }),
-    source: "BINANCE_TICKET_MARK"
+    unrealisedUsd,
+    dayPnlUsd: unrealisedUsd,
+    exposureUsd,
+    source: mark.source,
+    markUnavailable: false,
+    hasOpenPosition: true,
+    markPrice
   });
+}
+
+function instrumentTicketRisk(instrument) {
+  const reading = instrumentTicketReading(instrument);
+  if (reading.markUnavailable) throw new Error(`${instrument} Binance mark is unavailable`);
+  return reading;
 }
 
 const riskSupervisor = createRiskSupervisor({
   config: accountRisk,
   instruments: stacks.map((s) => Object.freeze({
     instrument: s.cfg.instrument,
+    getRiskReading: () => instrumentTicketReading(s.cfg.instrument),
     getUnrealisedUsd: () => instrumentTicketRisk(s.cfg.instrument).unrealisedUsd,
     // The entry-brake input is open ticket P&L, then latched durably for the
     // remainder of the account day. DXtrade does not expose closed P&L by
@@ -461,11 +493,8 @@ const riskSupervisor = createRiskSupervisor({
     executeProtectiveCut: (args) => s.runtime.executeProtectiveCut(args),
     executeProtectiveFlatten: (args) => s.runtime.executeProtectiveFlatten(args),
     getRolloverHarvestCandidates: () => {
-      const markPrice = Number(s.lastTrade?.price);
-      if (!Number.isFinite(markPrice) || markPrice <= 0 || s.feedState.connected !== true || s.feedState.stale === true) {
-        return null;
-      }
-      return s.runtime.getRolloverHarvestCandidates({ markPrice });
+      const reading = instrumentTicketReading(s.cfg.instrument);
+      return reading.markUnavailable ? null : s.runtime.getRolloverHarvestCandidates({ markPrice: reading.markPrice });
     },
     executeRolloverHarvest: (args) => s.runtime.executeRolloverHarvest(args)
   })),
@@ -487,6 +516,7 @@ const riskSupervisor = createRiskSupervisor({
     const { openPl, dayClosedPl } = accountMetrics();
     return openPl + dayClosedPl;
   },
+  getCombinedOpenPnlUsd: () => accountMetrics().openPl,
   setSafetyHalt: (reason) => database.setSafetyHalt(reason),
   clearSafetyHaltIfReason: (reason) => database.clearSafetyHaltIfReason(reason),
   getSafetyHaltState: () => database.getState(),
@@ -665,7 +695,10 @@ for (const stack of stacks) {
     },
     onState: (state) => {
       stack.feedState = state;
-      const stale = state.connected !== true || state.stale === true;
+      // A quiet trade stream is not an outage.  It only asks the cache to
+      // refresh in the background; no risk evaluation waits for that request.
+      if (state.connected !== true || state.tradeQuiet === true) void stack.markCache.refreshIfDue();
+      const stale = state.connected !== true;
       if (stale !== stack.persistedFeedStale) {
         stack.persistedFeedStale = stale;
         void database.setFeedStale(stale, stack.cfg.instrument)
@@ -856,7 +889,7 @@ const service = createMultiInstrumentOwnerService({
       getLiveMarketSnapshot: () => Object.freeze({
         price: stack.lastTrade?.price ?? null,
         tradeTime: stack.lastTrade?.tradeTime ?? null,
-        stale: stack.feedState.connected !== true || stack.feedState.stale === true
+        stale: stack.feedState.connected !== true
       })
     });
   }

@@ -136,8 +136,8 @@ export function formatInstrumentStatus({
   ];
   if (supervisorBook) {
     lines.push(
-      `Supervisor entry-brake P&L: ${money(supervisorBook.unrealisedUsd)}${supervisorBook.entryBrakePnlSource ? ` (${supervisorBook.entryBrakePnlSource})` : ""}`,
-      `Supervisor brake: ${supervisorBook.braked ? "ACTIVE — latched through rollover" : "READY"}${supervisorBook.readFailed ? " (book unread)" : ""}`
+      `Supervisor entry-brake P&L: ${supervisorBook.markUnavailable ? "mark unavailable" : `${money(supervisorBook.unrealisedUsd)}${supervisorBook.entryBrakePnlSource ? ` (${supervisorBook.entryBrakePnlSource})` : ""}`}`,
+      `Supervisor brake: ${supervisorBook.braked ? "ACTIVE — latched through rollover" : supervisorBook.entryBlockedForMark ? "ENTRY BLOCKED — market mark unavailable" : "READY"}${supervisorBook.readFailed ? " (broker book unread)" : ""}`
     );
   }
   if (botState?.operator_killed) {

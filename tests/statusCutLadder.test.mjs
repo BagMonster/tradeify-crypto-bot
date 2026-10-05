@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatRiskLadderLine } from "../src/multiInstrumentOwnerService.js";
+import { createMultiInstrumentOwnerService, formatRiskLadderLine } from "../src/multiInstrumentOwnerService.js";
 
 test("D-063 snapshot prints every cut tier shallow-first", () => {
   const line = formatRiskLadderLine({
@@ -31,4 +31,37 @@ test("legacy snapshot without cutTiers still shows the single 50% cut", () => {
   assert.match(line, /brake -\$300\.00 per instrument/);
   assert.match(line, /50% at -\$1000\.00/);
   assert.doesNotMatch(line, /10% at/);
+});
+
+test("status names a local pending mark without mislabeling DXtrade as D-064", async () => {
+  const service = createMultiInstrumentOwnerService({
+    instrumentConfigs: [{ enabled: true, instrument: "RUNE/USD", orderPrefix: "RUNE" }],
+    buildOwnerService: () => ({
+      async statusText() { return "RUNE/USD STATUS"; },
+      async inspectForRerun() { return { ok: true, match: true, virtualNet: 0, brokerNet: 0, openLots: 0 }; }
+    }),
+    riskSupervisor: {
+      getSnapshot: () => ({
+        dayKey: "2026-10-05",
+        dayPnlUsd: -12,
+        exposureUsd: 300,
+        marginToLimitUsd: 288,
+        dailyLossLimitUsd: 300,
+        entryBrakeUsd: 33,
+        partialCutUsd: 100,
+        partialCutFraction: 0.1,
+        fullFlattenUsd: 250,
+        brakedInstruments: [],
+        perInstrument: [{ instrument: "RUNE/USD", unreadFailed: false, readFailed: false, markUnavailable: true, entryBlockedForMark: true, unrealisedUsd: 0, entryBrakePnlSource: "MARK_UNAVAILABLE" }],
+        sessionHarvestEnabled: false,
+        flattenedToday: false,
+        cutsToday: 0
+      })
+    }
+  });
+  const status = await service.statusText();
+  assert.match(status, /market marks pending: RUNE\/USD/);
+  assert.match(status, /entries blocked only on those books/);
+  assert.match(status, /account-wide protection remain active/);
+  assert.doesNotMatch(status, /D-064 broker-data outage/);
 });
