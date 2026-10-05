@@ -15,10 +15,9 @@ const TABLE = SOURCE.slice(SOURCE.indexOf("const MENU_ACTIONS = {"), SOURCE.inde
 test("home panel lists every live book and account reads", () => {
   const rows = buildHomeKeyboard();
   const labels = rows.flat().map((b) => b.text);
-  for (const book of ["SOL", "DOGE", "INJ", "AAVE", "AVAX"]) {
+  for (const book of ["SOL", "DOGE", "ZEC", "INJ", "AAVE", "AVAX"]) {
     assert.ok(labels.includes(book), `${book} missing from home panel`);
   }
-  assert.ok(!labels.includes("ZEC"));
   assert.ok(labels.includes("All Status"));
   assert.ok(labels.includes("Risk Detail"));
   const statusRow = rows.findIndex((row) => row.some((button) => button.text === "All Status"));
@@ -90,7 +89,7 @@ test("instrument callback maps to the live book name", () => {
 });
 
 test("every slash command still registered after adding buttons", () => {
-  for (const cmd of ["status", "risk", "health", "levels", "rings", "dxpreflight", "solcanary", "kill", "resume",
+  for (const cmd of ["status", "risk", "anchors", "anchor", "anchorhistory", "anchorstats", "health", "levels", "rings", "dxpreflight", "solcanary", "kill", "resume",
                      "confirmresume", "reconcile", "confirmreconcile", "rematch", "confirmrematch",
                      "flat", "code", "devstatus", "devreset", "devexit", "whoami"]) {
     assert.match(SOURCE, new RegExp(`\\\\/${cmd}\\b`), `slash command /${cmd} disappeared`);

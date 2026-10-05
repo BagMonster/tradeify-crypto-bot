@@ -1067,5 +1067,5 @@ export function createRingExecutionGuard({
     return result;
   }
 
-  return Object.freeze({ isEnabled, executeIntent, executeProtectiveCut, executeProtectiveFlatten, resolveLegacyDustTicket, executeDustCleanup, listRolloverHarvestPositions, executeRolloverHarvestClose });
+  return Object.freeze({ isEnabled, hasOrderInFlight: () => inFlight.size > 0, executeIntent, executeProtectiveCut, executeProtectiveFlatten, resolveLegacyDustTicket, executeDustCleanup, listRolloverHarvestPositions, executeRolloverHarvestClose });
 }

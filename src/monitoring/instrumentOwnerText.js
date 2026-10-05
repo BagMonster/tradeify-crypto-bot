@@ -95,7 +95,8 @@ export function formatInstrumentStatus({
   execution,
   botState,
   accountMonitor,
-  supervisorBook = null
+  supervisorBook = null,
+  anchorState = null
 }) {
   const instrument = definition.instrument;
   const ringCount = definition.activeLevelsPerSide * 2;
@@ -103,10 +104,12 @@ export function formatInstrumentStatus({
   const occupied = gridState?.rings.filter((ring) => ring.lots.length > 0).length ?? 0;
   const armed = gridState?.rings.filter((ring) => ring.armed).length ?? 0;
   const mark = Number(maState?.ma);
+  const multiplier = Number(anchorState?.multiplier ?? 1);
+  const effectiveAnchor = Number.isFinite(mark) && Number.isFinite(multiplier) ? mark * multiplier : mark;
   const net = gridState && grid ? grid.expectedNetUnits(gridState) : 0;
   const brokerNet = trustedSignedNetFor(accountMonitor?.getSnapshot?.(), instrument);
-  const gross = gridState && grid && Number.isFinite(mark)
-    ? grid.grossVirtualExposureUsd(gridState, mark)
+  const gross = gridState && grid && Number.isFinite(effectiveAnchor)
+    ? grid.grossVirtualExposureUsd(gridState, effectiveAnchor)
     : 0;
   const operating = botState?.operator_killed || botState?.safety_halt ? "PAUSED" : "RUNNING";
   const live = execution?.isEnabled?.() === true;
@@ -127,8 +130,12 @@ export function formatInstrumentStatus({
     "",
     `200-day MA: ${price(mark)}`,
     `MA completed through: ${maState?.completedThrough ?? "unavailable"}`,
+    `Anchor: ×${multiplier.toFixed(4)}${Number.isFinite(effectiveAnchor) ? ` → ${price(effectiveAnchor)}` : ""}${anchorState?.lastShiftAt ? ` (shifted ${anchorState.lastShiftAt})` : " (no shift)"}`,
+    `Excursion: ${anchorState?.upperExtreme != null || anchorState?.lowerExtreme != null
+      ? `${anchorState.upperExtreme != null ? `UPPER ${price(anchorState.upperExtreme)}` : ""}${anchorState.upperExtreme != null && anchorState.lowerExtreme != null ? " · " : ""}${anchorState.lowerExtreme != null ? `LOWER ${price(anchorState.lowerExtreme)}` : ""}`
+      : "none"}`,
     `Virtual net: ${units(net)}`,
-    `Virtual gross exposure @ MA: ${money(gross)} / ${money(definition.grossExposureCeilingUsd ?? definition.capUsd)}`,
+    `Virtual gross exposure @ anchor: ${money(gross)} / ${money(definition.grossExposureCeilingUsd ?? definition.capUsd)}`,
     `Open virtual lots: ${openLots}`,
     `Occupied rings: ${occupied}/${ringCount}`,
     `Armed rings: ${armed}/${ringCount}`,

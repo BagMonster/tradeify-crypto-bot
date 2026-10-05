@@ -32,6 +32,8 @@ const KINDS = new Set([
   // Account-wide exposure pool (src/risk/exposureGate.js), 2026-09-21.
   "EXPOSURE_GATE_CLOSED",
   "EXPOSURE_GATE_REOPENED",
+  "ANCHOR_EXCURSION_STARTED",
+  "ANCHOR_SHIFT_CONFIRMED",
   "DUST_CLEANUP_SUMMARY"
 ]);
 
@@ -664,6 +666,37 @@ function formatEvent(event) {
     if (affected.length > 0) lines.push(`Books reduced: ${affected.join(", ")}`);
     lines.push("The entry pool will be re-evaluated from the next fresh DXtrade snapshot; a separate alert confirms if entries reopen.");
     return { kind, eventKey, message: lines.join("\n") };
+  }
+
+  if (kind === "ANCHOR_EXCURSION_STARTED") {
+    const instrument = requiredInstrument(event.instrument);
+    const side = safeText("anchor excursion side", event.side, { max: 8 }).toUpperCase();
+    if (side !== "UPPER" && side !== "LOWER") throw new TypeError("anchor excursion side is invalid");
+    const boundary = positive("anchor outer boundary", event.boundary);
+    const outerDistance = positive("anchor outer distance", event.outerDistance);
+    return {
+      kind,
+      eventKey,
+      message: `${instrument} has run past its outermost ${side === "UPPER" ? "SELL" : "BUY"} ring (${side === "UPPER" ? "+" : "−"}${(outerDistance * 100).toFixed(1)}%).\nTracking the extreme beyond ${formatPrice(boundary)}; the grid will shift after the next confirmed flat account.`
+    };
+  }
+
+  if (kind === "ANCHOR_SHIFT_CONFIRMED") {
+    const instrument = requiredInstrument(event.instrument);
+    const side = safeText("anchor shift side", event.side, { max: 8 }).toUpperCase();
+    if (side !== "UPPER" && side !== "LOWER") throw new TypeError("anchor shift side is invalid");
+    const extreme = positive("anchor extreme", event.extreme);
+    const anchor = positive("anchor", event.anchor);
+    const rawMa = positive("raw MA", event.rawMa);
+    const oldMultiplier = positive("old anchor multiplier", event.oldMultiplier);
+    const multiplier = positive("new anchor multiplier", event.multiplier);
+    const level = Number(event.firstOuterLevel);
+    if (!Number.isInteger(level) || level < 1) throw new TypeError("first outer level is invalid");
+    return {
+      kind,
+      eventKey,
+      message: `🔁 ${instrument} grid shifted ${side === "UPPER" ? "up" : "down"}: ${side === "UPPER" ? "peak" : "low"} ${formatPrice(extreme)} became ring ${level}.\nAnchor now ×${multiplier.toFixed(4)} of 200d MA (${formatPrice(anchor)}; raw MA ${formatPrice(rawMa)}). Previous ×${oldMultiplier.toFixed(4)}.`
+    };
   }
 
   if (kind === "SESSION_ROTATION_FAILED") {

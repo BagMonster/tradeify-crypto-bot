@@ -1,4 +1,5 @@
 import { isTrancheExitsPaused } from "../risk/sessionHarvest.js";
+import { computeShift, initialAnchorShiftState, normalizeAnchorShiftState, trackExcursion } from "../strategies/anchorShift.js";
 
 function positive(name, value) {
   const n = Number(value);
@@ -38,7 +39,8 @@ export function createRingGridInstance({
   execution,
   minimumHoldSeconds = 25,
   addEvent = async () => {},
-  notifications = null
+  notifications = null,
+  anchorStore = null
 }) {
   if (!grid || typeof grid.createInitialState !== "function" || typeof grid.entryCandidates !== "function") throw new TypeError("grid must be a ring-grid instance");
   const store = requiredStore(stateStore);
@@ -47,29 +49,77 @@ export function createRingGridInstance({
   if (!Number.isInteger(minimumHoldSeconds) || minimumHoldSeconds < 25) throw new TypeError("minimumHoldSeconds is invalid");
   if (typeof addEvent !== "function") throw new TypeError("addEvent must be a function");
   if (notifications !== null && typeof notifications?.enqueue !== "function") throw new TypeError("notifications.enqueue must be a function");
+  if (anchorStore !== null && (typeof anchorStore?.load !== "function" || typeof anchorStore?.save !== "function" || typeof anchorStore?.appendHistory !== "function")) throw new TypeError("anchorStore is invalid");
   const { instrument, marketSymbol, lotStep, grossExposureCeilingUsd, orderPrefix } = grid.definition;
   const prefix = eventPrefix(orderPrefix, instrument);
   let previousPrice = null;
   let entryBrake = false;
   let trancheExitsPaused = false;
   let currentState = null;
+  let anchorState = initialAnchorShiftState();
+  let pendingAnchorWrite = null;
+  let anchorWriteRunning = false;
+  let anchorWriteDrain = Promise.resolve();
+  let anchorShiftHold = false;
+  let lastPrice = null;
 
   function enqueueNotification(event) {
     if (notifications !== null) notifications.enqueue(event);
+  }
+
+  function queueAnchorSave(next) {
+    if (anchorStore === null) return;
+    // Trade processing never awaits an excursion write. A busy PostgreSQL must
+    // not create one queued write per Binance tick; retain only the newest full
+    // state and drain it in order once the current write finishes.
+    pendingAnchorWrite = next;
+    if (anchorWriteRunning) return;
+    anchorWriteRunning = true;
+    anchorWriteDrain = (async () => {
+      try {
+        while (pendingAnchorWrite !== null) {
+          const wanted = pendingAnchorWrite;
+          pendingAnchorWrite = null;
+          await anchorStore.save(wanted);
+        }
+      } catch (error) {
+        await addEvent("ERROR", "ANCHOR_SHIFT_PERSIST_FAILED", { instrument, message: error?.message ?? "anchor state save failed" });
+      } finally {
+        anchorWriteRunning = false;
+        if (pendingAnchorWrite !== null) queueAnchorSave(pendingAnchorWrite);
+      }
+    })();
+  }
+
+  async function flushAnchorWrites() {
+    // A confirmed shift must not be overwritten by an older, coalesced
+    // excursion snapshot that was already queued by a price tick.
+    while (anchorWriteRunning) {
+      const drain = anchorWriteDrain;
+      await drain;
+      if (drain === anchorWriteDrain) break;
+    }
   }
 
   async function init() {
     await store.init();
     const prior = await store.load();
     currentState = prior ?? await store.initializeIfMissing(grid.createInitialState());
+    if (anchorStore !== null) {
+      const persisted = await anchorStore.load();
+      anchorState = normalizeAnchorShiftState(persisted ?? initialAnchorShiftState());
+      if (persisted === null) await anchorStore.save(anchorState);
+    }
     return currentState;
   }
   async function load() {
     currentState = (await store.load()) ?? await store.initializeIfMissing(grid.createInitialState());
+    if (anchorStore !== null && anchorState === null) anchorState = normalizeAnchorShiftState((await anchorStore.load()) ?? initialAnchorShiftState());
     return currentState;
   }
   async function setEntryBrake(value) { entryBrake = value === true; }
   async function setTrancheExitsPaused(value) { trancheExitsPaused = value === true; }
+  async function setAnchorShiftHold(value) { anchorShiftHold = value === true; }
 
   async function cut({ fraction, reason, dayKey }) {
     const state = await load();
@@ -261,13 +311,29 @@ export function createRingGridInstance({
   async function process(input) {
     const trade = canonicalTrade(input, marketSymbol);
     const maState = await maProvider.getCurrent();
-    const ma = positive(`${instrument} MA`, maState?.ma);
+    const rawMa = positive(`${instrument} MA`, maState?.ma);
+    const anchor = rawMa * anchorState.multiplier;
     let state = await load();
-    const rearmed = grid.observeRearm(state, { price: trade.price, ma });
+    const observed = trackExcursion(anchorState, { price: trade.price, anchor, geometry: grid.definition, occurredAt: trade.tradeTime });
+    const changedAnchor = JSON.stringify(observed.state) !== JSON.stringify(anchorState);
+    anchorState = observed.state;
+    if (changedAnchor) queueAnchorSave(anchorState);
+    if (observed.startedSide !== null) {
+      enqueueNotification({
+        kind: "ANCHOR_EXCURSION_STARTED",
+        eventKey: `ANCHOR-EXCURSION:${instrument}:${observed.startedSide}:${trade.tradeTime}`,
+        instrument,
+        side: observed.startedSide,
+        price: trade.price,
+        boundary: observed.startedSide === "UPPER" ? observed.boundaries.upper : observed.boundaries.lower,
+        outerDistance: observed.boundaries.distance
+      });
+    }
+    const rearmed = grid.observeRearm(state, { price: trade.price, ma: anchor });
     if (rearmed.version !== state.version) state = await store.save(state.version, rearmed);
     let exitFilledThisUpdate = false;
     while (!exitsPaused()) {
-      const action = grid.nextMovingAverageExitAction?.(state, { price: trade.price, ma }) ?? grid.nextExitAction(state, { price: trade.price, ma });
+      const action = grid.nextMovingAverageExitAction?.(state, { price: trade.price, ma: anchor }) ?? grid.nextExitAction(state, { price: trade.price, ma: anchor });
       if (!action) break;
       if (action.type === "SKIP_EXIT") { state = await store.save(state.version, grid.applySkippedExit(state, action)); continue; }
       const lot = action.adopted === true
@@ -294,7 +360,9 @@ export function createRingGridInstance({
         fillPrice: result.fillPrice,
         filledQuantity: result.filledQuantity,
         remainingQuantity: lotAfterExit?.remainingUnits ?? 0,
-        ma,
+        ma: anchor,
+        rawMa,
+        anchor,
         target: action.target,
         filledAt: result.filledAt
       });
@@ -316,14 +384,14 @@ export function createRingGridInstance({
     }
     // A confirmed exit consumes this update. A later fresh crossing is required
     // before the bot may add inventory again.
-    if (!entryBrake && !exitFilledThisUpdate) {
-      for (const candidate of grid.entryCandidates(state, { previousPrice, price: trade.price, ma })) {
+    if (!entryBrake && !anchorShiftHold && !exitFilledThisUpdate) {
+      for (const candidate of grid.entryCandidates(state, { previousPrice, price: trade.price, ma: anchor })) {
         const ring = state.rings.find((item) => item.tag === candidate.ringTag);
         if (!ring || !ring.armed || ring.lots.length >= ring.capacity) continue;
         const proposed = candidate.quantity * trade.price;
         if (grid.grossVirtualExposureUsd(state, trade.price) + proposed > grossExposureCeilingUsd + 1e-8) continue;
         if (execution.isEnabled?.() !== true) continue;
-        const intent = Object.freeze({ ...candidate, stateVersion: state.version, lotId: `${candidate.tag}-V${state.version}` });
+        const intent = Object.freeze({ ...candidate, stateVersion: state.version, lotId: `${candidate.tag}-V${state.version}`, rawMa, anchor });
         const result = await execution.executeIntent(intent);
         if (result.status !== "FILLED") return Object.freeze({ status: "ENTRY_PENDING", state, intent, result });
         state = await store.save(state.version, grid.applyConfirmedEntry(state, intent, result));
@@ -336,15 +404,59 @@ export function createRingGridInstance({
           fillPrice: result.fillPrice,
           filledQuantity: result.filledQuantity,
           lotId: intent.lotId,
-          ma,
+          ma: anchor,
+          rawMa,
+          anchor,
           filledAt: result.filledAt
         });
       }
     }
     previousPrice = trade.price;
+    lastPrice = trade.price;
     currentState = state;
-    await addEvent("INFO", "D060_RING_INSTANCE_PROCESSED", { instrument, stateVersion: state.version, entryBrake, trancheExitsPaused: exitsPaused() });
-    return Object.freeze({ status: entryBrake ? "BRAKED" : "PROCESSED", state, ma });
+    await addEvent("INFO", "D060_RING_INSTANCE_PROCESSED", { instrument, stateVersion: state.version, entryBrake, anchorShiftHold, trancheExitsPaused: exitsPaused(), rawMa, anchor });
+    return Object.freeze({ status: entryBrake ? "BRAKED" : anchorShiftHold ? "ANCHOR_HOLD" : "PROCESSED", state, ma: anchor, rawMa, anchor });
+  }
+
+  function hasVirtualLots() {
+    return (currentState?.rings ?? []).some((ring) => Array.isArray(ring.lots) && ring.lots.length > 0) ||
+      (currentState?.adopted ?? []).length > 0;
+  }
+
+  function hasPendingAnchorExcursion() {
+    return anchorState.upperExtreme !== null || anchorState.lowerExtreme !== null;
+  }
+
+  async function applyAnchorShift({ shiftedAt = new Date().toISOString() } = {}) {
+    if (hasVirtualLots()) return Object.freeze({ shifted: false, reason: "VIRTUAL_LOTS_PRESENT" });
+    await flushAnchorWrites();
+    const maState = await maProvider.getCurrent();
+    const rawMa = positive(`${instrument} MA`, maState?.ma);
+    const shift = computeShift(anchorState, { maNow: rawMa, geometry: grid.definition, shiftedAt });
+    if (shift === null) return Object.freeze({ shifted: false, reason: "NO_EXCURSION" });
+    // A shift is durable before this instance changes its live anchor. This is
+    // intentionally awaited: losing it after a shift would duplicate a live move.
+    if (anchorStore !== null) {
+      await anchorStore.save(shift.state);
+      await anchorStore.appendHistory({ ...shift, shiftedAt });
+    }
+    anchorState = shift.state;
+    previousPrice = lastPrice;
+    enqueueNotification({
+      kind: "ANCHOR_SHIFT_CONFIRMED",
+      eventKey: `ANCHOR-SHIFT:${instrument}:${shiftedAt}`,
+      instrument,
+      side: shift.side,
+      extreme: shift.extreme,
+      firstOuterLevel: grid.definition.innerLevels + 1,
+      anchor: shift.anchor,
+      rawMa,
+      oldMultiplier: shift.oldMultiplier,
+      multiplier: shift.multiplier,
+      shiftedAt
+    });
+    await addEvent("WARN", "ANCHOR_SHIFT_CONFIRMED", { instrument, ...shift, shiftedAt });
+    return Object.freeze({ shifted: true, instrument, ...shift });
   }
 
   return Object.freeze({
@@ -353,6 +465,7 @@ export function createRingGridInstance({
     process,
     setEntryBrake,
     setTrancheExitsPaused,
+    setAnchorShiftHold,
     cut,
     flatten,
     cleanupDust,
@@ -360,6 +473,12 @@ export function createRingGridInstance({
     executeRolloverHarvest,
     getEntryBrake: () => entryBrake,
     getTrancheExitsPaused: () => exitsPaused(),
+    getAnchorShiftHold: () => anchorShiftHold,
+    hasVirtualLots,
+    hasPendingAnchorExcursion,
+    applyAnchorShift,
+    getAnchorState: () => anchorState,
+    getLastPrice: () => lastPrice,
     getState: () => currentState
   });
 }

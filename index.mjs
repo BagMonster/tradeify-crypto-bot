@@ -34,6 +34,7 @@ import { describeAccountProfile } from "./src/config/accountProfile.js";
 import { createExposureGate, formatExposurePoolLine } from "./src/risk/exposureGate.js";
 import { createLivenessStore, createLivenessHeartbeat } from "./src/monitoring/livenessStore.js";
 import { createDailyDustCleanupCoordinator } from "./src/risk/dailyDustCleanup.js";
+import { createAnchorShiftCoordinator } from "./src/risk/anchorShiftCoordinator.js";
 
 const money = (v) => (Number.isFinite(v) ? `${v < 0 ? "-$" : "$"}${Math.abs(v).toFixed(2)}` : "unavailable");
 
@@ -130,6 +131,7 @@ function accountLockReasonCode(invariantError) {
 let accountErrorLogged = false;
 let accountSnapshotSyncFailures = 0;
 let accountLockLatched = false;
+let anchorShiftCoordinator = null;
 const accountMonitor = createDxtradeAccountMonitor({
   client: dxtradeClient,
   startingBalance: account.startingBalance,
@@ -137,6 +139,7 @@ const accountMonitor = createDxtradeAccountMonitor({
   getPersistedPeakClosedBalance: database.getPersistedPeakClosedBalance,
   onSnapshot: async (snapshot) => {
     accountErrorLogged = false;
+    if (anchorShiftCoordinator) await anchorShiftCoordinator.observe(snapshot);
     if (exposureGate) {
       const exposureUsd = enabledInstruments.reduce((sum, cfg) => sum + bookExposure(snapshot, cfg.instrument), 0);
       if (exposureGate.observe({ exposureUsd, observedAtMs: Number(snapshot.fetchedAtMs) })) {
@@ -289,6 +292,7 @@ async function buildInstrumentStack(cfg) {
     execution,
     addEvent: database.addEvent,
     notifications: liveNotifications,
+    anchorStore: persistence.createAnchorStore(cfg.instrument),
     getRiskSnapshot: async () => {
       const accountStatus = accountMonitor.getSnapshot();
       const snapshot = accountStatus.snapshot;
@@ -315,6 +319,19 @@ async function buildInstrumentStack(cfg) {
 const stacks = [];
 for (const cfg of enabledInstruments) stacks.push(await buildInstrumentStack(cfg));
 const stackByInstrument = new Map(stacks.map((s) => [s.cfg.instrument, s]));
+anchorShiftCoordinator = createAnchorShiftCoordinator({
+  books: stacks.map((stack) => Object.freeze({
+    instrument: stack.cfg.instrument,
+    setAnchorShiftHold: (on) => stack.runtime.setAnchorShiftHold(on),
+    hasVirtualLots: () => stack.runtime.hasVirtualLots(),
+    hasPendingAnchorExcursion: () => stack.runtime.hasPendingAnchorExcursion(),
+    hasOrderInFlight: () => stack.runtime.hasOrderInFlight(),
+    applyAnchorShift: (input) => stack.runtime.applyAnchorShift(input)
+  })),
+  holdMs: 9_000,
+  addEvent: database.addEvent,
+  notifications: liveNotifications
+});
 const startupDustCleanupDayKey = accountDayKey(Date.now());
 
 const dailyDustCleanup = createDailyDustCleanupCoordinator({
@@ -891,6 +908,7 @@ const service = createMultiInstrumentOwnerService({
       dxtradeClient,
       persistence,
       maProvider: stack.maProvider,
+      anchorRuntime: stack.runtime,
       execution: stack.execution,
       canary: cfg.instrument === heartbeatStack.cfg.instrument ? liveCanary : null,
       accountMonitor,

@@ -25,6 +25,10 @@ const HELP_TEXT = [
   "",
   "/status [INSTRUMENT] - compact account dashboard; add SOL or AAVE for one book",
   "/risk [INSTRUMENT] - detailed ticket-mark P&L, exposure, brakes and mark source",
+  "/anchors - all grid anchors and pending excursions",
+  "/anchor <COIN> - one coin's anchor, boundaries, and projected shift",
+  "/anchorhistory [COIN] - last 10 anchor shifts",
+  "/anchorstats [COIN] - entries, exits and P&L since the last anchor shift",
   "/health [INSTRUMENT] - worker, PostgreSQL, MA, execution",
   "/levels [INSTRUMENT] - ring ladder; omit for all five",
   "/rings [INSTRUMENT] - where price sits versus each book",
@@ -234,6 +238,22 @@ export async function startTelegramBot({
     await sendLatched(message.chat.id, "/risk", await service.riskText(match?.[1]));
   }));
 
+  bot.onText(/^\/anchors(?:@\w+)?$/i, withAuthorization(async (message) => {
+    await sendLatched(message.chat.id, "/anchors", await service.anchorsText());
+  }));
+
+  bot.onText(/^\/anchor(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/anchor", await service.anchorText(match?.[1]));
+  }));
+
+  bot.onText(/^\/anchorhistory(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/anchorhistory", await service.anchorHistoryText(match?.[1]));
+  }));
+
+  bot.onText(/^\/anchorstats(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/anchorstats", await service.anchorStatsText(match?.[1]));
+  }));
+
   bot.onText(/^\/health(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
     await sendLatched(message.chat.id, "/health", await service.healthText(match?.[1]));
   }));
@@ -366,6 +386,10 @@ export async function startTelegramBot({
   const MENU_ACTIONS = {
     status: (chatId, _query, symbol) => runLatched(chatId, "/status", () => service.statusText(instrumentArg(symbol))),
     risk: (chatId, _query, symbol) => runLatched(chatId, "/risk", () => service.riskText(instrumentArg(symbol))),
+    anchors: (chatId) => runLatched(chatId, "/anchors", () => service.anchorsText()),
+    anchorhistory: (chatId, _query, symbol) => runLatched(chatId, "/anchorhistory", () => service.anchorHistoryText(instrumentArg(symbol))),
+    anchorstats: (chatId, _query, symbol) => runLatched(chatId, "/anchorstats", () => service.anchorStatsText(instrumentArg(symbol))),
+    anchor: (chatId, _query, symbol) => runLatched(chatId, "/anchor", () => service.anchorText(instrumentArg(symbol))),
     health: (chatId, _query, symbol) => runLatched(chatId, "/health", () => service.healthText(instrumentArg(symbol))),
     levels: (chatId, _query, symbol) => runLatched(chatId, "/levels", () => service.levelsText(instrumentArg(symbol))),
     rings: (chatId, _query, symbol) => runLatched(chatId, "/rings", () => service.ringsText(instrumentArg(symbol))),

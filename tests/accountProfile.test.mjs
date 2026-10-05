@@ -161,7 +161,7 @@ test("a leftover account-size number in either JSON file stops startup", async (
     /accountRisk still contains "dailyLossLimitUsd"/
   );
   const withCap = JSON.parse(JSON.stringify(instruments));
-  withCap.instruments[2].sizing.capUsd = 150000;
+  withCap.instruments.find((entry) => entry.instrument === "INJ/USD").sizing.capUsd = 150000;
   assert.throws(() => applyAccountProfile({ profile, account: {}, instruments: withCap }), /INJ\/USD still contains sizing.capUsd/);
 });
 

@@ -27,8 +27,9 @@ test("every enabled instrument is registered with a verified lot and a unique pr
     assert.equal(prefixes.has(entry.orderPrefix), false, `${entry.instrument} duplicate orderPrefix`);
     prefixes.add(entry.orderPrefix);
   }
-  // D-062: ZEC stays off until the owner decides otherwise.
-  assert.equal(config.enabled.some((entry) => entry.instrument === "ZEC/USD"), false);
+  // D-069: ZEC is restored as a normal live book. It has no special anchor
+  // re-enable behaviour; it starts at the same x1.0 anchor as every book.
+  assert.equal(config.enabled.some((entry) => entry.instrument === "ZEC/USD"), true);
 });
 
 test("INJ/USD profile resolves to INJUSDT", () => {

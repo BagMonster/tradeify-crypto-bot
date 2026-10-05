@@ -10,6 +10,7 @@ import {
   formatInstrumentRings
 } from "./monitoring/instrumentOwnerText.js";
 import { formatInstrumentTargets } from "./format/instrumentTargets.js";
+import { formatAnchorDetail, formatAnchorHistory, formatAnchorLine, formatAnchorStats } from "./monitoring/anchorOwnerText.js";
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 
 /** @deprecated use brokerBookLines(accountMonitor, instrument) */
@@ -24,6 +25,9 @@ export function createSolanaOwnerService(opts) {
   const stateStore = grid && typeof opts.persistence?.createStateStore === "function"
     ? opts.persistence.createStateStore(grid)
     : opts.persistence?.state ?? null;
+  const anchorStore = definition && typeof opts.persistence?.createAnchorStore === "function"
+    ? opts.persistence.createAnchorStore(definition.instrument)
+    : null;
 
   async function refreshBrokerSnapshot() {
     if (typeof opts.accountMonitor?.pollOnce === "function") {
@@ -97,10 +101,11 @@ export function createSolanaOwnerService(opts) {
   async function statusText() {
     await refreshBrokerSnapshot();
     if (!definition || !grid) return tradeify.statusText();
-    const [botState, gridState, maState] = await Promise.all([
+    const [botState, gridState, maState, anchorState] = await Promise.all([
       opts.database.getState(),
       loadLiveState(),
-      opts.maProvider.getCurrent()
+      opts.maProvider.getCurrent(),
+      anchorStore?.load?.() ?? Promise.resolve(null)
     ]);
     return formatInstrumentStatus({
       definition,
@@ -111,7 +116,8 @@ export function createSolanaOwnerService(opts) {
       execution: opts.execution,
       botState,
       accountMonitor: opts.accountMonitor,
-      supervisorBook: supervisorBook()
+      supervisorBook: supervisorBook(),
+      anchorState
     });
   }
 
@@ -144,7 +150,49 @@ export function createSolanaOwnerService(opts) {
     if (!maState || !Number.isFinite(Number(maState.ma)) || Number(maState.ma) <= 0) {
       return { error: `${definition?.instrument ?? "instrument"} ring data unavailable: the current completed-day 200-day MA is unavailable.` };
     }
-    return { price: Number(market.price), ma: Number(maState.ma) };
+    const rawMa = Number(maState.ma);
+    const anchor = opts.anchorRuntime?.getAnchorState?.() ?? await anchorStore?.load?.() ?? null;
+    const multiplier = Number(anchor?.multiplier ?? 1);
+    return { price: Number(market.price), ma: rawMa * multiplier, rawMa, anchor };
+  }
+
+  async function anchorInputs() {
+    if (!definition || !anchorStore) return { error: "Anchor data is unavailable for this book." };
+    const inputs = await ringInputs();
+    if (inputs.error) return inputs;
+    const state = opts.anchorRuntime?.getAnchorState?.() ?? await anchorStore.load();
+    if (!state) return { error: `${definition.instrument} anchor state has not initialized yet.` };
+    return { ...inputs, ma: inputs.rawMa, state };
+  }
+
+  async function anchorText() {
+    const inputs = await anchorInputs();
+    if (inputs.error) return inputs.error;
+    const history = await anchorStore.history(10);
+    return formatAnchorDetail({ instrument: definition.instrument, state: inputs.state, ma: inputs.ma, price: inputs.price, geometry: definition });
+  }
+
+  async function anchorSummaryLine() {
+    const inputs = await anchorInputs();
+    if (inputs.error) return `${definition.instrument}  anchor unavailable`;
+    const historyCount = await anchorStore.count?.() ?? (await anchorStore.history(10)).length;
+    return formatAnchorLine({ instrument: definition.instrument, state: inputs.state, ma: inputs.ma, price: inputs.price, geometry: definition, historyCount });
+  }
+
+  async function anchorHistoryText() {
+    if (!anchorStore) return "Anchor history is unavailable.";
+    return formatAnchorHistory(await anchorStore.history(10), definition.instrument);
+  }
+
+  async function anchorStatsText() {
+    const inputs = await anchorInputs();
+    if (inputs.error) return inputs.error;
+    const persisted = await anchorStore.load();
+    const state = { ...inputs.state, createdAt: persisted?.createdAt ?? inputs.state.createdAt };
+    const since = state.lastShiftAt ?? state.createdAt;
+    if (!since) return `${definition.instrument} anchor statistics are not initialized yet.`;
+    const [orders, gridState] = await Promise.all([anchorStore.ordersSince(since), loadLiveState()]);
+    return formatAnchorStats({ instrument: definition.instrument, state, orders, gridState, price: inputs.price });
   }
 
   async function levelsText() {
@@ -229,6 +277,10 @@ export function createSolanaOwnerService(opts) {
     levelsText,
     ringsText,
     targetsText,
+    anchorText,
+    anchorSummaryLine,
+    anchorHistoryText,
+    anchorStatsText,
     inspectForRerun,
     hybridBook: () => Object.freeze({
       instrument: definition?.instrument ?? opts.instrument ?? null,

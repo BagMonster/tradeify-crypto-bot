@@ -87,7 +87,8 @@ function createD060Runtime({
   execution,
   minimumHoldSeconds = 25,
   addEvent = async () => {},
-  notifications = null
+  notifications = null,
+  anchorStore = null
 }) {
   if (!gridDefinition || typeof gridDefinition !== "object") throw new TypeError("gridDefinition is required");
   if (typeof instrument !== "string" || instrument !== gridDefinition.instrument) throw new TypeError("instrument must match gridDefinition");
@@ -102,7 +103,8 @@ function createD060Runtime({
     execution,
     minimumHoldSeconds,
     addEvent,
-    notifications
+    notifications,
+    anchorStore
   });
   let riskSupervisor = null;
   let latestRisk = null;
@@ -189,6 +191,10 @@ function createD060Runtime({
     void instance.setTrancheExitsPaused(on);
   }
 
+  function setAnchorShiftHold(on) {
+    void instance.setAnchorShiftHold(on);
+  }
+
   function attachRiskSupervisor(supervisor) {
     if (!supervisor || typeof supervisor.getSnapshot !== "function") throw new TypeError("risk supervisor is invalid");
     riskSupervisor = supervisor;
@@ -227,12 +233,19 @@ function createD060Runtime({
     getExposureUsd,
     setEntryBrake,
     setTrancheExitsPaused,
+    setAnchorShiftHold,
     attachRiskSupervisor,
     executeProtectiveCut,
     executeProtectiveFlatten,
     executeDustCleanup,
     getRolloverHarvestCandidates,
     executeRolloverHarvest,
+    hasVirtualLots: () => instance.hasVirtualLots(),
+    hasPendingAnchorExcursion: () => instance.hasPendingAnchorExcursion(),
+    hasOrderInFlight: () => execution.hasOrderInFlight?.() === true,
+    applyAnchorShift: (input) => instance.applyAnchorShift(input),
+    getAnchorState: () => instance.getAnchorState(),
+    getLastPrice: () => instance.getLastPrice(),
     definition: grid.definition
   });
 }
@@ -249,7 +262,8 @@ export function createSolanaRuntime({
   execution,
   minimumHoldSeconds = 25,
   addEvent = async () => {},
-  notifications = null
+  notifications = null,
+  anchorStore = null
 }) {
   if (gridDefinition !== null) {
     return createD060Runtime({
@@ -262,7 +276,8 @@ export function createSolanaRuntime({
       execution,
       minimumHoldSeconds,
       addEvent,
-      notifications
+      notifications,
+      anchorStore
     });
   }
   for (const method of ["init", "load", "initializeIfMissing", "save"]) {
