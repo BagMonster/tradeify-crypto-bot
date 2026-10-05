@@ -6,15 +6,17 @@ const config = { entryBrakeUsd: 300, partialCutUsd: 1000, partialCutFraction: 0.
 
 function book(instrument, { unrealised = 0, day = 0, exposure = 1, unreadable = false, markUnavailable = false, hasOpenPosition = exposure > 0 } = {}) {
   const calls = [];
+  const state = { unrealised, day, exposure, unreadable, markUnavailable, hasOpenPosition };
   return {
     instrument,
     calls,
-    getUnrealisedUsd() { if (unreadable) throw new Error("unreadable"); return unrealised; },
-    getDayPnlUsd() { if (unreadable) throw new Error("unreadable"); return day; },
-    getExposureUsd() { if (unreadable) throw new Error("unreadable"); return exposure; },
+    setRisk(next) { Object.assign(state, next); },
+    getUnrealisedUsd() { if (state.unreadable) throw new Error("unreadable"); return state.unrealised; },
+    getDayPnlUsd() { if (state.unreadable) throw new Error("unreadable"); return state.day; },
+    getExposureUsd() { if (state.unreadable) throw new Error("unreadable"); return state.exposure; },
     getRiskReading() {
-      if (unreadable) throw new Error("unreadable");
-      return { unrealisedUsd: unrealised, dayPnlUsd: day, exposureUsd: exposure, source: markUnavailable ? "MARK_UNAVAILABLE" : "TEST_MARK", markUnavailable, hasOpenPosition };
+      if (state.unreadable) throw new Error("unreadable");
+      return { unrealisedUsd: state.unrealised, dayPnlUsd: state.day, exposureUsd: state.exposure, source: state.markUnavailable ? "MARK_UNAVAILABLE" : "TEST_MARK", markUnavailable: state.markUnavailable, hasOpenPosition: state.hasOpenPosition };
     },
     setEntryBrake(on) { calls.push(["brake", on]); },
     async executeProtectiveCut(args) { calls.push(["cut", args]); return { status: "FILLED" }; },
@@ -84,7 +86,7 @@ test("one unavailable mark is local while broker P&L still fires protective cuts
   assert.equal(quietStatus.entryBlockedForMark, true);
 });
 
-test("unread mark group is durably braked from broker residual loss", async () => {
+test("unread mark group is braked from broker residual loss while that loss remains", async () => {
   const rune = book("RUNE/USD", { markUnavailable: true, exposure: 400, hasOpenPosition: true });
   const sol = book("SOL/USD", { unrealised: 4, day: 4, exposure: 400 });
   const supervisor = createRiskSupervisor({
@@ -111,20 +113,25 @@ test("entry brake uses an instrument's open ticket P&L, not its account-day allo
   assert.equal(supervisor.getSnapshot().perInstrument[0].braked, true);
 });
 
-test("daily entry brakes are restored after a worker restart", async () => {
-  let row = { dayKey: "2026-10-04", instruments: ["RUNE/USD"] };
-  const store = {
-    async get(dayKey) { return { ...row, dayKey }; },
-    async save(next) { row = { ...next, instruments: [...next.instruments] }; return row; }
-  };
-  const rune = book("RUNE/USD", { unrealised: -1, day: -1, exposure: 965 });
+test("entry brake releases as soon as live ticket P&L recovers and is never restored", async () => {
+  const rune = book("RUNE/USD", { unrealised: -34, day: -34, exposure: 965 });
   const supervisor = createRiskSupervisor({
     config: { ...config, entryBrakeUsd: 33 },
-    instruments: [rune],
-    entryBrakeStore: store
+    instruments: [rune]
   });
 
   await supervisor.evaluate({ dayKey: "2026-10-04" });
   assert.equal(supervisor.getSnapshot().brakedInstruments.includes("RUNE/USD"), true);
   assert.equal(rune.calls.some(([kind, on]) => kind === "brake" && on === true), true);
+  rune.setRisk({ unrealised: -1, day: -1 });
+  await supervisor.evaluate({ dayKey: "2026-10-04" });
+  assert.equal(supervisor.getSnapshot().brakedInstruments.includes("RUNE/USD"), false);
+  assert.equal(rune.calls.at(-1)[1], false);
+
+  const restarted = createRiskSupervisor({
+    config: { ...config, entryBrakeUsd: 33 },
+    instruments: [book("RUNE/USD", { unrealised: -1, day: -1, exposure: 965 })]
+  });
+  await restarted.evaluate({ dayKey: "2026-10-04" });
+  assert.deepEqual(restarted.getSnapshot().brakedInstruments, []);
 });

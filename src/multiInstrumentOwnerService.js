@@ -244,9 +244,6 @@ export function createMultiInstrumentOwnerService({
     for (const entry of losses) lines.push(`• ${entry.instrument}: ${money(entry.unrealisedUsd)} — loss brake active`);
     const pending = per.filter((entry) => entry.markUnavailable).map((entry) => entry.instrument);
     if (pending.length > 0) lines.push(`• Marks pending: ${pending.join(", ")} — entries blocked only on those books`);
-    const braked = Array.isArray(snapshot.brakedInstruments) ? snapshot.brakedInstruments : [];
-    const latchedEarlier = braked.filter((instrument) => !losses.some((entry) => entry.instrument === instrument));
-    if (latchedEarlier.length > 0) lines.push(`• ${latchedEarlier.length} earlier brake latch${latchedEarlier.length === 1 ? "" : "es"} — full list in /risk`);
     return lines;
   }
 
@@ -312,24 +309,37 @@ export function createMultiInstrumentOwnerService({
     if (!snapshot) return "RISK DETAIL: supervisor snapshot unavailable";
     const target = normaliseInstrument(arg);
     const per = (Array.isArray(snapshot.perInstrument) ? snapshot.perInstrument : [])
-      .filter((entry) => target === null || entry.instrument === target);
+      .filter((entry) => target === null || entry.instrument === target)
+      .sort((left, right) => {
+        const exposure = (entry) => {
+          const value = Number(entry.exposureUsd);
+          return Number.isFinite(value) ? Math.abs(value) : -Infinity;
+        };
+        return exposure(right) - exposure(left);
+      });
     if (target !== null && per.length === 0) return `Unknown instrument "${arg}".`;
     const braked = new Set(Array.isArray(snapshot.brakedInstruments) ? snapshot.brakedInstruments : []);
     const rows = per.map((entry) => {
-      const mark = entry.markUnavailable ? "MARK PENDING" : String(entry.entryBrakePnlSource ?? "unavailable").replace("BINANCE_", "").replace("_MARK", "");
+      const mark = entry.markUnavailable ? "MARK: PENDING" : ({
+        BINANCE_REST_MARK: "MARK: BINANCE REST",
+        BINANCE_TRADE_MARK: "MARK: BINANCE STREAM",
+        BROKER_FLAT: "MARK: BROKER FLAT"
+      }[entry.entryBrakePnlSource] ?? "MARK: UNAVAILABLE");
       const brake = braked.has(entry.instrument)
-        ? Number(entry.unrealisedUsd) <= -Number(snapshot.entryBrakeUsd) ? "BRAKE: LOSS" : "BRAKE: LATCHED"
+        ? "BRAKE: LOSS"
         : entry.entryBlockedForMark ? "ENTRY BLOCK: MARK" : "READY";
-      return `${entry.instrument.padEnd(9)} P&L ${entry.markUnavailable ? "unavailable" : money(entry.unrealisedUsd).padStart(8)} · exposure ${money(entry.exposureUsd).padStart(8)} · ${brake} · ${mark}`;
+      const ticker = String(entry.instrument ?? "?").replace(/\/USD$/, "");
+      return `${ticker.padEnd(6)} P&L ${entry.markUnavailable ? "unavailable" : money(entry.unrealisedUsd).padStart(8)} · exposure ${money(entry.exposureUsd).padStart(8)} · ${brake} · ${mark}`;
     });
     return [
       "RISK DETAIL",
       `Account day: ${snapshot.dayKey ?? "not evaluated"} · open P&L: ${money(snapshot.totalUnrealisedUsd ?? snapshot.unrealisedUsd)}`,
-      `Entry brakes: ${braked.size === 0 ? "none" : `${braked.size} active`}`,
+      `Entry brakes: ${braked.size === 0 ? "none" : `${braked.size} active`} · live ticket P&L`,
       "",
       ...rows,
       "",
-      "Brake: LOSS means current ticket P&L is at or below the threshold. LATCHED means the daily brake was already set; it clears at rollover."
+      "Brake: LOSS means current ticket P&L is at or below the threshold; it releases as soon as the P&L recovers.",
+      "Mark: BINANCE REST is a background HTTP ticker price; BINANCE STREAM is the live WebSocket trade price."
     ].join("\n");
   }
 

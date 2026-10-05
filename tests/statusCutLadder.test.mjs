@@ -66,6 +66,34 @@ test("status names a local pending mark without mislabeling DXtrade as D-064", a
   assert.doesNotMatch(status, /D-064 broker-data outage/);
   const risk = service.riskText();
   assert.match(risk, /RISK DETAIL/);
-  assert.match(risk, /RUNE\/USD/);
-  assert.match(risk, /MARK PENDING/);
+  assert.match(risk, /RUNE\s+P&L/);
+  assert.match(risk, /MARK: PENDING/);
+});
+
+test("risk lists the highest-exposure books first with concise mark labels", () => {
+  const service = createMultiInstrumentOwnerService({
+    instrumentConfigs: [
+      { enabled: true, instrument: "SOL/USD", orderPrefix: "SOL" },
+      { enabled: true, instrument: "RUNE/USD", orderPrefix: "RUNE" }
+    ],
+    buildOwnerService: () => ({ async inspectForRerun() { return { ok: true, match: true, virtualNet: 0, brokerNet: 0, openLots: 0 }; } }),
+    riskSupervisor: {
+      getSnapshot: () => ({
+        dayKey: "2026-10-05",
+        totalUnrealisedUsd: -35,
+        entryBrakeUsd: 33,
+        brakedInstruments: ["RUNE/USD"],
+        perInstrument: [
+          { instrument: "SOL/USD", unrealisedUsd: -1, exposureUsd: 120, entryBrakePnlSource: "BINANCE_TRADE_MARK" },
+          { instrument: "RUNE/USD", unrealisedUsd: -34, exposureUsd: 920, entryBrakePnlSource: "BINANCE_REST_MARK" }
+        ]
+      })
+    }
+  });
+  const risk = service.riskText();
+  const rows = risk.split("\n");
+  assert.ok(rows.findIndex((line) => line.startsWith("RUNE")) < rows.findIndex((line) => line.startsWith("SOL")));
+  assert.match(risk, /RUNE\s+P&L.*BRAKE: LOSS.*MARK: BINANCE REST/);
+  assert.match(risk, /SOL\s+P&L.*MARK: BINANCE STREAM/);
+  assert.doesNotMatch(risk, /RUNE\/USD/);
 });

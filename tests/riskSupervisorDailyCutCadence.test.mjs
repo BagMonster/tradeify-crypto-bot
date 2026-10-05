@@ -91,9 +91,10 @@ test("D-063 self-clears after a cut, then permits a deeper unrealised-loss escal
 
   state.unrealised = -149;
   nowMs += 5 * 60 * 1000;
-  // The per-book entry brake is independent of the self-clearing cut ladder.
-  // Its open ticket loss is still past the -$120 brake threshold.
-  assert.equal((await supervisor.evaluate({ dayKey: "2026-09-24" })).action, "BRAKE");
+  // The per-book entry brake was applied with the preceding cut and remains
+  // live while its ticket loss is still past the -$120 threshold.
+  assert.equal((await supervisor.evaluate({ dayKey: "2026-09-24" })).action, "NONE");
+  assert.equal(supervisor.getSnapshot().brakedInstruments.includes("SOL/USD"), true);
   assert.deepEqual(cutFractions(sol), [0.10, 0.20]);
 
   // A later worsening back through the -$100 open-loss tier waits for the

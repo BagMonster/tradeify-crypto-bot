@@ -137,7 +137,6 @@ export function createRiskSupervisor({
   getExposurePoolSnapshot = null,
   onRolloverHarvestConfirmed = async () => {},
   freshnessEpisodeStore = null,
-  entryBrakeStore = null,
   freshnessAlertAfterMs = DEFAULT_FRESHNESS_ALERT_AFTER_MS,
   freshnessRecoveredAfterMs = 60 * 1000,
   harvestRetryMs = DEFAULT_HARVEST_RETRY_MS,
@@ -148,9 +147,6 @@ export function createRiskSupervisor({
   if (!config || typeof config !== "object") throw new TypeError("risk config is required");
   if (freshnessEpisodeStore !== null && (typeof freshnessEpisodeStore?.get !== "function" || typeof freshnessEpisodeStore?.save !== "function")) {
     throw new TypeError("freshnessEpisodeStore must provide get() and save()");
-  }
-  if (entryBrakeStore !== null && (typeof entryBrakeStore?.get !== "function" || typeof entryBrakeStore?.save !== "function")) {
-    throw new TypeError("entryBrakeStore must provide get() and save()");
   }
   if (!Number.isSafeInteger(freshnessRecoveredAfterMs) || freshnessRecoveredAfterMs < 0) {
     throw new TypeError("freshnessRecoveredAfterMs must be a non-negative whole number");
@@ -269,8 +265,10 @@ export function createRiskSupervisor({
   // the open loss above its tier threshold, the ladder clears on its own.
   let deepestCutTierFiredUsd = 0;
   let lastCutAtMs = null;
-  const brakedToday = new Set();
-  // Transient per-instrument entry lock. Unlike brakedToday this is neither
+  // Live, per-instrument entry brakes. A book leaves this set as soon as its
+  // current ticket-marked P&L rises above the entry-brake threshold.
+  const lossBrakedInstruments = new Set();
+  // Transient per-instrument entry lock. Unlike lossBrakedInstruments this is neither
   // durable nor an account-wide safety state: it disappears as soon as this
   // book has a verifiable mark again.
   const markUnavailableInstruments = new Set();
@@ -283,7 +281,6 @@ export function createRiskSupervisor({
   let lastError = null;
   let unreadSinceMs = null;
   let freshnessEpisode = null;
-  let entryBrakeState = null;
 
   function emptyFreshnessEpisode() {
     return Object.freeze({ episodeId: 0, status: "RESOLVED", startedAtMs: null, lastUnreadAtMs: null, freshSinceMs: null, alertedAtMs: null, instruments: Object.freeze([]) });
@@ -298,38 +295,6 @@ export function createRiskSupervisor({
   async function saveFreshnessEpisode(next) {
     freshnessEpisode = freshnessEpisodeStore === null ? Object.freeze(next) : await freshnessEpisodeStore.save(next);
     return freshnessEpisode;
-  }
-
-  function normalizeEntryBrakeState(input, expectedDayKey) {
-    const stateDayKey = typeof input?.dayKey === "string" ? input.dayKey : expectedDayKey;
-    if (stateDayKey !== expectedDayKey) throw new Error("entry-brake state day key does not match the requested account day");
-    const allowed = new Set(instruments.map((book) => book.instrument));
-    const names = Array.isArray(input?.instruments) ? input.instruments : [];
-    const unique = [...new Set(names)];
-    if (unique.some((instrument) => typeof instrument !== "string" || !allowed.has(instrument))) {
-      throw new Error("entry-brake state contains an unsupported instrument");
-    }
-    return Object.freeze({ dayKey: expectedDayKey, instruments: Object.freeze(unique) });
-  }
-
-  async function loadEntryBrakes(incomingDayKey) {
-    if (entryBrakeState?.dayKey === incomingDayKey) return entryBrakeState;
-    const stored = entryBrakeStore === null
-      ? { dayKey: incomingDayKey, instruments: [] }
-      : await entryBrakeStore.get(incomingDayKey);
-    entryBrakeState = normalizeEntryBrakeState(stored, incomingDayKey);
-    brakedToday.clear();
-    for (const instrument of entryBrakeState.instruments) brakedToday.add(instrument);
-    return entryBrakeState;
-  }
-
-  async function saveEntryBrakes(incomingDayKey) {
-    const proposed = { dayKey: incomingDayKey, instruments: [...brakedToday] };
-    const saved = entryBrakeStore === null ? proposed : await entryBrakeStore.save(proposed);
-    entryBrakeState = normalizeEntryBrakeState(saved, incomingDayKey);
-    brakedToday.clear();
-    for (const instrument of entryBrakeState.instruments) brakedToday.add(instrument);
-    return entryBrakeState;
   }
 
   async function noteFreshnessOutage(nowMs, instruments) {
@@ -391,7 +356,7 @@ export function createRiskSupervisor({
   let lastProtectionFailureReason = null;
 
   function stickyBrake(instrument) {
-    return flattenedToday === true || brakedToday.has(instrument) || protectionFailing === true;
+    return flattenedToday === true || lossBrakedInstruments.has(instrument) || protectionFailing === true;
   }
 
   function applyEntryBrake(book, on) {
@@ -400,6 +365,30 @@ export function createRiskSupervisor({
     } catch {
       // a book that cannot accept the flag stays in the last known state
     }
+  }
+
+  function reconcileLossBrakes(readings, totalUnrealisedUsd) {
+    const desired = new Set();
+    const missingMarks = readings.filter((reading) => reading.markUnavailable);
+    if (missingMarks.length > 0) {
+      const readableOpenPnl = readings
+        .filter((reading) => !reading.markUnavailable)
+        .reduce((sum, reading) => sum + reading.unrealisedUsd, 0);
+      if (totalUnrealisedUsd - readableOpenPnl <= -entryBrakeUsd) {
+        for (const reading of missingMarks) desired.add(reading.instrument);
+      }
+    }
+    for (const reading of readings) {
+      if (!reading.markUnavailable && reading.unrealisedUsd <= -entryBrakeUsd) desired.add(reading.instrument);
+    }
+
+    const newlyBraked = [...desired].filter((instrument) => !lossBrakedInstruments.has(instrument));
+    lossBrakedInstruments.clear();
+    for (const instrument of desired) lossBrakedInstruments.add(instrument);
+    for (const reading of readings) {
+      applyEntryBrake(reading.book, stickyBrake(reading.instrument) || markUnavailableInstruments.has(reading.instrument));
+    }
+    return newlyBraked;
   }
 
   /**
@@ -500,10 +489,9 @@ export function createRiskSupervisor({
     cutsToday = 0;
     deepestCutTierFiredUsd = 0;
     lastCutAtMs = null;
-    brakedToday.clear();
+    lossBrakedInstruments.clear();
     unreadSinceMs = null;
     harvestRetryAtMs = null;
-    entryBrakeState = null;
     // protectionFailing deliberately survives the rollover. A broken broker
     // session does not heal at 22:00 UTC, and clearing the brake here would
     // silently re-arm entries into an execution path that still cannot cut.
@@ -876,7 +864,6 @@ export function createRiskSupervisor({
     const results = [];
     for (const reading of readings) {
       applyEntryBrake(reading.book, true);
-      brakedToday.add(reading.instrument);
       try {
         results.push({
           instrument: reading.instrument,
@@ -950,9 +937,8 @@ export function createRiskSupervisor({
         if (sessionHarvestEnabled && priorKey !== null) notifications?.enqueue?.({ kind: "HARVEST_RESET", eventKey: `D064-RESET:${incomingDayKey.replaceAll("-", "")}`, dayKey: incomingDayKey });
       }
 
-      await loadEntryBrakes(incomingDayKey);
-      // A Railway restart creates fresh grid instances. Reapply any durable
-      // account-day brakes before considering the first broker snapshot.
+      // A Railway restart never restores an old entry brake. The first fresh
+      // ticket reading decides whether the current P&L still requires one.
       for (const book of instruments) applyEntryBrake(book, stickyBrake(book.instrument));
 
       const readings = readBooks();
@@ -1042,6 +1028,20 @@ export function createRiskSupervisor({
       const totalUnrealisedUsd = fixed2(Number.isFinite(suppliedOpen)
         ? suppliedOpen
         : readings.reduce((sum, r) => sum + r.unrealisedUsd, 0));
+
+      const newlyBraked = reconcileLossBrakes(readings, totalUnrealisedUsd);
+      if (newlyBraked.length > 0) {
+        await addEvent("WARN", "RISK_SUPERVISOR_ENTRY_BRAKE", {
+          instruments: newlyBraked,
+          threshold: -entryBrakeUsd,
+          combinedDayPnlUsd: combined,
+          readings: readings.filter((reading) => newlyBraked.includes(reading.instrument)).map((reading) => ({
+            instrument: reading.instrument,
+            unrealisedUsd: fixed2(reading.unrealisedUsd),
+            source: reading.entryBrakePnlSource
+          }))
+        });
+      }
 
       // cutTiers is sorted deepest-first. A tier fires when open loss breaches
       // it and either escalates beyond the deepest tier already fired, or the
@@ -1137,52 +1137,7 @@ export function createRiskSupervisor({
         }
       }
 
-      const newlyBraked = [];
-      // When mark outages cover a group, the exact broker open P&L minus every
-      // readable ticket P&L is their residual. It cannot identify the losing
-      // member of a multi-book group, so a group loss at the brake threshold
-      // deliberately brakes each unread book rather than treating any as zero.
-      if (missingMarks.length > 0) {
-        const readableOpenPnl = readings
-          .filter((reading) => !reading.markUnavailable)
-          .reduce((sum, reading) => sum + reading.unrealisedUsd, 0);
-        const missingResidual = totalUnrealisedUsd - readableOpenPnl;
-        if (missingResidual <= -entryBrakeUsd) {
-          for (const reading of missingMarks) {
-            if (brakedToday.has(reading.instrument)) continue;
-            brakedToday.add(reading.instrument);
-            applyEntryBrake(reading.book, true);
-            newlyBraked.push(reading.instrument);
-          }
-        }
-      }
-      for (const reading of readings) {
-        if (reading.markUnavailable) continue;
-        if (brakedToday.has(reading.instrument)) continue;
-        if (reading.unrealisedUsd <= -entryBrakeUsd) {
-          brakedToday.add(reading.instrument);
-          applyEntryBrake(reading.book, true);
-          newlyBraked.push(reading.instrument);
-        }
-      }
-
-      if (newlyBraked.length > 0) await saveEntryBrakes(incomingDayKey);
-
-      for (const reading of readings) {
-        if (!stickyBrake(reading.instrument) && !markUnavailableInstruments.has(reading.instrument)) applyEntryBrake(reading.book, false);
-      }
-
       if (newlyBraked.length > 0) {
-        await addEvent("WARN", "RISK_SUPERVISOR_ENTRY_BRAKE", {
-          instruments: newlyBraked,
-          threshold: -entryBrakeUsd,
-          combinedDayPnlUsd: combined,
-          readings: readings.filter((reading) => newlyBraked.includes(reading.instrument)).map((reading) => ({
-            instrument: reading.instrument,
-            unrealisedUsd: fixed2(reading.unrealisedUsd),
-            source: reading.entryBrakePnlSource
-          }))
-        });
         return Object.freeze({ action: "BRAKE", instruments: Object.freeze(newlyBraked), combinedDayPnlUsd: combined });
       }
 
@@ -1313,7 +1268,7 @@ export function createRiskSupervisor({
       partialCutFraction,
       cutTiers,
       fullFlattenUsd,
-      brakedInstruments: Object.freeze([...brakedToday]),
+      brakedInstruments: Object.freeze([...lossBrakedInstruments]),
       flattenedToday,
       harvest: harvestState,
       sessionHarvestEnabled,
@@ -1351,7 +1306,7 @@ export function createRiskSupervisor({
         unrealisedUsd: fixed2(r.unrealisedUsd),
         exposureUsd: fixed2(r.exposureUsd),
         entryBrakePnlSource: r.entryBrakePnlSource,
-        braked: brakedToday.has(r.instrument),
+        braked: lossBrakedInstruments.has(r.instrument),
         markUnavailable: r.markUnavailable,
         entryBlockedForMark: markUnavailableInstruments.has(r.instrument),
         // Whether this book would be cut if a tier fired right now.
