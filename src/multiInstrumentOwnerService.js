@@ -217,12 +217,17 @@ export function createMultiInstrumentOwnerService({
 
     const per = Array.isArray(snapshot.perInstrument) ? snapshot.perInstrument : [];
     const unread = per.filter((entry) => entry.readFailed === true).map((entry) => entry.instrument);
+    const marksUnavailable = per.filter((entry) => entry.markUnavailable === true).map((entry) => entry.instrument);
     if (unread.length > 0) {
       lines.push(`  *** RISK DATA UNREADABLE on ${unread.length}/${per.length}: ${unread.join(", ")} ***`);
       lines.push("  Combined figures above are NOT reliable. The ladder cannot act on an unread book.");
     } else if (per.length > 0) {
       lines.push(`  risk reads: ${per.length}/${per.length} OK`);
-      lines.push(`  entry-brake P&L (ticket-marked): ${per.map((entry) => `${entry.instrument} ${money(entry.unrealisedUsd)}`).join(" · ")}`);
+      if (marksUnavailable.length > 0) {
+        lines.push(`  market marks pending: ${marksUnavailable.join(", ")} · entries blocked only on those books`);
+        lines.push("  DXtrade account figures and account-wide protection remain active.");
+      }
+      lines.push(`  entry-brake P&L: ${per.map((entry) => `${entry.instrument} ${entry.markUnavailable ? "mark unavailable" : `${money(entry.unrealisedUsd)} (${entry.entryBrakePnlSource})`}`).join(" · ")}`);
     }
     lines.push(`  supervisor day: ${snapshot.dayKey ?? "not yet evaluated (no price tick processed since start)"}`);
 

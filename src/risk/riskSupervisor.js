@@ -130,6 +130,7 @@ export function createRiskSupervisor({
   notifications = null,
   harvestStore = null,
   getCombinedDayPnlUsd = null,
+  getCombinedOpenPnlUsd = null,
   setSafetyHalt = async () => {},
   clearSafetyHaltIfReason = async () => false,
   getSafetyHaltState = async () => null,
@@ -269,6 +270,10 @@ export function createRiskSupervisor({
   let deepestCutTierFiredUsd = 0;
   let lastCutAtMs = null;
   const brakedToday = new Set();
+  // Transient per-instrument entry lock. Unlike brakedToday this is neither
+  // durable nor an account-wide safety state: it disappears as soon as this
+  // book has a verifiable mark again.
+  const markUnavailableInstruments = new Set();
   let evaluating = false;
   // This promise is shared by every caller in this worker. It supplements the
   // evaluation gate and makes the harvest operation itself single-flight.
@@ -906,16 +911,29 @@ export function createRiskSupervisor({
       let dayPnlUsd = 0;
       let exposureUsd = 0;
       let readFailed = false;
+      let markUnavailable = false;
+      let hasOpenPosition = false;
       let entryBrakePnlSource = "UNAVAILABLE";
       try {
-        unrealisedUsd = Number(book.getUnrealisedUsd()) || 0;
-        dayPnlUsd = Number(book.getDayPnlUsd()) || 0;
-        exposureUsd = Number(book.getExposureUsd()) || 0;
-        if (typeof book.getEntryBrakePnlSource === "function") entryBrakePnlSource = String(book.getEntryBrakePnlSource());
+        if (typeof book.getRiskReading === "function") {
+          const risk = book.getRiskReading();
+          unrealisedUsd = Number(risk?.unrealisedUsd) || 0;
+          dayPnlUsd = Number(risk?.dayPnlUsd) || 0;
+          exposureUsd = Number(risk?.exposureUsd) || 0;
+          markUnavailable = risk?.markUnavailable === true;
+          hasOpenPosition = risk?.hasOpenPosition === true;
+          entryBrakePnlSource = String(risk?.source ?? "UNAVAILABLE");
+        } else {
+          unrealisedUsd = Number(book.getUnrealisedUsd()) || 0;
+          dayPnlUsd = Number(book.getDayPnlUsd()) || 0;
+          exposureUsd = Number(book.getExposureUsd()) || 0;
+          if (typeof book.getEntryBrakePnlSource === "function") entryBrakePnlSource = String(book.getEntryBrakePnlSource());
+          hasOpenPosition = exposureUsd > 0;
+        }
       } catch {
         readFailed = true;
       }
-      return { book, instrument: book.instrument, unrealisedUsd, dayPnlUsd, exposureUsd, entryBrakePnlSource, readFailed };
+      return { book, instrument: book.instrument, unrealisedUsd, dayPnlUsd, exposureUsd, entryBrakePnlSource, readFailed, markUnavailable, hasOpenPosition };
     });
   }
 
@@ -994,6 +1012,19 @@ export function createRiskSupervisor({
         }
       }
 
+      // A missing Binance mark is a local entry condition, not a DXtrade
+      // account outage. Keep that one book closed to new risk while its cached
+      // REST refresh completes, but keep the rest of the ladder alive.
+      markUnavailableInstruments.clear();
+      for (const reading of readings) {
+        if (reading.markUnavailable) markUnavailableInstruments.add(reading.instrument);
+        applyEntryBrake(reading.book, stickyBrake(reading.instrument) || markUnavailableInstruments.has(reading.instrument));
+      }
+      const missingMarks = readings.filter((reading) => reading.markUnavailable);
+      if (missingMarks.length > 0) {
+        lastError = `Mark unavailable: ${missingMarks.map((reading) => reading.instrument).join(", ")}; entries blocked only on those books`;
+      }
+
       const suppliedCombined = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
       const combined = fixed2(Number.isFinite(suppliedCombined) ? suppliedCombined : readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
       await loadHarvest(incomingDayKey);
@@ -1007,7 +1038,10 @@ export function createRiskSupervisor({
 
       if (harvestBlocksNormalActions()) return runHarvest({ incomingDayKey, combined, readings });
 
-      const totalUnrealisedUsd = fixed2(readings.reduce((sum, r) => sum + r.unrealisedUsd, 0));
+      const suppliedOpen = typeof getCombinedOpenPnlUsd === "function" ? Number(getCombinedOpenPnlUsd()) : NaN;
+      const totalUnrealisedUsd = fixed2(Number.isFinite(suppliedOpen)
+        ? suppliedOpen
+        : readings.reduce((sum, r) => sum + r.unrealisedUsd, 0));
 
       // cutTiers is sorted deepest-first. A tier fires when open loss breaches
       // it and either escalates beyond the deepest tier already fired, or the
@@ -1022,9 +1056,11 @@ export function createRiskSupervisor({
       }) ?? null;
       if (activeTier) {
         const allocations = allocateProportionalCut(
-          readings.map((r) => ({ instrument: r.instrument, unrealisedUsd: r.unrealisedUsd })),
+          readings.filter((r) => !r.markUnavailable).map((r) => ({ instrument: r.instrument, unrealisedUsd: r.unrealisedUsd })),
           activeTier.fraction
-        );
+        ).concat(readings
+          .filter((r) => r.markUnavailable && r.hasOpenPosition)
+          .map((r) => Object.freeze({ instrument: r.instrument, share: null, fraction: Number(activeTier.fraction.toFixed(6)), unrealisedLossUsd: null, markUnavailable: true })));
         if (allocations.length === 0) {
           // The tier is breached but no book is carrying an unrealised loss.
           // Nothing is cut and the cooldown is NOT consumed, because no cut
@@ -1048,7 +1084,9 @@ export function createRiskSupervisor({
                 fraction: allocation.fraction,
                 result: await reading.book.executeProtectiveCut({
                   fraction: allocation.fraction,
-                  reason: `D-063 tier cut ${(activeTier.fraction * 100).toFixed(0)}% at unrealised ${totalUnrealisedUsd.toFixed(2)} (tier -${activeTier.thresholdUsd}, combined ${combined.toFixed(2)}, this book ${allocation.unrealisedLossUsd.toFixed(2)} = ${(allocation.share * 100).toFixed(1)}% of the loss)`,
+                  reason: allocation.markUnavailable
+                    ? `D-063 tier cut ${(activeTier.fraction * 100).toFixed(0)}% at broker unrealised ${totalUnrealisedUsd.toFixed(2)} (tier -${activeTier.thresholdUsd}; ${allocation.instrument} mark unavailable, protective fraction applied)`
+                    : `D-063 tier cut ${(activeTier.fraction * 100).toFixed(0)}% at unrealised ${totalUnrealisedUsd.toFixed(2)} (tier -${activeTier.thresholdUsd}, combined ${combined.toFixed(2)}, this book ${allocation.unrealisedLossUsd.toFixed(2)} = ${(allocation.share * 100).toFixed(1)}% of the loss)`,
                   dayKey: incomingDayKey,
                   bypassSlippageCap: true
                 })
@@ -1100,7 +1138,26 @@ export function createRiskSupervisor({
       }
 
       const newlyBraked = [];
+      // When mark outages cover a group, the exact broker open P&L minus every
+      // readable ticket P&L is their residual. It cannot identify the losing
+      // member of a multi-book group, so a group loss at the brake threshold
+      // deliberately brakes each unread book rather than treating any as zero.
+      if (missingMarks.length > 0) {
+        const readableOpenPnl = readings
+          .filter((reading) => !reading.markUnavailable)
+          .reduce((sum, reading) => sum + reading.unrealisedUsd, 0);
+        const missingResidual = totalUnrealisedUsd - readableOpenPnl;
+        if (missingResidual <= -entryBrakeUsd) {
+          for (const reading of missingMarks) {
+            if (brakedToday.has(reading.instrument)) continue;
+            brakedToday.add(reading.instrument);
+            applyEntryBrake(reading.book, true);
+            newlyBraked.push(reading.instrument);
+          }
+        }
+      }
       for (const reading of readings) {
+        if (reading.markUnavailable) continue;
         if (brakedToday.has(reading.instrument)) continue;
         if (reading.unrealisedUsd <= -entryBrakeUsd) {
           brakedToday.add(reading.instrument);
@@ -1112,7 +1169,7 @@ export function createRiskSupervisor({
       if (newlyBraked.length > 0) await saveEntryBrakes(incomingDayKey);
 
       for (const reading of readings) {
-        if (!stickyBrake(reading.instrument)) applyEntryBrake(reading.book, false);
+        if (!stickyBrake(reading.instrument) && !markUnavailableInstruments.has(reading.instrument)) applyEntryBrake(reading.book, false);
       }
 
       if (newlyBraked.length > 0) {
@@ -1233,7 +1290,10 @@ export function createRiskSupervisor({
     const suppliedCombined = typeof getCombinedDayPnlUsd === "function" ? Number(getCombinedDayPnlUsd()) : NaN;
     const dayPnlUsd = fixed2(Number.isFinite(suppliedCombined) ? suppliedCombined : readings.reduce((sum, r) => sum + r.dayPnlUsd, 0));
     const exposureUsd = fixed2(readings.reduce((sum, r) => sum + r.exposureUsd, 0));
-    const totalUnrealisedUsd = fixed2(readings.reduce((sum, r) => sum + r.unrealisedUsd, 0));
+    const suppliedOpen = typeof getCombinedOpenPnlUsd === "function" ? Number(getCombinedOpenPnlUsd()) : NaN;
+    const totalUnrealisedUsd = fixed2(Number.isFinite(suppliedOpen)
+      ? suppliedOpen
+      : readings.reduce((sum, r) => sum + r.unrealisedUsd, 0));
     const activeCutTier = cutTiers.find((tier) => totalUnrealisedUsd <= -tier.thresholdUsd) ?? null;
     const activeCutCooldownRemainingMs = lastCutAtMs === null
       ? 0
@@ -1292,6 +1352,8 @@ export function createRiskSupervisor({
         exposureUsd: fixed2(r.exposureUsd),
         entryBrakePnlSource: r.entryBrakePnlSource,
         braked: brakedToday.has(r.instrument),
+        markUnavailable: r.markUnavailable,
+        entryBlockedForMark: markUnavailableInstruments.has(r.instrument),
         // Whether this book would be cut if a tier fired right now.
         cuttable: r.unrealisedUsd < 0,
         readFailed: r.readFailed

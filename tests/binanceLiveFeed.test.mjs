@@ -34,12 +34,17 @@ class MockWebSocket {
   close() { this.readyState = 3; this.emit("close"); }
 }
 
-test("live feed starts stale, accepts monotonic BTC trades, and stops safely", () => {
+test("live feed distinguishes a quiet trade stream from a dead connection", () => {
   MockWebSocket.instances = [];
   const states = [];
   const prices = [];
   const errors = [];
-  const setTimeoutImpl = (fn, ms) => ({ fn, ms, cleared: false, unref() {} });
+  const timers = [];
+  const setTimeoutImpl = (fn, ms) => {
+    const timer = { fn, ms, cleared: false, unref() {} };
+    timers.push(timer);
+    return timer;
+  };
   const clearTimeoutImpl = (timer) => { if (timer) timer.cleared = true; };
   const feed = createBinanceLiveFeed({
     webSocketImpl: MockWebSocket,
@@ -55,13 +60,20 @@ test("live feed starts stale, accepts monotonic BTC trades, and stops safely", (
   const ws = MockWebSocket.instances[0];
   assert.equal(ws.url, BINANCE_LIVE_FEED_IDENTITY.url);
   ws.open();
-  assert.equal(feed.getState().stale, true);
+  assert.equal(feed.getState().stale, false);
+  assert.equal(feed.getState().tradeQuiet, true);
 
   ws.emit("message", { data: JSON.stringify({
     e: "trade", E: 1787446800000, s: "BTCUSDT", t: 100, p: "65000", q: "0.001", T: 1787446799999
   }) });
   assert.equal(prices.length, 1);
   assert.equal(feed.getState().stale, false);
+  assert.equal(feed.getState().tradeQuiet, false);
+
+  timers.at(-1).fn();
+  assert.equal(feed.getState().connected, true);
+  assert.equal(feed.getState().stale, false);
+  assert.equal(feed.getState().tradeQuiet, true);
 
   ws.emit("message", { data: JSON.stringify({
     e: "trade", E: 1787446800000, s: "BTCUSDT", t: 100, p: "65001", q: "0.001", T: 1787446800000

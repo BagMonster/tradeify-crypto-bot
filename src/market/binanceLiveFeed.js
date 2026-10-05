@@ -65,6 +65,7 @@ function freezeState(state) {
     running: state.running,
     connected: state.connected,
     stale: state.stale,
+    tradeQuiet: state.tradeQuiet,
     lastTradeAt: state.lastTradeAt,
     lastTradeId: state.lastTradeId,
     reconnectAttempt: state.reconnectAttempt
@@ -105,6 +106,7 @@ export function createBinanceLiveFeed({
     running: false,
     connected: false,
     stale: true,
+    tradeQuiet: true,
     lastTradeAt: null,
     lastTradeId: null,
     reconnectAttempt: 0
@@ -134,7 +136,10 @@ export function createBinanceLiveFeed({
     staleTimer = setTimeoutImpl(() => {
       staleTimer = null;
       if (!state.running) return;
-      state.stale = true;
+      // A quiet market is not a dead WebSocket.  `stale` is reserved for an
+      // unavailable connection; callers can use tradeQuiet to schedule a
+      // background REST mark confirmation without blocking other books.
+      state.tradeQuiet = true;
       emitState();
     }, staleAfterMs);
     staleTimer?.unref?.();
@@ -172,7 +177,8 @@ export function createBinanceLiveFeed({
         return;
       }
       state.connected = true;
-      state.stale = true;
+      state.stale = false;
+      state.tradeQuiet = true;
       state.reconnectAttempt = 0;
       emitState();
       armStaleTimer();
@@ -189,6 +195,7 @@ export function createBinanceLiveFeed({
         state.lastTradeId = trade.tradeId;
         state.lastTradeAt = trade.tradeTime;
         state.stale = false;
+        state.tradeQuiet = false;
         armStaleTimer();
         emitState();
         onPrice(trade);
@@ -206,6 +213,7 @@ export function createBinanceLiveFeed({
       clearTimer("stale");
       state.connected = false;
       state.stale = true;
+      state.tradeQuiet = true;
       emitState();
       scheduleReconnect();
     });
@@ -215,6 +223,7 @@ export function createBinanceLiveFeed({
     if (state.running) return freezeState(state);
     state.running = true;
     state.stale = true;
+    state.tradeQuiet = true;
     state.reconnectAttempt = 0;
     emitState();
     openSocket();
@@ -229,6 +238,7 @@ export function createBinanceLiveFeed({
     clearTimer("reconnect");
     state.connected = false;
     state.stale = true;
+    state.tradeQuiet = true;
     try {
       if (socket && (socket.readyState === 0 || socket.readyState === 1)) {
         socket.close(1000, "Binance live feed stopped");
