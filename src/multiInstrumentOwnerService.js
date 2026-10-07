@@ -56,7 +56,8 @@ export function createMultiInstrumentOwnerService({
   // it entirely - none of them need to know about sessions or flattening.
   reloginAll = null,
   flattenAll = null,
-  executionHealth = null
+  executionHealth = null,
+  recoverAnchors = null
 }) {
   if (!Array.isArray(instrumentConfigs) || instrumentConfigs.length === 0) {
     throw new TypeError("instrumentConfigs must be a non-empty array");
@@ -64,6 +65,7 @@ export function createMultiInstrumentOwnerService({
 
   const enabled = instrumentConfigs.filter((cfg) => cfg.enabled === true);
   if (enabled.length === 0) throw new TypeError("at least one instrument must be enabled");
+  if (recoverAnchors !== null && typeof recoverAnchors !== "function") throw new TypeError("recoverAnchors must be a function");
 
   const books = enabled.map((cfg) => Object.freeze({
     instrument: cfg.instrument,
@@ -395,6 +397,27 @@ export function createMultiInstrumentOwnerService({
     },
     anchorHistoryText: (arg) => fanOut("anchorHistoryText", arg),
     anchorStatsText: (arg) => fanOut("anchorStatsText", arg),
+    async anchorRecoveryText(confirm) {
+      if (typeof recoverAnchors !== "function") return "Anchor recovery is not configured on this deployment.";
+      if (String(confirm ?? "").trim().toUpperCase() !== "CONFIRM") {
+        return [
+          "ANCHOR SHIFT RECOVERY",
+          "",
+          "Use only after a confirmed account-wide flat event whose anchor shift was missed during a deploy.",
+          "It takes a fresh DXtrade snapshot, then starts the normal 9-second entry hold and requires a second fresh flat snapshot.",
+          "It never places a DXtrade order. It refuses if any book or virtual lot is open.",
+          "",
+          "To start, send /anchorrecover CONFIRM"
+        ].join("\n");
+      }
+      const result = await recoverAnchors();
+      if (result.action === "HOLD_STARTED") {
+        return `ANCHOR SHIFT HOLD STARTED\n\nVerified flat account. Entries are held for 9 seconds while awaiting a second fresh DXtrade flat snapshot.\nPending: ${result.instruments.join(", ")}`;
+      }
+      if (result.action === "HOLD_ALREADY_STARTED") return "Anchor shift confirmation is already in progress. Entries remain held until it completes or is cancelled by a non-flat or unhealthy snapshot.";
+      if (result.action === "RECOVERY_NOT_NEEDED") return "Anchor recovery is not needed: no pending anchor excursion is recorded.";
+      return "Anchor recovery was refused. The account must be freshly readable, broker-flat, virtual-flat, and have no order in flight. No anchor changed.";
+    },
     async healthText(arg) {
       // The execution probe goes FIRST and on its own line. On 2026-09-19
       // /status and /health both reported 5/5 OK while every protective cut

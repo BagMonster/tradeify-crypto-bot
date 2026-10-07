@@ -89,7 +89,7 @@ test("instrument callback maps to the live book name", () => {
 });
 
 test("every slash command still registered after adding buttons", () => {
-  for (const cmd of ["status", "risk", "anchors", "anchor", "anchorhistory", "anchorstats", "health", "levels", "rings", "dxpreflight", "solcanary", "kill", "resume",
+  for (const cmd of ["status", "risk", "anchors", "anchor", "anchorhistory", "anchorstats", "anchorrecover", "health", "levels", "rings", "dxpreflight", "solcanary", "kill", "resume",
                      "confirmresume", "reconcile", "confirmreconcile", "rematch", "confirmrematch",
                      "flat", "code", "devstatus", "devreset", "devexit", "whoami"]) {
     assert.match(SOURCE, new RegExp(`\\\\/${cmd}\\b`), `slash command /${cmd} disappeared`);

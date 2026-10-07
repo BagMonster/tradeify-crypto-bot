@@ -183,6 +183,7 @@ export function createRingExecutionGuard({
   lotStep = 0.01,
   autoExecute,
   strategyAutoExecute,
+  isOperatorPaused = () => false,
   adapter,
   client,
   persistence,
@@ -207,6 +208,7 @@ export function createRingExecutionGuard({
   const LOT_STEP_LOCAL_LOCAL = Number(lotStep);
   if (!Number.isFinite(LOT_STEP_LOCAL_LOCAL) || LOT_STEP_LOCAL_LOCAL <= 0) throw new TypeError("lotStep must be positive");
   if (typeof autoExecute !== "boolean" || typeof strategyAutoExecute !== "boolean") throw new TypeError("execution locks must be boolean");
+  if (typeof isOperatorPaused !== "function") throw new TypeError("isOperatorPaused must be a function");
   if (typeof adapter?.place !== "function") throw new TypeError("quantity adapter is invalid");
   if (typeof client?.getOpenPositions !== "function" || typeof client?.placePositionClose !== "function" ||
       typeof client?.placePositionPartialClose !== "function" || typeof client?.reconcileQuantityOrder !== "function") {
@@ -274,7 +276,7 @@ export function createRingExecutionGuard({
   }
 
   function isEnabled() {
-    return autoExecute && strategyAutoExecute;
+    return autoExecute && strategyAutoExecute && isOperatorPaused() !== true;
   }
 
   // An ENTRY opens new exposure and correctly uses positionEffect OPEN.

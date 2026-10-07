@@ -139,6 +139,11 @@ export function createRingGridInstance({
     if (result.status !== "FILLED") return result;
     const next = grid.resetAfterProtectiveFlatten(state, { fillPrice: result.fillPrice, filledAt: result.filledAt });
     await store.save(state.version, next);
+    // The anchor-shift coordinator reads this in-memory state while confirming
+    // a broker-flat account. Keep it synchronized with the durable reset so a
+    // confirmed account-wide harvest is immediately eligible for its two
+    // fresh-snapshot / nine-second confirmation flow.
+    currentState = next;
     return result;
   }
 

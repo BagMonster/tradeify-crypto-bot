@@ -33,6 +33,8 @@ const KINDS = new Set([
   "EXPOSURE_GATE_CLOSED",
   "EXPOSURE_GATE_REOPENED",
   "ANCHOR_EXCURSION_STARTED",
+  "ANCHOR_SHIFT_HOLD_STARTED",
+  "ANCHOR_SHIFT_CANCELLED",
   "ANCHOR_SHIFT_CONFIRMED",
   "DUST_CLEANUP_SUMMARY"
 ]);
@@ -678,6 +680,31 @@ function formatEvent(event) {
       kind,
       eventKey,
       message: `${instrument} has run past its outermost ${side === "UPPER" ? "SELL" : "BUY"} ring (${side === "UPPER" ? "+" : "−"}${(outerDistance * 100).toFixed(1)}%).\nTracking the extreme beyond ${formatPrice(boundary)}; the grid will shift after the next confirmed flat account.`
+    };
+  }
+
+  if (kind === "ANCHOR_SHIFT_HOLD_STARTED") {
+    const holdMs = positive("anchor hold duration", event.holdMs);
+    const instruments = Array.isArray(event.instruments) ? event.instruments.map((value) => requiredInstrument(value)).slice(0, 20) : [];
+    return {
+      kind,
+      eventKey,
+      message: [
+        "⏳ ANCHOR SHIFT HOLD STARTED",
+        `Account is verified flat. New entries are held for ${(holdMs / 1000).toFixed(0)} seconds while a second fresh DXtrade flat snapshot is required.`,
+        `Pending: ${instruments.length > 0 ? instruments.join(", ") : "recorded excursions"}`,
+        "No order was placed."
+      ].join("\n")
+    };
+  }
+
+  if (kind === "ANCHOR_SHIFT_CANCELLED") {
+    const reason = safeText("anchor hold cancellation reason", event.reason, { max: 64 });
+    if (!["ACCOUNT_NOT_FLAT", "BROKER_UNHEALTHY_OR_LOCKED"].includes(reason)) throw new TypeError("anchor hold cancellation reason is invalid");
+    return {
+      kind,
+      eventKey,
+      message: `ANCHOR SHIFT HOLD CANCELLED\n${reason === "ACCOUNT_NOT_FLAT" ? "The account was no longer flat." : "Fresh DXtrade data was unavailable or locked."}\nNo anchor changed and no order was placed.`
     };
   }
 
