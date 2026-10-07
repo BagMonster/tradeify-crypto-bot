@@ -67,6 +67,22 @@ test("4. recenter requires a not-flat transition, two healthy reads, and the nin
   assert.equal(held, false, "an in-flight order cannot start a hold");
 });
 
+test("4b. verified-flat recovery still requires the nine-second hold and another fresh snapshot", async () => {
+  let t = 0; let shifted = 0; let held = false; let pending = true;
+  const coordinator = createAnchorShiftCoordinator({
+    books: [{ instrument: "ZEC/USD", setAnchorShiftHold: (on) => { held = on; }, hasPendingAnchorExcursion: () => pending, hasVirtualLots: () => false, hasOrderInFlight: () => false, applyAnchorShift: async () => { shifted += 1; pending = false; return { shifted: true, instrument: "ZEC/USD" }; } }],
+    now: () => t, holdMs: 9000
+  });
+  const flat = { openPositionsCount: 0, signedNetReadOk: true, accountLocked: false, positionsReadFailed: false };
+  assert.equal((await coordinator.beginVerifiedFlatRecovery(flat)).action, "HOLD_STARTED");
+  assert.equal(held, true);
+  t = 8_999; assert.equal((await coordinator.observe(flat)).action, "HOLDING");
+  assert.equal(shifted, 0);
+  t = 9_000; assert.equal((await coordinator.observe(flat)).action, "SHIFTED");
+  assert.equal(shifted, 1); assert.equal(held, false);
+  assert.equal((await coordinator.beginVerifiedFlatRecovery({ ...flat, openPositionsCount: 1 })).action, "RECOVERY_REFUSED");
+});
+
 function fixtureDefinition() {
   return buildGridDefinition({ instrument: "SOL/USD", marketSymbol: "SOLUSDT", orderPrefix: "SOL", geometry: { maDays: 200, bandPct: 0.05, deadZoneBands: 0, activeLevelsPerSide: 2, growth: 1.2, innerLevels: 1, innerPositionsPerRing: 1, outerPositionsPerRing: 2, rearmBands: 0.5 }, sizing: { capUsd: 500, lotStep: 0.01, roundTripCostFloorPct: 0.001 }, tranches: { weights: [1, 2, 3, 4], denominator: 10 } });
 }
@@ -113,6 +129,7 @@ test("7. multiplier x1.0 reproduces existing ring candidates exactly", () => {
 test("8. anchor command views render fixture state and unknown coin is clear", async () => {
   const service = createMultiInstrumentOwnerService({
     instrumentConfigs: [{ instrument: "SOL/USD", orderPrefix: "SOL", enabled: true }],
+    recoverAnchors: async () => ({ action: "HOLD_STARTED", instruments: ["SOL/USD"] }),
     buildOwnerService: () => ({
       anchorSummaryLine: async () => "SOL/USD  ×1.0000  anchor $100.00 (MA $100.00)  excursion: none  shifts: 0",
       anchorText: async () => "SOL/USD ANCHOR DETAIL\nProjected shift: ×1.2414",
@@ -126,4 +143,6 @@ test("8. anchor command views render fixture state and unknown coin is clear", a
   assert.match(await service.anchorHistoryText("SOL"), /HISTORY/);
   assert.match(await service.anchorStatsText("SOL"), /STATS/);
   assert.match(await service.anchorText("NOPE"), /Unknown instrument/);
+  assert.match(await service.anchorRecoveryText(), /CONFIRM/);
+  assert.match(await service.anchorRecoveryText("CONFIRM"), /HOLD STARTED/);
 });
