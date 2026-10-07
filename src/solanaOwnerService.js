@@ -176,12 +176,15 @@ export function createSolanaOwnerService(opts) {
     const inputs = await anchorInputs();
     if (inputs.error) return `${definition.instrument}  anchor unavailable`;
     const historyCount = await anchorStore.count?.() ?? (await anchorStore.history(10)).length;
-    return formatAnchorLine({ instrument: definition.instrument, state: inputs.state, ma: inputs.ma, price: inputs.price, geometry: definition, historyCount });
+    const reconciled = await anchorStore.countReconciliations?.() ?? 0;
+    return formatAnchorLine({ instrument: definition.instrument, state: inputs.state, ma: inputs.ma, price: inputs.price, geometry: definition, historyCount }) + (reconciled ? ` · reconciled saved states: ${reconciled}` : "");
   }
 
   async function anchorHistoryText() {
     if (!anchorStore) return "Anchor history is unavailable.";
-    return formatAnchorHistory(await anchorStore.history(10), definition.instrument);
+    const [shifts, reconciled] = await Promise.all([anchorStore.history(10), anchorStore.reconciliations?.(10) ?? []]);
+    const rows = [...shifts, ...reconciled].sort((a, b) => Date.parse(b.shiftedAt) - Date.parse(a.shiftedAt)).slice(0, 10);
+    return formatAnchorHistory(rows, definition.instrument);
   }
 
   async function anchorStatsText() {

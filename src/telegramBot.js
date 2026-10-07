@@ -28,6 +28,7 @@ const HELP_TEXT = [
   "/anchors - all grid anchors and pending excursions",
   "/anchor <COIN> - one coin's anchor, boundaries, and projected shift",
   "/anchorhistory [COIN] - last 10 anchor shifts",
+  "/anchorreconcile [CONFIRM] - preview or record missing saved-anchor audit history",
   "/anchorstats [COIN] - entries, exits and P&L since the last anchor shift",
   "/anchorrecover CONFIRM - recover a missed shift after a verified flat account",
   "/health [INSTRUMENT] - worker, PostgreSQL, MA, execution",
@@ -253,6 +254,10 @@ export async function startTelegramBot({
 
   bot.onText(/^\/anchorstats(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
     await sendLatched(message.chat.id, "/anchorstats", await service.anchorStatsText(match?.[1]));
+  }));
+
+  bot.onText(/^\/anchorreconcile(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {
+    await sendLatched(message.chat.id, "/anchorreconcile", await service.anchorReconciliationText(match?.[1]));
   }));
 
   bot.onText(/^\/anchorrecover(?:@\w+)?(?:\s+(\S+))?$/i, withAuthorization(async (message, match) => {

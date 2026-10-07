@@ -34,6 +34,7 @@ import { describeAccountProfile } from "./src/config/accountProfile.js";
 import { createExposureGate, formatExposurePoolLine } from "./src/risk/exposureGate.js";
 import { createLivenessStore, createLivenessHeartbeat } from "./src/monitoring/livenessStore.js";
 import { createDailyDustCleanupCoordinator } from "./src/risk/dailyDustCleanup.js";
+import { createAnchorHistoryReconciliation } from "./src/runtime/anchorHistoryReconciliation.js";
 import { createAnchorShiftCoordinator } from "./src/risk/anchorShiftCoordinator.js";
 import { createAnchorShiftRecovery } from "./src/runtime/anchorShiftRecovery.js";
 
@@ -349,6 +350,15 @@ anchorShiftCoordinator = createAnchorShiftCoordinator({
 });
 
 anchorShiftRecovery = createAnchorShiftRecovery({ accountMonitor, coordinator: anchorShiftCoordinator });
+
+const anchorHistoryReconciliation = createAnchorHistoryReconciliation({
+  persistence, accountMonitor, coordinator: anchorShiftCoordinator,
+  isExecutionEnabled: () => environment.autoExecute || stacks.some((s) => s.execution.isEnabled()),
+  books: stacks.map((s) => ({ instrument: s.cfg.instrument,
+    hasVirtualLots: () => s.runtime.hasVirtualLots(),
+    hasOrderInFlight: () => s.runtime.hasOrderInFlight(),
+    getAnchorState: () => s.runtime.getAnchorState() }))
+});
 
 const startupDustCleanupDayKey = accountDayKey(Date.now());
 
@@ -896,6 +906,7 @@ const service = createMultiInstrumentOwnerService({
   riskSupervisor,
   sharedPause: sharedExecutionPause,
   recoverAnchors: anchorShiftRecovery.recover,
+  reconcileAnchorHistory: anchorHistoryReconciliation.run,
   getAnchorRecoveryStatus: anchorShiftCoordinator.getSnapshot,
   haltWarnings,
   // Required by /re-run. Without `database` the rerun handlers degrade to

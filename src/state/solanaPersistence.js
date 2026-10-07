@@ -117,6 +117,15 @@ CREATE TABLE IF NOT EXISTS ring_anchor_shift_history (
   ma_now NUMERIC(30,12) NOT NULL,
   old_multiplier NUMERIC(30,16) NOT NULL,
   new_multiplier NUMERIC(30,16) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ring_anchor_shift_reconciliations (
+  instrument TEXT NOT NULL,
+  shifted_at TIMESTAMPTZ NOT NULL,
+  saved_multiplier NUMERIC(30,16) NOT NULL CHECK (saved_multiplier > 0),
+  reconciled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  source TEXT NOT NULL DEFAULT 'SAVED_STATE_WITHOUT_HISTORY'
+    CHECK (source = 'SAVED_STATE_WITHOUT_HISTORY'),
+  PRIMARY KEY (instrument, shifted_at)
 )`;
 
 function text(name, value, max = 128) {
@@ -341,6 +350,68 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     return Number(result.rows[0].count);
   }
 
+  async function inspectAnchorHistoryGaps(instruments) {
+    const result = await query(`SELECT s.instrument, s.last_shift_at, s.multiplier::text AS saved_multiplier
+      FROM ring_anchor_shift_state s
+      WHERE s.instrument = ANY($1::text[]) AND s.last_shift_at IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM ring_anchor_shift_history h
+          WHERE h.instrument=s.instrument AND h.shifted_at=s.last_shift_at)
+        AND NOT EXISTS (SELECT 1 FROM ring_anchor_shift_reconciliations r
+          WHERE r.instrument=s.instrument AND r.shifted_at=s.last_shift_at)
+      ORDER BY s.instrument`, [instruments.map((i) => text("instrument", i, 64))]);
+    return result.rows.map((row) => ({ instrument: row.instrument,
+      shiftedAt: new Date(row.last_shift_at).toISOString(), savedMultiplier: row.saved_multiplier }));
+  }
+
+  async function reconcileAnchorHistory(gaps, validateSafe) {
+    if (typeof validateSafe !== "function") throw new TypeError("reconciliation safety check is required");
+    let client;
+    let committed = false;
+    const run = (sql, values = []) => client.query({ text: sql, values, query_timeout: 12_000 });
+    try {
+      client = await pool.connect();
+      await run("BEGIN");
+      await run("SET LOCAL statement_timeout = '10s'");
+      await run("SET LOCAL lock_timeout = '5s'");
+      if (!validateSafe()) throw new Error("reconciliation safety check failed");
+      const recorded = [];
+      // Deterministic row locking; saveAnchorState and commitAnchorShift acquire
+      // the same row lock. No geometry or ordinary shift-history writes here.
+      for (const gap of [...gaps].sort((a, b) => a.instrument.localeCompare(b.instrument))) {
+        const current = await run(`SELECT last_shift_at, multiplier::text AS saved_multiplier
+          FROM ring_anchor_shift_state WHERE instrument=$1 FOR UPDATE`, [gap.instrument]);
+        const row = current.rows[0];
+        if (!row || new Date(row.last_shift_at).toISOString() !== gap.shiftedAt || row.saved_multiplier !== gap.savedMultiplier) {
+          throw new Error("saved anchor changed during reconciliation");
+        }
+        const result = await run(`INSERT INTO ring_anchor_shift_reconciliations
+          (instrument, shifted_at, saved_multiplier)
+          SELECT $1,$2,$3 WHERE NOT EXISTS (SELECT 1 FROM ring_anchor_shift_history
+            WHERE instrument=$1 AND shifted_at=$2)
+          ON CONFLICT (instrument, shifted_at) DO NOTHING RETURNING instrument`,
+          [gap.instrument, gap.shiftedAt, gap.savedMultiplier]);
+        if (result.rowCount === 1) recorded.push(gap);
+      }
+      if (!validateSafe()) throw new Error("reconciliation safety check failed");
+      await run("COMMIT");
+      committed = true;
+      return recorded;
+    } catch (cause) {
+      try { if (client) await run("ROLLBACK"); } catch {}
+      // A lost COMMIT acknowledgement is deliberately not claimed as rollback.
+      throw new Error("anchor history reconciliation failed; inspect /anchorreconcile before retrying", { cause });
+    } finally { client?.release(!committed); }
+  }
+
+  async function listAnchorReconciliations(instrument, limit = 10) {
+    const result = await query(`SELECT * FROM ring_anchor_shift_reconciliations
+      WHERE instrument=$1 ORDER BY shifted_at DESC LIMIT $2`,
+      [text("instrument", instrument, 64), Math.max(1, Math.min(10, limit))]);
+    return result.rows.map((row) => ({ instrument: row.instrument,
+      shiftedAt: new Date(row.shifted_at).toISOString(), savedMultiplier: row.saved_multiplier,
+      reconciledAt: new Date(row.reconciled_at).toISOString(), source: row.source }));
+  }
+
   async function listFilledOrdersSince(instrument, since) {
     const result = await query(
       `SELECT * FROM solana_execution_orders WHERE instrument=$1 AND status='FILLED'
@@ -359,6 +430,11 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
       commitShift: (shift) => commitAnchorShift(market, shift),
       history: (limit = 10) => listAnchorShiftHistory(market, limit),
       count: () => countAnchorShiftHistory(market),
+      reconciliations: (limit = 10) => listAnchorReconciliations(market, limit),
+      countReconciliations: async () => {
+        const result = await query("SELECT COUNT(*) AS count FROM ring_anchor_shift_reconciliations WHERE instrument=$1", [market]);
+        return Number(result.rows[0].count);
+      },
       ordersSince: (since) => listFilledOrdersSince(market, since)
     });
   }
@@ -645,6 +721,9 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     commitAnchorShift,
     listAnchorShiftHistory,
     countAnchorShiftHistory,
+    inspectAnchorHistoryGaps,
+    reconcileAnchorHistory,
+    listAnchorReconciliations,
     listFilledOrdersSince,
     getOrder,
     getUniqueFilledEntryOrder,

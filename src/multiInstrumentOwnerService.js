@@ -58,7 +58,8 @@ export function createMultiInstrumentOwnerService({
   flattenAll = null,
   executionHealth = null,
   getAnchorRecoveryStatus = null,
-  recoverAnchors = null
+  recoverAnchors = null,
+  reconcileAnchorHistory = null
 }) {
   if (!Array.isArray(instrumentConfigs) || instrumentConfigs.length === 0) {
     throw new TypeError("instrumentConfigs must be a non-empty array");
@@ -400,6 +401,10 @@ export function createMultiInstrumentOwnerService({
     },
     anchorHistoryText: (arg) => fanOut("anchorHistoryText", arg),
     anchorStatsText: (arg) => fanOut("anchorStatsText", arg),
+    async anchorReconciliationText(confirm) {
+      if (typeof reconcileAnchorHistory !== "function") return "Anchor history reconciliation is not configured on this deployment.";
+      return reconcileAnchorHistory(String(confirm ?? "").trim().toUpperCase() === "CONFIRM");
+    },
     async anchorRecoveryText(confirm) {
       if (typeof recoverAnchors !== "function") return "Anchor recovery is not configured on this deployment.";
       if (String(confirm ?? "").trim().toUpperCase() !== "CONFIRM") {
