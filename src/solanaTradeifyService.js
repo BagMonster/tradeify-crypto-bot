@@ -69,9 +69,10 @@ export function createSolanaTradeifyService({
   maProvider,
   execution,
   canary = null,
+  onOperatorPauseChange = async () => {},
   getLiveMarketSnapshot = () => null
 }) {
-  const base = createTradeifyService({ database, account, strategy, environment, dxtradeClient });
+  const base = createTradeifyService({ database, account, strategy, environment, dxtradeClient, onOperatorPauseChange });
 
   async function currentLadder() {
     if (typeof persistence?.getLatestRiskLadderState !== "function") return null;
