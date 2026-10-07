@@ -32,6 +32,20 @@ test("D-060 guards derive collision-free instrument order codes while locked", a
   assert.equal(doge.status, "BLOCKED");
 });
 
+test("operator pause immediately disables an otherwise live execution guard", () => {
+  let paused = false;
+  const guard = createRingExecutionGuard({
+    instrument: "SOL/USD", orderPrefix: "SOL", strategyId: "sol-ring-grid-v1", lotStep: 0.01,
+    autoExecute: true, strategyAutoExecute: true, isOperatorPaused: () => paused,
+    adapter: { async place() {} },
+    client: { async getOpenPositions() { return { positions: [] }; }, async placePositionClose() {}, async placePositionPartialClose() {}, async reconcileQuantityOrder() { return { status: "PENDING" }; } },
+    persistence: { async claimOrder() { return {}; }, async getOrder() { return null; } }
+  });
+  assert.equal(guard.isEnabled(), true);
+  paused = true;
+  assert.equal(guard.isEnabled(), false);
+});
+
 test("D-068 reads every live broker ticket for its configured account book", async () => {
   const guard = createRingExecutionGuard({
     instrument: "SOL/USD",
