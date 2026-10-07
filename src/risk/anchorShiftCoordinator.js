@@ -7,6 +7,7 @@ export function createAnchorShiftCoordinator({ books, holdMs = 9_000, now = () =
   let wasFlat = false;
   let observedSnapshot = false;
   let pending = null;
+  let operation = Promise.resolve();
 
   function hasExcursion() { return books.some((book) => book.hasPendingAnchorExcursion?.() === true); }
   function setEntryHold(on) { for (const book of books) book.setAnchorShiftHold?.(on); }
@@ -40,8 +41,13 @@ export function createAnchorShiftCoordinator({ books, holdMs = 9_000, now = () =
     notify("ANCHOR_SHIFT_CANCELLED", event);
     return true;
   }
-  async function startHold(source) {
-    pending = { startedMs: now(), confirmations: 1, source };
+  function snapshotTime(snapshot) {
+    const value = Number(snapshot?.fetchedAtMs);
+    return Number.isFinite(value) ? value : null;
+  }
+  async function startHold(source, snapshot) {
+    const firstSnapshotAtMs = snapshotTime(snapshot);
+    pending = { startedMs: now(), confirmations: 1, source, firstSnapshotAtMs, lastSnapshotAtMs: firstSnapshotAtMs };
     setEntryHold(true);
     const instruments = pendingInstruments();
     const event = { source, holdMs, startedAt: new Date(pending.startedMs).toISOString(), instruments };
@@ -50,7 +56,7 @@ export function createAnchorShiftCoordinator({ books, holdMs = 9_000, now = () =
     return Object.freeze({ action: "HOLD_STARTED", source, instruments: Object.freeze(instruments) });
   }
 
-  async function observe(snapshot) {
+  async function observeSnapshot(snapshot) {
     const flat = healthyFlat(snapshot);
     if (!observedSnapshot) {
       observedSnapshot = true;
@@ -64,8 +70,13 @@ export function createAnchorShiftCoordinator({ books, holdMs = 9_000, now = () =
     }
     const enteredFlat = !wasFlat;
     wasFlat = true;
-    if (!pending && enteredFlat && hasExcursion()) return startHold("ACCOUNT_FLAT_TRANSITION");
+    if (!pending && enteredFlat && hasExcursion()) return startHold("ACCOUNT_FLAT_TRANSITION", snapshot);
     if (!pending) return Object.freeze({ action: "FLAT_NO_EXCURSION" });
+    const snapshotAtMs = snapshotTime(snapshot);
+    if (snapshotAtMs !== null && snapshotAtMs <= pending.lastSnapshotAtMs) {
+      return Object.freeze({ action: "HOLDING", remainingMs: Math.max(0, holdMs - (now() - pending.startedMs)), awaitingFreshSnapshot: true });
+    }
+    if (snapshotAtMs !== null) pending.lastSnapshotAtMs = snapshotAtMs;
     pending.confirmations += 1;
     if (now() - pending.startedMs < holdMs || pending.confirmations < 2) return Object.freeze({ action: "HOLDING", remainingMs: Math.max(0, holdMs - (now() - pending.startedMs)) });
     const shifted = [];
@@ -83,14 +94,24 @@ export function createAnchorShiftCoordinator({ books, holdMs = 9_000, now = () =
   // A deploy during a genuine broker-flat event cannot reconstruct the preceding
   // non-flat snapshot. This deliberately starts the same confirmation hold rather
   // than shifting immediately; only a fresh later monitor snapshot may complete it.
-  async function beginVerifiedFlatRecovery(snapshot) {
+  async function beginVerifiedFlatRecoverySnapshot(snapshot) {
     if (!healthyFlat(snapshot)) return Object.freeze({ action: "RECOVERY_REFUSED" });
     if (!hasExcursion()) return Object.freeze({ action: "RECOVERY_NOT_NEEDED" });
     if (pending) return Object.freeze({ action: "HOLD_ALREADY_STARTED" });
     observedSnapshot = true;
     wasFlat = true;
-    return startHold("OWNER_VERIFIED_FLAT_RECOVERY");
+    return startHold("OWNER_VERIFIED_FLAT_RECOVERY", snapshot);
   }
 
-  return Object.freeze({ observe, beginVerifiedFlatRecovery, getSnapshot: () => Object.freeze({ pending: pending !== null, holdStartedAtMs: pending?.startedMs ?? null, confirmations: pending?.confirmations ?? 0, holdMs, source: pending?.source ?? null }) });
+  // The account monitor and the independent confirmation watcher can both
+  // present a fresh snapshot. Serialize them so a shift is never applied twice.
+  function serialize(task) {
+    const result = operation.then(task, task);
+    operation = result.catch(() => undefined);
+    return result;
+  }
+  function observe(snapshot) { return serialize(() => observeSnapshot(snapshot)); }
+  function beginVerifiedFlatRecovery(snapshot) { return serialize(() => beginVerifiedFlatRecoverySnapshot(snapshot)); }
+
+  return Object.freeze({ observe, beginVerifiedFlatRecovery, getSnapshot: () => Object.freeze({ pending: pending !== null, holdStartedAtMs: pending?.startedMs ?? null, confirmations: pending?.confirmations ?? 0, holdMs, source: pending?.source ?? null, firstSnapshotAtMs: pending?.firstSnapshotAtMs ?? null, lastSnapshotAtMs: pending?.lastSnapshotAtMs ?? null }) });
 }
