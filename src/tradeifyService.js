@@ -61,8 +61,10 @@ export function createTradeifyService({
   strategy,
   environment,
   dxtradeClient = null,
+  onOperatorPauseChange = async () => {},
   gridDefinition = FROZEN_GRID
 }) {
+  if (typeof onOperatorPauseChange !== "function") throw new TypeError("onOperatorPauseChange must be a function");
   const instrument = resolveInstrumentProfile(strategy);
   const strategyPending = typeof strategy.strategyStatus === "string" && strategy.strategyStatus.startsWith("pending-");
 
@@ -123,6 +125,7 @@ export function createTradeifyService({
 
   async function kill() {
     await database.setOperatorKilled(true);
+    await onOperatorPauseChange(true);
     await database.clearResumeChallenge();
     await database.addEvent("WARN", "OPERATOR_KILL", { source: "telegram" });
     return "Bot paused. This state is stored in PostgreSQL and survives a Railway restart.";
@@ -159,6 +162,7 @@ export function createTradeifyService({
       return "The resume code is incorrect.";
     }
     await database.setOperatorKilled(false);
+    await onOperatorPauseChange(false);
     await database.clearResumeChallenge();
     await database.addEvent("INFO", "OPERATOR_RESUME", { source: "telegram" });
     if (state.safety_halt) {
