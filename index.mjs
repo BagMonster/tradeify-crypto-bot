@@ -35,6 +35,7 @@ import { createExposureGate, formatExposurePoolLine } from "./src/risk/exposureG
 import { createLivenessStore, createLivenessHeartbeat } from "./src/monitoring/livenessStore.js";
 import { createDailyDustCleanupCoordinator } from "./src/risk/dailyDustCleanup.js";
 import { createAnchorShiftCoordinator } from "./src/risk/anchorShiftCoordinator.js";
+import { createAnchorShiftRecovery } from "./src/runtime/anchorShiftRecovery.js";
 
 const money = (v) => (Number.isFinite(v) ? `${v < 0 ? "-$" : "$"}${Math.abs(v).toFixed(2)}` : "unavailable");
 
@@ -140,8 +141,7 @@ let accountErrorLogged = false;
 let accountSnapshotSyncFailures = 0;
 let accountLockLatched = false;
 let anchorShiftCoordinator = null;
-let anchorShiftConfirmationTimer = null;
-let anchorShiftConfirmationBusy = false;
+let anchorShiftRecovery = null;
 const accountMonitor = createDxtradeAccountMonitor({
   client: dxtradeClient,
   startingBalance: account.startingBalance,
@@ -149,7 +149,7 @@ const accountMonitor = createDxtradeAccountMonitor({
   getPersistedPeakClosedBalance: database.getPersistedPeakClosedBalance,
   onSnapshot: async (snapshot) => {
     accountErrorLogged = false;
-    if (anchorShiftCoordinator) await observeAnchorShift(snapshot);
+    if (anchorShiftRecovery) await anchorShiftRecovery.observe(snapshot);
     if (exposureGate) {
       const exposureUsd = enabledInstruments.reduce((sum, cfg) => sum + bookExposure(snapshot, cfg.instrument), 0);
       if (exposureGate.observe({ exposureUsd, observedAtMs: Number(snapshot.fetchedAtMs) })) {
@@ -340,58 +340,16 @@ anchorShiftCoordinator = createAnchorShiftCoordinator({
     applyAnchorShift: (input) => stack.runtime.applyAnchorShift(input)
   })),
   holdMs: 9_000,
+  getCurrentSnapshot: () => {
+    const status = accountMonitor.getSnapshot();
+    return status.healthy ? status.snapshot : null;
+  },
   addEvent: database.addEvent,
   notifications: liveNotifications
 });
 
-// Snapshot publishing also persists account data. A slow database write must not
-// strand an already-confirmed flat-account hold before its second DXtrade read.
-// This watcher reads only the account monitor's in-memory, freshness-checked
-// snapshot; it makes no broker request and never places an order.
-function armAnchorShiftConfirmationWatch() {
-  if (anchorShiftConfirmationTimer !== null || anchorShiftCoordinator?.getSnapshot().pending !== true) return;
-  anchorShiftConfirmationTimer = setTimeout(() => {
-    anchorShiftConfirmationTimer = null;
-    void confirmAnchorShiftFromCachedSnapshot();
-  }, 1_000);
-  anchorShiftConfirmationTimer.unref?.();
-}
+anchorShiftRecovery = createAnchorShiftRecovery({ accountMonitor, coordinator: anchorShiftCoordinator });
 
-async function observeAnchorShift(snapshot) {
-  const result = await anchorShiftCoordinator.observe(snapshot);
-  if (result.action === "HOLD_STARTED" || anchorShiftCoordinator.getSnapshot().pending === true) armAnchorShiftConfirmationWatch();
-  return result;
-}
-
-async function confirmAnchorShiftFromCachedSnapshot() {
-  if (anchorShiftConfirmationBusy || anchorShiftCoordinator?.getSnapshot().pending !== true) return;
-  anchorShiftConfirmationBusy = true;
-  try {
-    const accountStatus = accountMonitor.getSnapshot();
-    const snapshot = accountStatus?.snapshot;
-    // Feed an unhealthy/missing cached read through the normal cancellation path.
-    const result = await observeAnchorShift(accountStatus?.healthy === true && snapshot
-      ? snapshot
-      : { ...(snapshot ?? {}), accountLocked: true, signedNetReadOk: false });
-    if (result.action === "HOLDING" && anchorShiftCoordinator.getSnapshot().pending === true) armAnchorShiftConfirmationWatch();
-  } catch (error) {
-    console.error(`Anchor shift confirmation check failed: ${error?.message ?? "unknown error"}`);
-    // Keep the entry hold in place rather than silently releasing it after an
-    // unconfirmed anchor write. The next cached snapshot retries the same safe check.
-    armAnchorShiftConfirmationWatch();
-  } finally {
-    anchorShiftConfirmationBusy = false;
-  }
-}
-
-async function recoverVerifiedFlatAnchorShift() {
-  // pollOnce feeds the coordinator its normal, fresh DXtrade snapshot first.
-  const snapshot = await accountMonitor.pollOnce();
-  if (accountMonitor.getSnapshot().healthy !== true) return Object.freeze({ action: "RECOVERY_REFUSED" });
-  const result = await anchorShiftCoordinator.beginVerifiedFlatRecovery(snapshot);
-  if (result.action === "HOLD_STARTED") armAnchorShiftConfirmationWatch();
-  return result;
-}
 const startupDustCleanupDayKey = accountDayKey(Date.now());
 
 const dailyDustCleanup = createDailyDustCleanupCoordinator({
@@ -937,7 +895,8 @@ const service = createMultiInstrumentOwnerService({
   instrumentConfigs: enabledInstruments,
   riskSupervisor,
   sharedPause: sharedExecutionPause,
-  recoverAnchors: recoverVerifiedFlatAnchorShift,
+  recoverAnchors: anchorShiftRecovery.recover,
+  getAnchorRecoveryStatus: anchorShiftCoordinator.getSnapshot,
   haltWarnings,
   // Required by /re-run. Without `database` the rerun handlers degrade to
   // "Re-run is not configured on this deployment." and the command does nothing.
@@ -1340,6 +1299,7 @@ async function shutdown(signal) {
   telegramBot.stopDevCompanionDelivery?.();
   for (const stack of stacks) stack.feed.stop();
   accountMonitor.stop();
+  anchorShiftRecovery.stop();
   clearInterval(sessionRotationTimer);
   try {
     await telegramBot.stopPolling();

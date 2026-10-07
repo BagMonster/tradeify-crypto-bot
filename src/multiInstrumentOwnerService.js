@@ -57,6 +57,7 @@ export function createMultiInstrumentOwnerService({
   reloginAll = null,
   flattenAll = null,
   executionHealth = null,
+  getAnchorRecoveryStatus = null,
   recoverAnchors = null
 }) {
   if (!Array.isArray(instrumentConfigs) || instrumentConfigs.length === 0) {
@@ -377,7 +378,9 @@ export function createMultiInstrumentOwnerService({
       if (normaliseInstrument(arg) !== null) return fanOut("statusText", arg);
       const rows = await inspectBooks();
       const recovery = virtualInventoryRecoveryPlan(rows);
-      return `${accountSummaryLines().join("\n")}${recovery ? `\n\n${recovery}` : ""}`;
+      const anchorFailure = getAnchorRecoveryStatus?.()?.failure;
+      const anchorLine = anchorFailure ? `\n\nANCHOR SHIFT FAILED: ${anchorFailure.instrument} — ${anchorFailure.reason}\nNew entries blocked; automatic retries stopped. Protective operations remain available. Owner review required.` : "";
+      return `${accountSummaryLines().join("\n")}${recovery ? `\n\n${recovery}` : ""}${anchorLine}`;
     },
     riskText: riskDetailText,
     async anchorsText() {
@@ -414,6 +417,7 @@ export function createMultiInstrumentOwnerService({
       if (result.action === "HOLD_STARTED") {
         return `ANCHOR SHIFT HOLD STARTED\n\nVerified flat account. Entries are held for 9 seconds while awaiting a second fresh DXtrade flat snapshot.\nPending: ${result.instruments.join(", ")}`;
       }
+      if (result.action === "FAILED") return `ANCHOR SHIFT FAILED\n${result.failure.instrument}: ${result.failure.reason}\nEntries remain blocked; automatic retries have stopped. ${result.failure.rollbackConfirmed ? "The failed write rolled back. A new explicit recovery requires another fresh flat verification." : "Owner review of state and history is required before retrying."} Protective operations remain available.`;
       if (result.action === "HOLD_ALREADY_STARTED") return "Anchor shift confirmation is already in progress. Entries remain held until it completes or is cancelled by a non-flat or unhealthy snapshot.";
       if (result.action === "RECOVERY_NOT_NEEDED") return "Anchor recovery is not needed: no pending anchor excursion is recorded.";
       return "Anchor recovery was refused. The account must be freshly readable, broker-flat, virtual-flat, and have no order in flight. No anchor changed.";

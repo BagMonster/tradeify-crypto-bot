@@ -36,6 +36,7 @@ const KINDS = new Set([
   "ANCHOR_SHIFT_HOLD_STARTED",
   "ANCHOR_SHIFT_CANCELLED",
   "ANCHOR_SHIFT_CONFIRMED",
+  "ANCHOR_SHIFT_FAILED",
   "DUST_CLEANUP_SUMMARY"
 ]);
 
@@ -700,11 +701,28 @@ function formatEvent(event) {
 
   if (kind === "ANCHOR_SHIFT_CANCELLED") {
     const reason = safeText("anchor hold cancellation reason", event.reason, { max: 64 });
-    if (!["ACCOUNT_NOT_FLAT", "BROKER_UNHEALTHY_OR_LOCKED"].includes(reason)) throw new TypeError("anchor hold cancellation reason is invalid");
+    if (!["ACCOUNT_NOT_FLAT", "BROKER_UNHEALTHY_OR_LOCKED", "CONFIRMATION_TIMEOUT"].includes(reason)) throw new TypeError("anchor hold cancellation reason is invalid");
     return {
       kind,
       eventKey,
-      message: `ANCHOR SHIFT HOLD CANCELLED\n${reason === "ACCOUNT_NOT_FLAT" ? "The account was no longer flat." : "Fresh DXtrade data was unavailable or locked."}\nNo anchor changed and no order was placed.`
+      message: `ANCHOR SHIFT HOLD CANCELLED\n${reason === "ACCOUNT_NOT_FLAT" ? "The account was no longer flat." : reason === "CONFIRMATION_TIMEOUT" ? "A later fresh flat confirmation did not arrive before the deadline." : "Fresh DXtrade data was unavailable or locked."}\nNo anchor changed and no order was placed.`
+    };
+  }
+
+  if (kind === "ANCHOR_SHIFT_FAILED") {
+    const instrument = requiredInstrument(event.instrument);
+    const reason = safeText("anchor failure reason", event.reason, { max: 64 });
+    if (!["PERSISTENCE_FAILED", "APPLY_FAILED"].includes(reason)) throw new TypeError("anchor failure reason is invalid");
+    const names = (values) => Array.isArray(values) ? values.map(requiredInstrument).join(", ") || "none" : "none";
+    return {
+      kind, eventKey,
+      message: [
+        `ANCHOR SHIFT FAILED — ${instrument} — ${reason}`,
+        event.rollbackConfirmed === true ? "The failed write was rolled back. Its anchor did not change." : "The failed book's persistence outcome requires owner review; do not repeat recovery until state and history are checked.",
+        `Completed: ${names(event.shifted)}`,
+        `Not attempted: ${names(event.unprocessed)}`,
+        "Automatic retry stopped. New entries remain blocked; protective operations remain available. No order was placed."
+      ].join("\n")
     };
   }
 
@@ -888,6 +906,8 @@ export function createLiveTelegramNotifications({ persistence, addEvent = async 
 
   let sender = null;
   let deliveryChain = Promise.resolve();
+  const terminalDeliveries = new Set();
+  const terminalKeys = new Set();
 
   async function safeAudit(level, kind, payload) {
     try {
@@ -966,13 +986,39 @@ export function createLiveTelegramNotifications({ persistence, addEvent = async 
     }
   }
 
+  async function notifyTerminal(input) {
+    // Terminal anchor alerts must remain deliverable when PostgreSQL itself is
+    // unavailable. Dedupe within this worker; no durable-delivery claim is made.
+    let prepared;
+    try { prepared = formatEvent(input); } catch { return { status: "REJECTED" }; }
+    if (terminalKeys.has(prepared.eventKey)) return { status: "DUPLICATE_SUPPRESSED" };
+    if (sender === null) return { status: "FAILED" };
+    terminalKeys.add(prepared.eventKey);
+    try {
+      await sender(prepared.message);
+      void safeAudit("INFO", "TELEGRAM_NOTIFICATION_SENT", { kind: prepared.kind, eventKey: prepared.eventKey, databaseIndependent: true });
+      return { status: "SENT" };
+    } catch {
+      terminalKeys.delete(prepared.eventKey);
+      console.error("Terminal anchor alert delivery failed; inspect anchor recovery status.");
+      return { status: "FAILED" };
+    }
+  }
+
   function enqueue(input) {
+    if (input?.kind === "ANCHOR_SHIFT_FAILED" || input?.kind === "ANCHOR_SHIFT_CANCELLED") {
+      const delivery = notifyTerminal(input);
+      terminalDeliveries.add(delivery);
+      void delivery.finally(() => terminalDeliveries.delete(delivery));
+      return Object.freeze({ status: "QUEUED" });
+    }
     deliveryChain = deliveryChain.then(() => notify(input), () => notify(input));
     return Object.freeze({ status: "QUEUED" });
   }
 
   async function drain() {
     await deliveryChain;
+    await Promise.allSettled([...terminalDeliveries]);
   }
 
   return Object.freeze({ setSender, notify, enqueue, drain });
