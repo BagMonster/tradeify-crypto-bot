@@ -49,7 +49,7 @@ export function createRingGridInstance({
   if (!Number.isInteger(minimumHoldSeconds) || minimumHoldSeconds < 25) throw new TypeError("minimumHoldSeconds is invalid");
   if (typeof addEvent !== "function") throw new TypeError("addEvent must be a function");
   if (notifications !== null && typeof notifications?.enqueue !== "function") throw new TypeError("notifications.enqueue must be a function");
-  if (anchorStore !== null && (typeof anchorStore?.load !== "function" || typeof anchorStore?.save !== "function" || typeof anchorStore?.appendHistory !== "function")) throw new TypeError("anchorStore is invalid");
+  if (anchorStore !== null && (typeof anchorStore?.load !== "function" || typeof anchorStore?.save !== "function" || typeof anchorStore?.commitShift !== "function")) throw new TypeError("anchorStore is invalid");
   const { instrument, marketSymbol, lotStep, grossExposureCeilingUsd, orderPrefix } = grid.definition;
   const prefix = eventPrefix(orderPrefix, instrument);
   let previousPrice = null;
@@ -62,6 +62,13 @@ export function createRingGridInstance({
   let anchorWriteDrain = Promise.resolve();
   let anchorShiftHold = false;
   let lastPrice = null;
+  let anchorOperation = Promise.resolve();
+
+  function serializeAnchor(task) {
+    const result = anchorOperation.then(task, task);
+    anchorOperation = result.catch(() => undefined);
+    return result;
+  }
 
   function enqueueNotification(event) {
     if (notifications !== null) notifications.enqueue(event);
@@ -83,7 +90,7 @@ export function createRingGridInstance({
           await anchorStore.save(wanted);
         }
       } catch (error) {
-        await addEvent("ERROR", "ANCHOR_SHIFT_PERSIST_FAILED", { instrument, message: error?.message ?? "anchor state save failed" });
+        void Promise.resolve().then(() => addEvent("ERROR", "ANCHOR_SHIFT_PERSIST_FAILED", { instrument, message: "anchor state save failed" })).catch(() => undefined);
       } finally {
         anchorWriteRunning = false;
         if (pendingAnchorWrite !== null) queueAnchorSave(pendingAnchorWrite);
@@ -313,7 +320,7 @@ export function createRingGridInstance({
     return trancheExitsPaused === true || isTrancheExitsPaused(instrument);
   }
 
-  async function process(input) {
+  async function processSnapshot(input) {
     const trade = canonicalTrade(input, marketSymbol);
     const maState = await maProvider.getCurrent();
     const rawMa = positive(`${instrument} MA`, maState?.ma);
@@ -326,7 +333,7 @@ export function createRingGridInstance({
     if (observed.startedSide !== null) {
       enqueueNotification({
         kind: "ANCHOR_EXCURSION_STARTED",
-        eventKey: `ANCHOR-EXCURSION:${instrument}:${observed.startedSide}:${trade.tradeTime}`,
+        eventKey: `ANCHOR-EXCURSION:${prefix}:${observed.startedSide}:${trade.tradeTime}`,
         instrument,
         side: observed.startedSide,
         price: trade.price,
@@ -432,24 +439,24 @@ export function createRingGridInstance({
     return anchorState.upperExtreme !== null || anchorState.lowerExtreme !== null;
   }
 
-  async function applyAnchorShift({ shiftedAt = new Date().toISOString() } = {}) {
+  async function applyAnchorShiftSnapshot({ shiftedAt = new Date().toISOString(), validateFlat = () => true } = {}) {
     if (hasVirtualLots()) return Object.freeze({ shifted: false, reason: "VIRTUAL_LOTS_PRESENT" });
     await flushAnchorWrites();
     const maState = await maProvider.getCurrent();
     const rawMa = positive(`${instrument} MA`, maState?.ma);
     const shift = computeShift(anchorState, { maNow: rawMa, geometry: grid.definition, shiftedAt });
     if (shift === null) return Object.freeze({ shifted: false, reason: "NO_EXCURSION" });
+    if (hasVirtualLots() || validateFlat() !== true) throw new Error("anchor flat confirmation expired");
     // A shift is durable before this instance changes its live anchor. This is
     // intentionally awaited: losing it after a shift would duplicate a live move.
     if (anchorStore !== null) {
-      await anchorStore.save(shift.state);
-      await anchorStore.appendHistory({ ...shift, shiftedAt });
+      await anchorStore.commitShift({ ...shift, newMultiplier: shift.multiplier, shiftedAt, validateFlat });
     }
     anchorState = shift.state;
     previousPrice = lastPrice;
     enqueueNotification({
       kind: "ANCHOR_SHIFT_CONFIRMED",
-      eventKey: `ANCHOR-SHIFT:${instrument}:${shiftedAt}`,
+      eventKey: `ANCHOR-SHIFT:${prefix}:${shiftedAt}`,
       instrument,
       side: shift.side,
       extreme: shift.extreme,
@@ -460,9 +467,14 @@ export function createRingGridInstance({
       multiplier: shift.multiplier,
       shiftedAt
     });
-    await addEvent("WARN", "ANCHOR_SHIFT_CONFIRMED", { instrument, ...shift, shiftedAt });
+    // The transaction already committed. Diagnostic storage must not delay
+    // completion or turn an audit failure into another anchor application.
+    void Promise.resolve().then(() => addEvent("WARN", "ANCHOR_SHIFT_CONFIRMED", { instrument, ...shift, shiftedAt })).catch(() => undefined);
     return Object.freeze({ shifted: true, instrument, ...shift });
   }
+
+  const process = (input) => serializeAnchor(() => processSnapshot(input));
+  const applyAnchorShift = (input) => serializeAnchor(() => applyAnchorShiftSnapshot(input));
 
   return Object.freeze({
     instrument,

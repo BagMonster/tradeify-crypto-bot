@@ -75,6 +75,7 @@ CHECK (kind IN (
   'ANCHOR_SHIFT_HOLD_STARTED',
   'ANCHOR_SHIFT_CANCELLED',
   'ANCHOR_SHIFT_CONFIRMED',
+  'ANCHOR_SHIFT_FAILED',
   'DUST_CLEANUP_SUMMARY'
 ))
 `;
@@ -243,10 +244,10 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     return anchorRecord(result.rows[0]);
   }
 
-  async function saveAnchorState(instrument, input) {
+  async function saveAnchorState(instrument, input, runQuery = query) {
     const market = text("instrument", instrument, 64);
     const state = normalizeAnchorShiftState(input);
-    const result = await query(
+    const result = await runQuery(
       `INSERT INTO ring_anchor_shift_state (
         instrument, multiplier, upper_extreme, lower_extreme, upper_started_at,
         lower_started_at, upper_boundary_at_extreme, lower_boundary_at_extreme,
@@ -265,21 +266,65 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     return anchorRecord(result.rows[0]);
   }
 
-  async function appendAnchorShift(input) {
+  function anchorHistoryValues(input) {
     const instrument = text("instrument", input?.instrument, 64);
     const side = text("side", input?.side, 8).toUpperCase();
     if (side !== "UPPER" && side !== "LOWER") throw new TypeError("anchor shift side is invalid");
     const shiftedAt = new Date(input?.shiftedAt);
     if (!Number.isFinite(shiftedAt.getTime())) throw new TypeError("shiftedAt is invalid");
     const values = [positive("extreme", input?.extreme), positive("maNow", input?.maNow), positive("oldMultiplier", input?.oldMultiplier), positive("newMultiplier", input?.newMultiplier)];
-    const result = await query(
+    return [shiftedAt, instrument, side, ...values];
+  }
+
+  async function appendAnchorShift(input, runQuery = query) {
+    const params = anchorHistoryValues(input);
+    const result = await runQuery(
       `INSERT INTO ring_anchor_shift_history (shifted_at, instrument, side, extreme, ma_now, old_multiplier, new_multiplier)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [shiftedAt, instrument, side, ...values]
+      params
     );
     if (result.rowCount !== 1) throw new Error("anchor shift history append failed");
     const row = result.rows[0];
     return Object.freeze({ shiftedAt: new Date(row.shifted_at).toISOString(), instrument: row.instrument, side: row.side, extreme: Number(row.extreme), maNow: Number(row.ma_now), oldMultiplier: Number(row.old_multiplier), newMultiplier: Number(row.new_multiplier) });
+  }
+
+  async function commitAnchorShift(instrument, input) {
+    const market = text("instrument", instrument, 64);
+    const next = normalizeAnchorShiftState(input?.state);
+    const history = { ...input, instrument: market };
+    // Validate the complete history BEFORE any state write or transaction.
+    anchorHistoryValues(history);
+    if (next.multiplier !== history.newMultiplier || next.lastShiftAt !== history.shiftedAt) {
+      throw new TypeError("anchor state and history do not describe the same shift");
+    }
+    let client = null;
+    let committed = false;
+    let commitAttempted = false;
+    const runQuery = (sql, params = []) => client.query({ text: sql, values: params, query_timeout: 12_000 });
+    try {
+      client = await pool.connect();
+      await runQuery("BEGIN");
+      await runQuery("SET LOCAL statement_timeout = '10s'");
+      await runQuery("SET LOCAL lock_timeout = '5s'");
+      if (input.validateFlat?.() === false) throw new Error("anchor confirmation expired");
+      await saveAnchorState(market, next, runQuery);
+      await appendAnchorShift(history, runQuery);
+      if (input.validateFlat?.() === false) throw new Error("anchor confirmation expired");
+      commitAttempted = true;
+      await runQuery("COMMIT");
+      committed = true;
+      return next;
+    } catch (cause) {
+      let rollbackConfirmed = false;
+      try { if (client) { await runQuery("ROLLBACK"); rollbackConfirmed = true; } } catch {}
+      // A lost COMMIT acknowledgement cannot be made certain by a later ROLLBACK.
+      const error = new Error("anchor shift persistence failed", { cause });
+      error.code = "ANCHOR_PERSISTENCE_FAILED";
+      error.rollbackConfirmed = rollbackConfirmed && !commitAttempted;
+      throw error;
+    } finally {
+      client?.release(!committed);
+    }
   }
 
   async function listAnchorShiftHistory(instrument = null, limit = 10) {
@@ -311,6 +356,7 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
       load: () => loadAnchorState(market),
       save: (state) => saveAnchorState(market, state),
       appendHistory: (shift) => appendAnchorShift({ ...shift, instrument: market }),
+      commitShift: (shift) => commitAnchorShift(market, shift),
       history: (limit = 10) => listAnchorShiftHistory(market, limit),
       count: () => countAnchorShiftHistory(market),
       ordersSince: (since) => listFilledOrdersSince(market, since)
@@ -532,6 +578,7 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
       "ANCHOR_SHIFT_HOLD_STARTED",
       "ANCHOR_SHIFT_CANCELLED",
       "ANCHOR_SHIFT_CONFIRMED",
+      "ANCHOR_SHIFT_FAILED",
       "DUST_CLEANUP_SUMMARY"
     ];
     if (!allowed.includes(kind)) throw new TypeError("notification kind is invalid");
@@ -595,6 +642,7 @@ export function createSolanaPersistence(environment, { PoolClass = Pool } = {}) 
     loadAnchorState,
     saveAnchorState,
     appendAnchorShift,
+    commitAnchorShift,
     listAnchorShiftHistory,
     countAnchorShiftHistory,
     listFilledOrdersSince,

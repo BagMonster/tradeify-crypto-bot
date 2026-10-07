@@ -50,20 +50,20 @@ test("4. recenter requires a not-flat transition, two healthy reads, and the nin
     holdMs: 9000
   });
   const bad = { openPositionsCount: 0, signedNetReadOk: false };
-  const flat = { openPositionsCount: 0, signedNetReadOk: true, accountLocked: false, positionsReadFailed: false };
+  const flat = { openPositionsCount: 0, signedNetReadOk: true, accountLocked: false, positionsReadFailed: false, fetchedAtMs: t };
   const open = { ...flat, openPositionsCount: 1 };
   assert.equal((await coordinator.observe(bad)).action, "INITIAL_NOT_FLAT");
   assert.equal((await coordinator.observe(open)).action, "NOT_FLAT");
-  assert.equal((await coordinator.observe(flat)).action, "HOLD_STARTED");
+  assert.equal((await coordinator.observe({ ...flat, fetchedAtMs: t })).action, "HOLD_STARTED");
   assert.equal(held, true);
-  t = 2_000; assert.equal((await coordinator.observe(flat)).action, "HOLDING");
-  virtual = true; t = 4_000; assert.equal((await coordinator.observe(flat)).action, "NOT_FLAT");
+  t = 2_000; assert.equal((await coordinator.observe({ ...flat, fetchedAtMs: t })).action, "HOLDING");
+  virtual = true; t = 4_000; assert.equal((await coordinator.observe({ ...flat, fetchedAtMs: t })).action, "NOT_FLAT");
   assert.equal(held, false); assert.equal(shifted, 0);
-  virtual = false; await coordinator.observe(open); await coordinator.observe(flat);
-  t = 6_000; assert.equal((await coordinator.observe(flat)).action, "HOLDING"); t = 14_000;
-  assert.equal((await coordinator.observe(flat)).action, "SHIFTED");
+  virtual = false; await coordinator.observe(open); await coordinator.observe({ ...flat, fetchedAtMs: t });
+  t = 6_000; assert.equal((await coordinator.observe({ ...flat, fetchedAtMs: t })).action, "HOLDING"); t = 14_000;
+  assert.equal((await coordinator.observe({ ...flat, fetchedAtMs: t })).action, "SHIFTED");
   assert.equal(shifted, 1); assert.equal(held, false);
-  inFlight = true; await coordinator.observe(open); await coordinator.observe(flat);
+  inFlight = true; await coordinator.observe(open); await coordinator.observe({ ...flat, fetchedAtMs: t });
   assert.equal(held, false, "an in-flight order cannot start a hold");
 });
 
@@ -73,12 +73,12 @@ test("4b. verified-flat recovery still requires the nine-second hold and another
     books: [{ instrument: "ZEC/USD", setAnchorShiftHold: (on) => { held = on; }, hasPendingAnchorExcursion: () => pending, hasVirtualLots: () => false, hasOrderInFlight: () => false, applyAnchorShift: async () => { shifted += 1; pending = false; return { shifted: true, instrument: "ZEC/USD" }; } }],
     now: () => t, holdMs: 9000
   });
-  const flat = { openPositionsCount: 0, signedNetReadOk: true, accountLocked: false, positionsReadFailed: false };
-  assert.equal((await coordinator.beginVerifiedFlatRecovery(flat)).action, "HOLD_STARTED");
+  const flat = { openPositionsCount: 0, signedNetReadOk: true, accountLocked: false, positionsReadFailed: false, fetchedAtMs: t };
+  assert.equal((await coordinator.beginVerifiedFlatRecovery({ ...flat, fetchedAtMs: t })).action, "HOLD_STARTED");
   assert.equal(held, true);
-  t = 8_999; assert.equal((await coordinator.observe(flat)).action, "HOLDING");
+  t = 8_999; assert.equal((await coordinator.observe({ ...flat, fetchedAtMs: t })).action, "HOLDING");
   assert.equal(shifted, 0);
-  t = 9_000; assert.equal((await coordinator.observe(flat)).action, "SHIFTED");
+  t = 9_000; assert.equal((await coordinator.observe({ ...flat, fetchedAtMs: t })).action, "SHIFTED");
   assert.equal(shifted, 1); assert.equal(held, false);
   assert.equal((await coordinator.beginVerifiedFlatRecovery({ ...flat, openPositionsCount: 1 })).action, "RECOVERY_REFUSED");
 });
@@ -90,10 +90,12 @@ test("4c. repeating the same cached snapshot cannot satisfy the second-read requ
     now: () => t, holdMs: 9000
   });
   const flat = (fetchedAtMs) => ({ openPositionsCount: 0, signedNetReadOk: true, accountLocked: false, positionsReadFailed: false, fetchedAtMs });
+  t = 1_000;
   await coordinator.beginVerifiedFlatRecovery(flat(1_000));
-  t = 10_000;
+  t = 2_000;
   assert.equal((await coordinator.observe(flat(1_000))).action, "HOLDING");
   assert.equal(shifted, 0);
+  t = 10_000;
   assert.equal((await coordinator.observe(flat(10_000))).action, "SHIFTED");
   assert.equal(shifted, 1);
 });
@@ -104,7 +106,7 @@ function fixtureDefinition() {
 
 function memoryAnchorStore() {
   let state = null; const history = [];
-  return { async load() { return state; }, async save(next) { state = structuredClone(next); return state; }, async appendHistory(row) { history.push(row); }, history };
+  return { async load() { return state; }, async save(next) { state = structuredClone(next); return state; }, async commitShift(row) { assert.equal(row.newMultiplier, row.state.multiplier); state = structuredClone(row.state); history.push(row); }, history };
 }
 
 function memoryGridStore() {
@@ -160,4 +162,57 @@ test("8. anchor command views render fixture state and unknown coin is clear", a
   assert.match(await service.anchorText("NOPE"), /Unknown instrument/);
   assert.match(await service.anchorRecoveryText(), /CONFIRM/);
   assert.match(await service.anchorRecoveryText("CONFIRM"), /HOLD STARTED/);
+});
+
+function confirmationFixture(overrides = {}) {
+  let t = 1_000; let attempts = 0; let held = false; let virtual = false; let flight = false;
+  const events = [];
+  const coordinator = createAnchorShiftCoordinator({
+    books: [{ instrument: "AAVE/USD", setAnchorShiftHold: (on) => { held = on; }, hasPendingAnchorExcursion: () => true, hasVirtualLots: () => virtual, hasOrderInFlight: () => flight, applyAnchorShift: async () => { attempts += 1; return { shifted: true, instrument: "AAVE/USD" }; } }],
+    now: () => t, notifications: { enqueue: (event) => events.push(event) }, ...overrides
+  });
+  const flat = (at = t) => ({ fetchedAtMs: at, openPositionsCount: 0, signedNetReadOk: true, accountLocked: false, positionsReadFailed: false });
+  return { coordinator, flat, events, setTime: (at) => { t = at; }, setVirtual: (on) => { virtual = on; }, setFlight: (on) => { flight = on; }, attempts: () => attempts, held: () => held };
+}
+
+for (const badRead of ["stale", "missing-time", "unhealthy", "not-flat", "virtual", "in-flight"]) {
+  test(`confirmation cancels visibly on ${badRead}, without shifting`, async () => {
+    const f = confirmationFixture({ addEvent: async () => { throw new Error("audit unavailable"); } });
+    await f.coordinator.beginVerifiedFlatRecovery(f.flat());
+    f.setTime(10_000);
+    let snapshot = f.flat();
+    if (badRead === "stale") snapshot.fetchedAtMs = 1_000;
+    if (badRead === "missing-time") delete snapshot.fetchedAtMs;
+    if (badRead === "unhealthy") snapshot.signedNetReadOk = false;
+    if (badRead === "not-flat") snapshot.openPositionsCount = 1;
+    if (badRead === "virtual") f.setVirtual(true);
+    if (badRead === "in-flight") f.setFlight(true);
+    assert.equal((await f.coordinator.observe(snapshot)).action, "NOT_FLAT");
+    assert.equal(f.attempts(), 0);
+    assert.equal(f.held(), false);
+    assert.equal(f.events.at(-1).kind, "ANCHOR_SHIFT_CANCELLED");
+  });
+}
+
+test("confirmation deadline cancels rather than perpetually holding even with a fresh flat snapshot", async () => {
+  const f = confirmationFixture();
+  await f.coordinator.beginVerifiedFlatRecovery(f.flat());
+  f.setTime(31_000);
+  assert.equal((await f.coordinator.observe(f.flat())).action, "CANCELLED");
+  assert.equal(f.events.at(-1).reason, "CONFIRMATION_TIMEOUT");
+  assert.equal(f.held(), false);
+});
+
+test("uncertain persistence outcome is terminal and refuses another explicit recovery", async () => {
+  const events = []; let attempts = 0; let t = 1_000;
+  const coordinator = createAnchorShiftCoordinator({ now: () => t, notifications: { enqueue: (event) => events.push(event) }, books: [{ instrument: "AAVE/USD", setAnchorShiftHold() {}, hasPendingAnchorExcursion: () => true, hasVirtualLots: () => false, hasOrderInFlight: () => false, async applyAnchorShift() { attempts += 1; const error = new Error("private failure"); error.code = "ANCHOR_PERSISTENCE_FAILED"; error.rollbackConfirmed = false; throw error; } }] });
+  const flat = () => ({ fetchedAtMs: t, openPositionsCount: 0, signedNetReadOk: true });
+  await coordinator.beginVerifiedFlatRecovery(flat());
+  t = 10_000;
+  assert.equal((await coordinator.observe(flat())).action, "FAILED");
+  t = 12_000;
+  assert.equal((await coordinator.observe(flat())).action, "FAILED");
+  assert.equal((await coordinator.beginVerifiedFlatRecovery(flat())).action, "FAILED");
+  assert.equal(attempts, 1);
+  assert.equal(events.filter((event) => event.kind === "ANCHOR_SHIFT_FAILED").length, 1);
 });
