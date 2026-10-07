@@ -57,7 +57,9 @@ export function formatAnchorDetail({ instrument, state, ma, price, geometry }) {
 
 export function formatAnchorHistory(rows, instrument = null) {
   if (rows.length === 0) return instrument ? `${instrument} ANCHOR HISTORY\nNo shifts recorded.` : "ANCHOR HISTORY\nNo shifts recorded.";
-  return [instrument ? `${instrument} ANCHOR HISTORY` : "ANCHOR HISTORY", ...rows.map((row) => `${utc(row.shiftedAt)} · ${row.instrument} · ${row.side} · extreme ${px(row.extreme)} · MA ${px(row.maNow)} · ${multiplier(row.oldMultiplier)} → ${multiplier(row.newMultiplier)}`)].join("\n");
+  return [instrument ? `${instrument} ANCHOR HISTORY` : "ANCHOR HISTORY", ...rows.map((row) => row.source === "SAVED_STATE_WITHOUT_HISTORY"
+    ? `${utc(row.shiftedAt)} · ${row.instrument} · RECONCILED SAVED STATE · saved multiplier ×${row.savedMultiplier} · recorded ${utc(row.reconciledAt)} · original side/extreme/MA/old multiplier unknown`
+    : `${utc(row.shiftedAt)} · ${row.instrument} · ${row.side} · extreme ${px(row.extreme)} · MA ${px(row.maNow)} · ${multiplier(row.oldMultiplier)} → ${multiplier(row.newMultiplier)}`)].join("\n");
 }
 
 export function formatAnchorStats({ instrument, state, orders, gridState, price }) {

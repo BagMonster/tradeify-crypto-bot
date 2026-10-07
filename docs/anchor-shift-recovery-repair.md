@@ -102,3 +102,57 @@ confirmation timeout, stalled monitor publication and notification claims,
 uncertain COMMIT acknowledgement, concurrent price processing, ZEC preservation,
 and flatness revoked between writes and COMMIT. Every broker/execution boundary
 is a local test fixture, and order-call counts remain zero.
+
+## Saved-state history reconciliation (follow-up)
+
+The previous non-atomic worker left ZEC (10:40:59.200Z) and AAVE
+(11:42:15.734Z) with a saved multiplier and last-shift timestamp but no history.
+The owner supplied `/anchors` and `/anchorhistory` evidence confirms this gap;
+the old worker overlapped the repaired worker during the deployment. This is
+legacy partial state, not evidence that the repaired atomic transaction failed.
+No rounded Telegram value is used to reconstruct a shift.
+
+`/anchorreconcile` reads the enabled books' persisted state and checks for a
+history or reconciliation record at each exact `last_shift_at`. It previews
+missing records without requiring database exports, credentials or manual SQL.
+`/anchorreconcile CONFIRM` polls DXtrade and requires automatic execution OFF,
+a healthy snapshot no older than six seconds, zero broker positions, no virtual
+lots or orders in flight, no active/failed anchor recovery, and matching runtime
+and saved anchor multiplier/timestamp. It checks these conditions before writing
+and again before committing. The command is owner-authorized using the existing
+Telegram authorization wrapper; there is no confirmation button.
+
+A new additive `ring_anchor_shift_reconciliations` table stores exact PostgreSQL
+numeric multiplier text, the saved shift timestamp, reconciliation timestamp and
+`SAVED_STATE_WITHOUT_HISTORY` provenance. Its primary key is instrument plus
+shift timestamp. All affected books are recorded in one bounded transaction,
+with their state rows locked in deterministic order and rechecked. Duplicate
+requests are idempotent. Existing ordinary shift history is excluded.
+
+The command never updates `ring_anchor_shift_state`, ordinary shift history,
+in-memory geometry, excursions, execution flags, entry holds, risk/harvest state
+or virtual inventory. It does not shift RUNE or invoke recovery. Original side,
+extreme, MA and old multiplier remain unknown. `/anchorhistory` combines ordinary
+shifts and explicitly labeled **RECONCILED SAVED STATE** entries, displaying the
+latest ten. `/anchors` keeps the ordinary shift count and separately displays
+reconciled saved states. Deployment creates the empty additive table; no existing
+anchor/history rows are reconciled automatically.
+
+Expected command responses:
+
+- Preview: `ANCHOR HISTORY RECONCILIATION — PREVIEW`, affected instruments, exact
+  saved multiplier and shift timestamp, and the typed confirmation instruction.
+- Success: `ANCHOR HISTORY RECONCILED`, each recorded instrument/timestamp and
+  explicit notice that original details are unknown and geometry is unchanged.
+- Safety refusal: `ANCHOR HISTORY RECONCILIATION REFUSED`; no audit writes.
+- Persistence/verification failure: `ANCHOR HISTORY RECONCILIATION FAILED`; no
+  automatic retry, no anchor changes, inspect preview/history before retrying.
+  A lost COMMIT acknowledgement may mean the audit rows committed; the response
+  deliberately does not claim rollback certainty. Reinspection avoids duplicates.
+
+After owner merge and deployment, leave `AUTO_EXECUTE=false`. Send the read-only
+`/anchorreconcile` preview and review its actual saved values. Separately authorize
+`/anchorreconcile CONFIRM` to append the missing audit evidence. Inspect
+`/anchorhistory` and `/anchors`. RUNE's pending excursion remains a separate
+explicit `/anchorrecover CONFIRM` decision; this follow-up does not authorize it
+or re-enabling execution. No manual SQL or fabricated history is required.

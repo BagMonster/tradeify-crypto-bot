@@ -6,16 +6,19 @@ import { createRingGrid } from "../src/strategies/ringGrid.js";
 import { buildGridDefinition } from "../src/strategies/ringGridDefinition.js";
 import { createSolanaRuntime } from "../src/runtime/solanaRuntime.js";
 import { createAnchorShiftCoordinator } from "../src/risk/anchorShiftCoordinator.js";
+import { createAnchorHistoryReconciliation } from "../src/runtime/anchorHistoryReconciliation.js";
+import { formatAnchorHistory } from "../src/monitoring/anchorOwnerText.js";
 import { createAnchorShiftRecovery } from "../src/runtime/anchorShiftRecovery.js";
 import { createDxtradeAccountMonitor } from "../src/account/dxtradeAccountMonitor.js";
 import { createLiveTelegramNotifications } from "../src/notifications/liveTelegramNotifications.js";
+import { createSolanaOwnerService } from "../src/solanaOwnerService.js";
 import { createMultiInstrumentOwnerService } from "../src/multiInstrumentOwnerService.js";
 import { startTelegramBot } from "../src/telegramBot.js";
 import { initialAnchorShiftState, trackExcursion } from "../src/strategies/anchorShift.js";
 
 // PGlite runs the PostgreSQL engine locally: real constraints, PL/pgSQL triggers,
 // BEGIN/COMMIT/ROLLBACK and the production SQL. It is not a SQL-pattern mock.
-async function fixture(t, instruments = ["AAVE/USD", "RUNE/USD"]) {
+async function fixture(t, instruments = ["AAVE/USD", "RUNE/USD"], savedStates = {}) {
   const db = new PGlite();
   let tail = Promise.resolve();
   let loseCommitAck = false;
@@ -53,7 +56,7 @@ async function fixture(t, instruments = ["AAVE/USD", "RUNE/USD"]) {
     const definition = buildGridDefinition(config);
     const grid = createRingGrid(definition);
     const anchorStore = persistence.createAnchorStore(instrument);
-    await anchorStore.save(trackExcursion(initialAnchorShiftState(), { price: 120, anchor: 100, geometry: definition, occurredAt: new Date(clock).toISOString() }).state);
+    await anchorStore.save(savedStates[instrument] ?? trackExcursion(initialAnchorShiftState(), { price: 120, anchor: 100, geometry: definition, occurredAt: new Date(clock).toISOString() }).state);
     const execution = { isEnabled: () => false, hasOrderInFlight: () => false, async executeIntent() { orderCalls += 1; throw new Error("NO ORDERS AUTHORIZED"); }, async executeProtectiveCut() { orderCalls += 1; }, async executeProtectiveFlatten() { orderCalls += 1; } };
     const runtime = createSolanaRuntime({ instrument, strategyId: definition.strategyId, gridDefinition: definition, stateStore: persistence.createStateStore(grid), anchorStore, maProvider: { async getCurrent() { return { ma: 100 }; } }, execution, notifications, getRiskSnapshot: async () => ({ signedNetReadOk: true, accountLocked: false, brokerNetUnits: 0, instrumentUnrealisedUsd: 0, instrumentDayPnlUsd: 0, instrumentExposureUsd: 0 }) });
     await runtime.init();
@@ -71,7 +74,15 @@ async function fixture(t, instruments = ["AAVE/USD", "RUNE/USD"]) {
   let timerCallback = null;
   recovery = createAnchorShiftRecovery({ accountMonitor: monitor, coordinator, setTimer: (fn) => { timerCallback = fn; return { unref() {} }; }, clearTimer: () => { timerCallback = null; } });
   t.after(() => recovery.stop());
-  const service = createMultiInstrumentOwnerService({ instrumentConfigs: configs, recoverAnchors: recovery.recover, getAnchorRecoveryStatus: coordinator.getSnapshot, buildOwnerService: () => ({ inspectForRerun: async () => ({ ok: true, match: true, virtualNet: 0, brokerNet: 0, openLots: 0 }) }) });
+  let executionEnabled = false;
+  const reconciliation = createAnchorHistoryReconciliation({ persistence, accountMonitor: monitor, coordinator,
+    books: runtimes.map((r, i) => ({ instrument: instruments[i], ...r })),
+    isExecutionEnabled: () => executionEnabled, now: () => clock });
+  const service = createMultiInstrumentOwnerService({ instrumentConfigs: configs, reconcileAnchorHistory: reconciliation.run, recoverAnchors: recovery.recover, getAnchorRecoveryStatus: coordinator.getSnapshot, buildOwnerService: (cfg) => ({
+    ...createSolanaOwnerService({ strategy: { instruments: { [cfg.instrument]: { enabled: true } } }, persistence,
+      gridDefinition: buildGridDefinition(cfg), anchorRuntime: runtimes[instruments.indexOf(cfg.instrument)],
+      maProvider: { async getCurrent() { return { ma: 100 }; } }, getLiveMarketSnapshot: () => ({ price: 100 }) }),
+    inspectForRerun: async () => ({ ok: true, match: true, virtualNet: 0, brokerNet: 0, openLots: 0 }) }) });
   class Bot {
     handlers = [];
     onText(regex, fn) { this.handlers.push([regex, fn]); }
@@ -94,7 +105,7 @@ async function fixture(t, instruments = ["AAVE/USD", "RUNE/USD"]) {
     await recovery.confirm();
     await notifications.drain();
   }
-  return { persistence, db, sent, runtimes, coordinator, monitor, recovery, service, command, tick, setClock: (at) => { clock = at; }, orderCalls: () => orderCalls, blockPublication: () => { publishBlocked = true; }, loseCommitAck: () => { loseCommitAck = true; }, fireTimer: async () => { const fn = timerCallback; timerCallback = null; assert.ok(fn); return fn(); } };
+  return { persistence, db, sent, runtimes, reconciliation, setExecution: (on) => { executionEnabled = on; }, coordinator, monitor, recovery, service, command, tick, setClock: (at) => { clock = at; }, orderCalls: () => orderCalls, blockPublication: () => { publishBlocked = true; }, loseCommitAck: () => { loseCommitAck = true; }, fireTimer: async () => { const fn = timerCallback; timerCallback = null; assert.ok(fn); return fn(); } };
 }
 
 test("production Telegram recovery → real monitor/watcher → D060 runtime → PostgreSQL state/history → success, with execution OFF", async (t) => {
@@ -241,4 +252,124 @@ test("flatness lost between state/history writes and COMMIT rolls back the compl
   }), (error) => error.code === "ANCHOR_PERSISTENCE_FAILED" && error.rollbackConfirmed === true);
   assert.equal((await f.persistence.loadAnchorState("AAVE/USD")).multiplier, prior.multiplier);
   assert.equal(await f.persistence.countAnchorShiftHistory("AAVE/USD"), 0);
+});
+
+const legacyState = (multiplier, lastShiftAt) => ({ ...initialAnchorShiftState(), multiplier, lastShiftAt });
+const legacyStates = {
+  "ZEC/USD": legacyState(1.801012345678901, "2026-10-07T10:40:59.200Z"),
+  "AAVE/USD": legacyState(1.197712345678901, "2026-10-07T11:42:15.734Z")
+};
+
+test("owner Telegram reconciliation previews persisted gaps, records factual audit only, and is idempotent", async (t) => {
+  const f = await fixture(t, ["ZEC/USD", "AAVE/USD", "RUNE/USD"], legacyStates);
+  const before = await f.db.query("SELECT * FROM ring_anchor_shift_state ORDER BY instrument");
+  const memory = f.runtimes.map((r) => r.getAnchorState());
+  await f.command("/anchorreconcile");
+  assert.match(f.sent.at(-1), /PREVIEW/);
+  assert.match(f.sent.at(-1), /ZEC\/USD/);
+  assert.match(f.sent.at(-1), /AAVE\/USD/);
+  assert.doesNotMatch(f.sent.at(-1), /RUNE\/USD/);
+  assert.equal((await f.db.query("SELECT * FROM ring_anchor_shift_reconciliations")).rows.length, 0);
+  await f.command("/anchorreconcile CONFIRM");
+  assert.match(f.sent.at(-1), /ANCHOR HISTORY RECONCILED/);
+  for (const instrument of ["ZEC/USD", "AAVE/USD"]) {
+    const audit = await f.persistence.createAnchorStore(instrument).reconciliations();
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].shiftedAt, legacyStates[instrument].lastShiftAt);
+    assert.match(audit[0].savedMultiplier, /123456789/);
+    assert.match(formatAnchorHistory(audit, instrument), /RECONCILED SAVED STATE/);
+    assert.match(formatAnchorHistory(audit, instrument), /original side\/extreme\/MA\/old multiplier unknown/);
+    assert.equal(await f.persistence.countAnchorShiftHistory(instrument), 0);
+  }
+  assert.deepEqual((await f.db.query("SELECT * FROM ring_anchor_shift_state ORDER BY instrument")).rows, before.rows);
+  assert.deepEqual(f.runtimes.map((r) => r.getAnchorState()), memory);
+  await f.command("/anchorhistory ZEC");
+  assert.match(f.sent.at(-1), /RECONCILED SAVED STATE/);
+  assert.doesNotMatch(f.sent.at(-1), /NaN/);
+  await f.command("/anchors");
+  assert.match(f.sent.at(-1), /shifts: 0.*reconciled saved states: 1/);
+  assert.equal(f.runtimes[2].hasPendingAnchorExcursion(), true);
+  assert.equal(f.orderCalls(), 0);
+  await f.command("/anchorreconcile CONFIRM");
+  assert.match(f.sent.at(-1), /No saved anchors/);
+  assert.equal((await f.db.query("SELECT * FROM ring_anchor_shift_reconciliations")).rows.length, 2);
+});
+
+test("reconciliation refuses execution ON, active recovery, and runtime/saved-state mismatch", async (t) => {
+  const f = await fixture(t, ["ZEC/USD", "RUNE/USD"], legacyStates);
+  f.setExecution(true);
+  await f.command("/anchorreconcile CONFIRM");
+  assert.match(f.sent.at(-1), /REFUSED/);
+  f.setExecution(false);
+  await f.command("/anchorrecover CONFIRM");
+  await f.command("/anchorreconcile CONFIRM");
+  assert.match(f.sent.at(-1), /REFUSED/);
+  assert.equal((await f.db.query("SELECT * FROM ring_anchor_shift_reconciliations")).rows.length, 0);
+  const g = await fixture(t, ["ZEC/USD"], legacyStates);
+  await g.db.query("UPDATE ring_anchor_shift_state SET multiplier=2 WHERE instrument='ZEC/USD'");
+  await g.command("/anchorreconcile CONFIRM");
+  assert.match(g.sent.at(-1), /REFUSED/);
+});
+
+test("PostgreSQL audit failure rolls back the whole reconciliation batch and reports a terminal failure", async (t) => {
+  const f = await fixture(t, ["ZEC/USD", "AAVE/USD"], legacyStates);
+  await f.db.exec(`CREATE FUNCTION reject_reconciliation() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN IF NEW.instrument = 'ZEC/USD' THEN RAISE EXCEPTION 'audit write rejected'; END IF; RETURN NEW; END $$;
+    CREATE TRIGGER reject_reconciliation BEFORE INSERT ON ring_anchor_shift_reconciliations
+      FOR EACH ROW EXECUTE FUNCTION reject_reconciliation();`);
+  const before = (await f.db.query("SELECT * FROM ring_anchor_shift_state ORDER BY instrument")).rows;
+  await f.command("/anchorreconcile CONFIRM");
+  assert.match(f.sent.at(-1), /RECONCILIATION FAILED/);
+  assert.doesNotMatch(f.sent.at(-1), /audit write rejected/);
+  assert.equal((await f.db.query("SELECT * FROM ring_anchor_shift_reconciliations")).rows.length, 0);
+  assert.deepEqual((await f.db.query("SELECT * FROM ring_anchor_shift_state ORDER BY instrument")).rows, before);
+});
+
+test("reconciliation checks state locks and safety again before COMMIT; ordinary shift history is excluded", async (t) => {
+  const f = await fixture(t, ["ZEC/USD", "AAVE/USD"], legacyStates);
+  const gaps = await f.persistence.inspectAnchorHistoryGaps(["ZEC/USD", "AAVE/USD"]);
+  let checks = 0;
+  await assert.rejects(f.persistence.reconcileAnchorHistory(gaps, () => ++checks === 1), /reconciliation failed/);
+  assert.equal((await f.db.query("SELECT * FROM ring_anchor_shift_reconciliations")).rows.length, 0);
+  await f.db.query("UPDATE ring_anchor_shift_state SET multiplier=2 WHERE instrument='ZEC/USD'");
+  await assert.rejects(f.persistence.reconcileAnchorHistory(gaps, () => true), /reconciliation failed/);
+  assert.equal((await f.db.query("SELECT * FROM ring_anchor_shift_reconciliations")).rows.length, 0);
+  await f.persistence.appendAnchorShift({ instrument: "AAVE/USD", shiftedAt: legacyStates["AAVE/USD"].lastShiftAt,
+    side: "UPPER", extreme: 120, maNow: 100, oldMultiplier: 1, newMultiplier: legacyStates["AAVE/USD"].multiplier });
+  const remaining = await f.persistence.inspectAnchorHistoryGaps(["ZEC/USD", "AAVE/USD"]);
+  assert.deepEqual(remaining.map((g) => g.instrument), ["ZEC/USD"]);
+});
+
+test("lost reconciliation COMMIT acknowledgement can be inspected and never duplicates audit records", async (t) => {
+  const f = await fixture(t, ["ZEC/USD"], legacyStates);
+  f.loseCommitAck();
+  await f.command("/anchorreconcile CONFIRM");
+  assert.match(f.sent.at(-1), /commit outcome may be uncertain/);
+  await f.command("/anchorreconcile");
+  assert.match(f.sent.at(-1), /No saved anchors/);
+  assert.equal((await f.db.query("SELECT * FROM ring_anchor_shift_reconciliations")).rows.length, 1);
+  assert.equal(f.orderCalls(), 0);
+});
+
+test("confirmation refuses stale, non-flat, unreadable, virtual-open, and in-flight account paths", async (t) => {
+  const f = await fixture(t, ["ZEC/USD"], legacyStates);
+  await f.monitor.pollOnce();
+  const healthy = f.monitor.getSnapshot();
+  const baseBook = { instrument: "ZEC/USD", ...f.runtimes[0] };
+  for (const scenario of [
+    { snapshot: { ...healthy.snapshot, fetchedAtMs: -10_000 } },
+    { snapshot: { ...healthy.snapshot, fetchedAtMs: 2_000 } },
+    { snapshot: { ...healthy.snapshot, openPositionsCount: 1 } },
+    { snapshot: { ...healthy.snapshot, signedNetReadOk: false } },
+    { snapshot: { ...healthy.snapshot, positionsReadFailed: true } },
+    { book: { ...baseBook, hasVirtualLots: () => true } },
+    { book: { ...baseBook, hasOrderInFlight: () => true } }
+  ]) {
+    const r = createAnchorHistoryReconciliation({ persistence: f.persistence,
+      accountMonitor: { async pollOnce() {}, getSnapshot: () => ({ ...healthy, snapshot: scenario.snapshot ?? healthy.snapshot }) },
+      coordinator: f.coordinator, books: [scenario.book ?? baseBook], isExecutionEnabled: () => false, now: () => 1_000 });
+    assert.match(await r.run(true), /REFUSED/);
+  }
+  assert.equal((await f.db.query("SELECT * FROM ring_anchor_shift_reconciliations")).rows.length, 0);
+  assert.equal(f.orderCalls(), 0);
 });
