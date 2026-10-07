@@ -1,5 +1,5 @@
 /**
- * Telegram /b panel for the five live books.
+ * Telegram /b panel for the configured live books.
  *
  * Home is the map. Each book is its own screen so Resume / Reconcile / Rematch
  * always name one instrument. Confirm* commands are never buttons.
@@ -83,6 +83,7 @@ export function buildHomeKeyboard(books = DEFAULT_BOOKS) {
     pair(btn("Risk Detail", "risk"), btn("All Health", "health")),
     pair(btn("Anchors", "anchors"), btn("Anchor History", "anchorhistory")),
     pair(btn("Anchor Stats", "anchorstats")),
+    pair(btn("Recovery Info", "anchorrecover"), btn("Audit Preview", "anchorreconcile")),
     pair(btn("All Rings", "rings"), btn("All Levels", "levels")),
     pair(btn("Exit Targets", "targets")),
     pair(btn("Pause Bot", "kill"), btn("Re-run Halt", "rerun")),
@@ -156,7 +157,7 @@ export function panelLead(view, symbol) {
   if (view === "diag") return "Diagnostics \u2014 preflight and canary do not place a live grid order.";
   if (view === "chronicle") return "Chronicle controls.";
   if (view === "dev") return "Development companion. This does not place trades.";
-  return "Tradeify \u2014 5 live books. Open a coin for that book\u2019s controls.";
+  return "Tradeify \u2014 account and coin controls. Anchor reads are above; recovery info and audit preview never confirm a change. Open a coin for its controls.";
 }
 
 export function menuActionIds(books = DEFAULT_BOOKS) {

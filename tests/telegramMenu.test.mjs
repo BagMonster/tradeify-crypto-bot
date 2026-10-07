@@ -96,3 +96,48 @@ test("every slash command still registered after adding buttons", () => {
   }
   assert.match(SOURCE, /\(b\|buttons\|menu\)/, "/b alias missing");
 });
+
+test("Telegram registers all anchor commands, routes read buttons without confirmation, and explains automatic shifts", async () => {
+  const { startTelegramBot } = await import("../src/telegramBot.js");
+  const calls = [];
+  class Bot {
+    handlers = [];
+    events = {};
+    messages = [];
+    onText(regex, handler) { this.handlers.push([regex, handler]); }
+    on(name, handler) { this.events[name] = handler; }
+    async sendMessage(_chat, text) { this.messages.push(text); }
+    async answerCallbackQuery() {}
+    async setMyCommands(commands) { this.commands = commands; }
+  }
+  const service = {
+    instruments: ["RUNE/USD"],
+    anchorsText: async () => { calls.push(["anchors"]); return "anchors"; },
+    anchorText: async (arg) => { calls.push(["anchor", arg]); return "anchor"; },
+    anchorHistoryText: async (arg) => { calls.push(["history", arg]); return "history"; },
+    anchorStatsText: async (arg) => { calls.push(["stats", arg]); return "stats"; },
+    anchorRecoveryText: async (confirm) => { calls.push(["recovery", confirm]); return "recovery info"; },
+    anchorReconciliationText: async (confirm) => { calls.push(["audit", confirm]); return "audit preview"; }
+  };
+  const bot = await startTelegramBot({ environment: { telegramToken: "test", telegramAllowedUserId: 1 }, service, BotClass: Bot });
+  for (const command of ["anchors", "anchor", "anchorhistory", "anchorstats", "anchorrecover", "anchorreconcile"]) {
+    assert.ok(bot.commands.some((c) => c.command === command), command);
+  }
+  for (const data of ["anchors", "anchor:RUNE", "anchorhistory:RUNE", "anchorstats:RUNE", "anchorrecover", "anchorreconcile", "anchorrecover:CONFIRM", "anchorreconcile:CONFIRM"]) {
+    await bot.events.callback_query({ id: data, from: { id: 1 }, message: { chat: { id: 1 } }, data });
+  }
+  assert.deepEqual(calls, [["anchors"], ["anchor", "RUNE/USD"], ["history", "RUNE/USD"], ["stats", "RUNE/USD"],
+    ["recovery", undefined], ["audit", undefined], ["recovery", undefined], ["audit", undefined]]);
+  await bot.events.callback_query({ id: "denied", from: { id: 2 }, message: { chat: { id: 1 } }, data: "anchorrecover" });
+  assert.equal(calls.length, 8, "non-owner cannot invoke the anchor buttons");
+  bot.messages.length = 0;
+  const [regex, handler] = bot.handlers.find(([regex]) => regex.test("/help"));
+  await handler({ from: { id: 1 }, chat: { id: 1 } }, "/help".match(regex));
+  const help = bot.messages.join("\n");
+  assert.match(help, /Anchors adjust automatically/);
+  assert.match(help, /9-second entry hold/);
+  assert.match(help, /confirmations must be typed/);
+  assert.match(help, /saved-state evidence only/);
+  assert.ok(buildHomeKeyboard().flat().some((b) => b.callback_data === "anchorrecover"));
+  assert.ok(buildHomeKeyboard().flat().some((b) => b.callback_data === "anchorreconcile"));
+});
