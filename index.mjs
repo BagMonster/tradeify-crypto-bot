@@ -69,6 +69,14 @@ const orderCodeEpoch = accountOrderEpoch(environment.dxtrade.accountCode);
 
 const database = createDatabase(environment);
 await database.init(account);
+// A durable Telegram /kill must also stop the already-running execution guards.
+// The database remains the source of truth across redeploys; this shared flag
+// makes the change immediate in this process.
+let operatorExecutionPaused = (await database.getState()).operator_killed === true;
+const sharedExecutionPause = Object.freeze({
+  isPaused: () => operatorExecutionPaused,
+  set: async (paused) => { operatorExecutionPaused = paused === true; }
+});
 const persistedExposurePoolEpisode = accountRisk.exposurePool
   ? await database.getExposurePoolEpisode()
   : null;
@@ -243,6 +251,7 @@ async function buildInstrumentStack(cfg) {
   const execution = createRingExecutionGuard({
     autoExecute: environment.autoExecute,
     strategyAutoExecute: cfg.execution?.autoExecute ?? true,
+    isOperatorPaused: sharedExecutionPause.isPaused,
     instrument: cfg.instrument,
     orderPrefix: cfg.orderPrefix,
     orderCodeEpoch,
@@ -332,6 +341,12 @@ anchorShiftCoordinator = createAnchorShiftCoordinator({
   addEvent: database.addEvent,
   notifications: liveNotifications
 });
+async function recoverVerifiedFlatAnchorShift() {
+  // pollOnce feeds the coordinator its normal, fresh DXtrade snapshot first.
+  const snapshot = await accountMonitor.pollOnce();
+  if (accountMonitor.getSnapshot().healthy !== true) return Object.freeze({ action: "RECOVERY_REFUSED" });
+  return anchorShiftCoordinator.beginVerifiedFlatRecovery(snapshot);
+}
 const startupDustCleanupDayKey = accountDayKey(Date.now());
 
 const dailyDustCleanup = createDailyDustCleanupCoordinator({
@@ -876,6 +891,8 @@ const service = createMultiInstrumentOwnerService({
   },
   instrumentConfigs: enabledInstruments,
   riskSupervisor,
+  sharedPause: sharedExecutionPause,
+  recoverAnchors: recoverVerifiedFlatAnchorShift,
   haltWarnings,
   // Required by /re-run. Without `database` the rerun handlers degrade to
   // "Re-run is not configured on this deployment." and the command does nothing.
@@ -912,6 +929,7 @@ const service = createMultiInstrumentOwnerService({
       execution: stack.execution,
       canary: cfg.instrument === heartbeatStack.cfg.instrument ? liveCanary : null,
       accountMonitor,
+      onOperatorPauseChange: sharedExecutionPause.set,
       onBooksRematched: async () => {
         stack.reconciliationHaltLatched = false;
         stack.reconciliationWarning = null;
