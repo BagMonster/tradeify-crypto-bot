@@ -86,6 +86,7 @@ export function createRematchHandlers({
   instrument = null,
   grid = null,
   stateStore = null,
+  onOperatorPauseChange = async () => {},
   onBooksRematched = async () => {}
 }) {
   const bookInstrument = resolveInstrument({ gridDefinition, instrument });
@@ -296,6 +297,7 @@ export function createRematchHandlers({
       ].join("\n");
     }
     if (typeof database.setOperatorKilled === "function") await database.setOperatorKilled(false);
+    await onOperatorPauseChange(false);
     await database.clearResumeChallenge();
     if (typeof onBooksRematched === "function") await onBooksRematched({ instrument: bookInstrument, virtualNet: book.netUnits, brokerNet: broker.netUnits });
     await database.addEvent("WARN", "SOL_BOOKS_REMATCHED", {
