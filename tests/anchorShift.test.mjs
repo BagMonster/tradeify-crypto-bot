@@ -83,6 +83,21 @@ test("4b. verified-flat recovery still requires the nine-second hold and another
   assert.equal((await coordinator.beginVerifiedFlatRecovery({ ...flat, openPositionsCount: 1 })).action, "RECOVERY_REFUSED");
 });
 
+test("4c. repeating the same cached snapshot cannot satisfy the second-read requirement", async () => {
+  let t = 0; let shifted = 0; let pending = true;
+  const coordinator = createAnchorShiftCoordinator({
+    books: [{ instrument: "ZEC/USD", setAnchorShiftHold() {}, hasPendingAnchorExcursion: () => pending, hasVirtualLots: () => false, hasOrderInFlight: () => false, applyAnchorShift: async () => { shifted += 1; pending = false; return { shifted: true, instrument: "ZEC/USD" }; } }],
+    now: () => t, holdMs: 9000
+  });
+  const flat = (fetchedAtMs) => ({ openPositionsCount: 0, signedNetReadOk: true, accountLocked: false, positionsReadFailed: false, fetchedAtMs });
+  await coordinator.beginVerifiedFlatRecovery(flat(1_000));
+  t = 10_000;
+  assert.equal((await coordinator.observe(flat(1_000))).action, "HOLDING");
+  assert.equal(shifted, 0);
+  assert.equal((await coordinator.observe(flat(10_000))).action, "SHIFTED");
+  assert.equal(shifted, 1);
+});
+
 function fixtureDefinition() {
   return buildGridDefinition({ instrument: "SOL/USD", marketSymbol: "SOLUSDT", orderPrefix: "SOL", geometry: { maDays: 200, bandPct: 0.05, deadZoneBands: 0, activeLevelsPerSide: 2, growth: 1.2, innerLevels: 1, innerPositionsPerRing: 1, outerPositionsPerRing: 2, rearmBands: 0.5 }, sizing: { capUsd: 500, lotStep: 0.01, roundTripCostFloorPct: 0.001 }, tranches: { weights: [1, 2, 3, 4], denominator: 10 } });
 }
