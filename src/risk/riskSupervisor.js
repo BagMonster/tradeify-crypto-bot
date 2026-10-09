@@ -217,6 +217,11 @@ export function createRiskSupervisor({
   if (!Number.isSafeInteger(rolloverHarvestDelayMinutes) || rolloverHarvestDelayMinutes < 0 || rolloverHarvestDelayMinutes > 60) {
     throw new TypeError("rolloverHarvestDelayMinutes must be a whole number from 0 through 60");
   }
+  const rolloverHarvestWindowMinutes = config.rolloverHarvestWindowMinutes == null
+    ? null : Number(config.rolloverHarvestWindowMinutes);
+  if (rolloverHarvestWindowMinutes !== null && (!Number.isSafeInteger(rolloverHarvestWindowMinutes) || rolloverHarvestWindowMinutes < 1 || rolloverHarvestWindowMinutes > 60)) {
+    throw new TypeError("rolloverHarvestWindowMinutes must be a whole number from 1 through 60");
+  }
   const rolloverHarvestDelayMs = rolloverHarvestDelayMinutes * 60 * 1000;
   const configuredCutCooldownMs = Number(config.cutCooldownMs);
   const cutCooldownMs = Number.isFinite(configuredCutCooldownMs) && configuredCutCooldownMs >= 0
@@ -671,6 +676,12 @@ export function createRiskSupervisor({
         harvest: prior
       });
     }
+    // Limit initiation, including startup catch-up and deferred candidate reads.
+    // A durable PENDING plan can finish after expiry; never abandon closes that
+    // may already have been confirmed. Ordinary full harvest remains separate.
+    const startsAtMs = Date.parse(`${incomingDayKey}T00:00:00.000Z`) - ACCOUNT_DAY_OFFSET_MS + rolloverHarvestDelayMs;
+    const endsAtMs = rolloverHarvestWindowMinutes === null ? Infinity : startsAtMs + rolloverHarvestWindowMinutes * 60_000;
+    if (prior.status !== "PENDING" && now() >= endsAtMs) return null;
     let plan;
     const target = rolloverHarvestTarget();
     try {
@@ -688,6 +699,8 @@ export function createRiskSupervisor({
       return null;
     }
     if (!plan) return null;
+    // Ticket reads may cross the deadline while awaiting broker readiness.
+    if (prior.status !== "PENDING" && now() >= endsAtMs) return null;
     const pending = prior.status === "PENDING"
       ? prior
       : await saveHarvest({
@@ -1308,6 +1321,7 @@ export function createRiskSupervisor({
       sessionHarvestUsd: sessionHarvestEnabled ? sessionHarvestThreshold : null,
       sessionHarvestFreshDataGraceMs: sessionHarvestEnabled ? sessionHarvestFreshDataGraceMs : null,
       rolloverHarvestDelayMinutes: sessionHarvestEnabled ? rolloverHarvestDelayMinutes : null,
+      rolloverHarvestWindowMinutes: sessionHarvestEnabled ? rolloverHarvestWindowMinutes : null,
       rolloverHarvestDelayRemainingMs,
       poolClosedHarvest,
       harvestRetryRemainingMs: harvestRetryAtMs === null ? 0 : Math.max(0, harvestRetryAtMs - now()),

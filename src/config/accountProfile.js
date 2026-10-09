@@ -43,7 +43,7 @@ const PROFILE_OWNED_ACCOUNT_FIELDS = Object.freeze([
 ]);
 const PROFILE_OWNED_RISK_FIELDS = Object.freeze([
   "entryBrakeUsd", "cutTiers", "partialCutUsd", "partialCutFraction",
-  "fullFlattenUsd", "dailyLossLimitUsd", "sessionHarvestUsd", "rolloverHarvestDelayMinutes", "exposurePool", "exposurePoolHarvest"
+  "fullFlattenUsd", "dailyLossLimitUsd", "sessionHarvestUsd", "rolloverHarvestDelayMinutes", "rolloverHarvestWindowMinutes", "exposurePool", "exposurePoolHarvest"
 ]);
 
 const PROFILE_NAME = /^[a-z0-9-]{1,32}$/;
@@ -113,6 +113,9 @@ export function validateAccountProfile(input, name = "profile") {
   const rolloverHarvestDelayMinutes = input.rolloverHarvestDelayMinutes == null
     ? 0
     : minutes("rolloverHarvestDelayMinutes", input.rolloverHarvestDelayMinutes);
+  const rolloverHarvestWindowMinutes = input.rolloverHarvestWindowMinutes == null
+    ? null : minutes("rolloverHarvestWindowMinutes", input.rolloverHarvestWindowMinutes);
+  if (rolloverHarvestWindowMinutes === 0) fail("rolloverHarvestWindowMinutes must be at least one minute");
   const perCoinCapUsd = positive("perCoinCapUsd", input.perCoinCapUsd);
 
   let exposurePool = null;
@@ -147,6 +150,7 @@ export function validateAccountProfile(input, name = "profile") {
     fullFlattenUsd,
     harvestUsd,
     rolloverHarvestDelayMinutes,
+    rolloverHarvestWindowMinutes,
     perCoinCapUsd,
     exposurePool,
     exposurePoolHarvest
@@ -223,6 +227,7 @@ export function applyAccountProfile({ profile, account, instruments }) {
     dailyLossLimitUsd: profile.dailyLossLimitUsd,
     sessionHarvestUsd: profile.harvestUsd,
     rolloverHarvestDelayMinutes: profile.rolloverHarvestDelayMinutes,
+    ...(profile.rolloverHarvestWindowMinutes != null ? { rolloverHarvestWindowMinutes: profile.rolloverHarvestWindowMinutes } : {}),
     ...(profile.exposurePool ? { exposurePool: { softUsd: profile.exposurePool.softUsd, hardUsd: profile.exposurePool.hardUsd } } : {}),
     ...(profile.exposurePoolHarvest ? { exposurePoolHarvest: { ...profile.exposurePoolHarvest } } : {})
   };
