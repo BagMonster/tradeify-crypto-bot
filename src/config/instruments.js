@@ -131,6 +131,9 @@ function validateAccountRisk(input) {
     ? 0
     : integer("accountRisk.rolloverHarvestDelayMinutes", risk.rolloverHarvestDelayMinutes, 0);
   if (rolloverHarvestDelayMinutes > 60) throw new Error("accountRisk.rolloverHarvestDelayMinutes must be from 0 through 60");
+  const rolloverHarvestWindowMinutes = risk.rolloverHarvestWindowMinutes == null
+    ? null : integer("accountRisk.rolloverHarvestWindowMinutes", risk.rolloverHarvestWindowMinutes, 1);
+  if (rolloverHarvestWindowMinutes > 60) throw new Error("accountRisk.rolloverHarvestWindowMinutes must be from 1 through 60");
   let exposurePoolHarvest = null;
   if (risk.exposurePoolHarvest != null) {
     const policy = object("accountRisk.exposurePoolHarvest", risk.exposurePoolHarvest);
@@ -146,7 +149,7 @@ function validateAccountRisk(input) {
   const lossBudgetFraction = dustInput.lossBudgetFraction == null ? 0.02 : positive("accountRisk.dustCleanup.lossBudgetFraction", dustInput.lossBudgetFraction);
   const minuteUtc = dustInput.minuteUtc == null ? 3 : integer("accountRisk.dustCleanup.minuteUtc", dustInput.minuteUtc, 0);
   if (maxRemainingFraction > 1 || lossBudgetFraction >= 1 || minuteUtc > 59) throw new Error("accountRisk.dustCleanup is invalid");
-  return Object.freeze({ entryBrakeUsd, entryBrakeScope: risk.entryBrakeScope, partialCutUsd, partialCutFraction, partialCutAllocation: risk.partialCutAllocation, fullFlattenUsd, flattenHoldsUntilRollover: true, dailyLossLimitUsd, rolloverHourUtc, sessionHarvestEnabled, sessionHarvestUsd, sessionHarvestFreshDataGraceMs, rolloverHarvestDelayMinutes, exposurePoolHarvest, dustCleanup: Object.freeze({ maxRemainingFraction, lossBudgetFraction, minuteUtc }) });
+  return Object.freeze({ entryBrakeUsd, entryBrakeScope: risk.entryBrakeScope, partialCutUsd, partialCutFraction, partialCutAllocation: risk.partialCutAllocation, fullFlattenUsd, flattenHoldsUntilRollover: true, dailyLossLimitUsd, rolloverHourUtc, sessionHarvestEnabled, sessionHarvestUsd, sessionHarvestFreshDataGraceMs, rolloverHarvestDelayMinutes, rolloverHarvestWindowMinutes, exposurePoolHarvest, dustCleanup: Object.freeze({ maxRemainingFraction, lossBudgetFraction, minuteUtc }) });
 }
 
 export function loadInstrumentConfigObject(input) {

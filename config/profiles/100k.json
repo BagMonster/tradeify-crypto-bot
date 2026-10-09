@@ -15,6 +15,7 @@
   "harvestUsd": 330,
   "rolloverHarvestDelayMinutes": 5,
   "rolloverHarvestWindowMinutes": 3,
-  "exposurePool": { "softUsd": 22000, "hardUsd": 22500 },
+  "exposurePool": { "softUsd": 30000, "hardUsd": 35000 },
+  "exposurePoolHarvest": { "firstAfterHours": 24, "secondAfterHours": 36, "firstFraction": 0.5, "minimumFraction": 0.25 },
   "perCoinCapUsd": 50000
 }

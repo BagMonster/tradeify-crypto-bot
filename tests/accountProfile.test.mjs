@@ -86,7 +86,7 @@ test("the 100k draft is refused until it is confirmed", async () => {
   await assert.rejects(loadAccountProfile("100k"), /"100k" is not confirmed.*config\/profiles\/100k\.json/);
 });
 
-test("the 100k draft is internally consistent, so confirming it is the only step left", async () => {
+test("the 100k draft passes downstream validators when explicitly confirmed in the test", async () => {
   const draft = await readJson("config/profiles/100k.json");
   const profile = validateAccountProfile({ ...draft, confirmed: true }, "100k");
   const applied = applyAccountProfile({
@@ -179,4 +179,179 @@ test("applying a profile never mutates the parsed files", async () => {
   const before = JSON.stringify({ account, instruments });
   applyAccountProfile({ profile, account, instruments });
   assert.equal(JSON.stringify({ account, instruments }), before);
+});
+
+test("committed 100k draft is a tenfold 10k profile with identical timing and fractions", async () => {
+  const small = await readJson("config/profiles/10k.json");
+  const large = await readJson("config/profiles/100k.json");
+  const currency = new Set(["accountSize", "dailyLossLimitUsd", "maxLossUsd", "maxNotionalUsd", "entryBrakeUsd", "fullFlattenUsd", "harvestUsd", "perCoinCapUsd"]);
+  assert.deepEqual(Object.keys(large).sort(), Object.keys(small).sort(), "no policy may be missing");
+  for (const key of Object.keys(small)) {
+    if (key === "note" || key === "confirmed") continue;
+    if (currency.has(key)) assert.equal(large[key], small[key] * 10, key);
+    else if (key === "cutTiers") assert.deepEqual(large[key], small[key].map((t) => ({ ...t, thresholdUsd: t.thresholdUsd * 10 })));
+    else if (key === "exposurePool") assert.deepEqual(large[key], { softUsd: small[key].softUsd * 10, hardUsd: small[key].hardUsd * 10 });
+    else assert.deepEqual(large[key], small[key], key);
+  }
+  assert.equal(small.confirmed, true);
+  assert.equal(large.confirmed, false, "this repair does not authorize activation");
+});
+
+test("tenfold equivalence survives profile application, live instrument parsing and every book's grid sizing", async () => {
+  const { buildGridDefinition } = await import("../src/strategies/ringGridDefinition.js");
+  const small = await loadProfiledConfigFiles("10k");
+  const draft = await readJson("config/profiles/100k.json");
+  const large = applyAccountProfile({ profile: validateAccountProfile({ ...draft, confirmed: true }, "100k"),
+    account: await readJson("config/account.json"), instruments: await readJson("config/instruments.json") });
+  const expectedAccount = { ...small.account };
+  for (const key of ["startingBalance", "dailyLossLimit", "maxLossOffset", "maxLossFloorCap", "maxNotional"]) expectedAccount[key] *= 10;
+  assert.deepEqual(large.account, expectedAccount);
+  const expectedInstruments = structuredClone(small.instruments);
+  for (const key of ["entryBrakeUsd", "partialCutUsd", "fullFlattenUsd", "dailyLossLimitUsd", "sessionHarvestUsd"]) expectedInstruments.accountRisk[key] *= 10;
+  for (const tier of expectedInstruments.accountRisk.cutTiers) tier.thresholdUsd *= 10;
+  for (const key of ["softUsd", "hardUsd"]) expectedInstruments.accountRisk.exposurePool[key] *= 10;
+  for (const book of expectedInstruments.instruments) book.sizing.capUsd *= 10;
+  assert.deepEqual(large.instruments, expectedInstruments, "geometry, policies, fractions and timings must stay identical");
+  const smallLive = loadInstrumentConfigObject(small.instruments);
+  const largeLive = loadInstrumentConfigObject(large.instruments);
+  const expectedRisk = structuredClone(smallLive.accountRisk);
+  for (const key of ["entryBrakeUsd", "partialCutUsd", "fullFlattenUsd", "dailyLossLimitUsd", "sessionHarvestUsd"]) expectedRisk[key] *= 10;
+
+  assert.deepEqual(largeLive.accountRisk, expectedRisk);
+  for (let i = 0; i < small.instruments.instruments.length; i++) {
+    const a = buildGridDefinition(small.instruments.instruments[i]);
+    const b = buildGridDefinition(large.instruments.instruments[i]);
+    assert.ok(Math.abs(b.baseUsd - a.baseUsd * 10) < 1e-8, a.instrument);
+    assert.equal(b.capUsd, a.capUsd * 10);
+    assert.equal(b.lotStep, a.lotStep, "broker quantity step does not scale");
+  }
+});
+
+for (const hours of [24, 36]) {
+  test(`real risk supervisor uses proportional pool-harvest targets after ${hours} hours through the live raw-profile config`, async () => {
+    const nowMs = Date.parse("2026-10-09T22:06:00Z");
+    const targets = [];
+    for (const name of ["10k", "100k"]) {
+      const raw = await readJson(`config/profiles/${name}.json`);
+      const applied = applyAccountProfile({ profile: validateAccountProfile({ ...raw, confirmed: true }, name),
+        account: await readJson("config/account.json"), instruments: await readJson("config/instruments.json") });
+      const risk = loadInstrumentConfigObject(applied.instruments).accountRisk;
+      const allocations = [];
+      const rows = new Map();
+      const scale = name === "10k" ? 1 : 10;
+      const book = { instrument: "SOL/USD", getUnrealisedUsd: () => 0, getDayPnlUsd: () => 0, getExposureUsd: () => 0,
+        setEntryBrake() {}, setTrancheExitsPaused() {},
+        async executeProtectiveCut() { return { status: "ALREADY_FLAT" }; },
+        async executeProtectiveFlatten() { return { status: "ALREADY_FLAT" }; },
+        async getRolloverHarvestCandidates() { return [{ instrument: "SOL/USD", lotId: "ticket", positionCode: "local-test", virtualSide: "BUY", entryPrice: 100, markPrice: 110, remainingUnits: 4 * scale, lotStep: 0.01 }]; },
+        async executeRolloverHarvest({ allocations: planned, onConfirmedClose }) {
+          allocations.push(...planned);
+          for (const a of planned) await onConfirmedClose({ instrument: "SOL/USD", lotId: "ticket", filledQuantity: a.quantity, realizedPnlUsd: a.estimatedProfitUsd });
+          return { closed: [], pending: [] };
+        }
+      };
+      const supervisor = createRiskSupervisor({ config: applied.instruments.accountRisk, instruments: [book], now: () => nowMs,
+        getCombinedDayPnlUsd: () => 0,
+        getExposurePoolSnapshot: () => ({ closed: true, closedSinceMs: nowMs - hours * 3600000 }),
+        harvestStore: { async get(dayKey) { return rows.get(dayKey) ?? { dayKey, status: "READY" }; }, async save(row) { rows.set(row.dayKey, row); return row; } } });
+      await supervisor.evaluate({ dayKey: "2026-10-10" });
+      assert.equal(allocations.length, 1);
+      targets.push(supervisor.getSnapshot().harvest.plan.targetUsd);
+      const target = (hours === 24 ? 16.5 : 8.25) * scale;
+      assert.ok(allocations[0].estimatedProfitUsd <= target);
+      assert.ok(target - allocations[0].estimatedProfitUsd < 0.101, "quantity rounding respects the unchanged broker step");
+    }
+    assert.deepEqual(targets, hours === 24 ? [16.5, 165] : [8.25, 82.5]);
+  });
+}
+
+test("rollover window is validated and reaches both raw live risk config and parsed config", async () => {
+  for (const value of [0, -1, 1.5, 61]) {
+    assert.throws(() => validateAccountProfile({ ...TEN_K, rolloverHarvestWindowMinutes: value }), /rolloverHarvestWindowMinutes/);
+    assert.throws(() => supervisorFrom({ ...(awaitRiskBase()), rolloverHarvestWindowMinutes: value }), /rolloverHarvestWindowMinutes/);
+  }
+  function awaitRiskBase() { return { entryBrakeUsd: 33, partialCutUsd: 200, partialCutFraction: 0.5, fullFlattenUsd: 250, dailyLossLimitUsd: 300 }; }
+  const applied = await loadProfiledConfigFiles("10k");
+  assert.equal(applied.instruments.accountRisk.rolloverHarvestWindowMinutes, 3);
+  assert.equal(loadInstrumentConfigObject(applied.instruments).accountRisk.rolloverHarvestWindowMinutes, 3);
+  assert.throws(() => applyAccountProfile({ profile: validateAccountProfile(TEN_K), account: {},
+    instruments: { accountRisk: { rolloverHarvestWindowMinutes: 3 }, instruments: [] } }), /still contains "rolloverHarvestWindowMinutes"/);
+});
+
+async function windowSupervisor({ time, candidatesReady = true, combined = 0, pending = null, loss = 0, candidateDelayUntil = null } = {}) {
+  const { instruments } = await loadProfiledConfigFiles("10k");
+  let clock = Date.parse(time);
+  let reads = 0;
+  let closes = 0;
+  let flattens = 0;
+  const rows = new Map(pending ? [["2026-10-10", pending]] : []);
+  const book = {
+    instrument: "SOL/USD", getUnrealisedUsd: () => loss, getDayPnlUsd: () => loss, getExposureUsd: () => 400,
+    setEntryBrake() {}, setTrancheExitsPaused() {},
+    async executeProtectiveCut() { return { status: "ALREADY_FLAT" }; },
+    async executeProtectiveFlatten() { flattens++; return { status: "ALREADY_FLAT" }; },
+    async getRolloverHarvestCandidates() {
+      reads++;
+      if (candidateDelayUntil) clock = Date.parse(candidateDelayUntil);
+      return candidatesReady ? [{ instrument: "SOL/USD", lotId: "ticket", positionCode: "local-test", virtualSide: "BUY", entryPrice: 100, markPrice: 110, remainingUnits: 4, lotStep: 0.01 }] : null;
+    },
+    async executeRolloverHarvest({ allocations, onConfirmedClose }) {
+      closes++;
+      for (const a of allocations) await onConfirmedClose({ instrument: "SOL/USD", lotId: a.lotId, filledQuantity: a.quantity, realizedPnlUsd: a.estimatedProfitUsd });
+      return { closed: [], pending: [] };
+    }
+  };
+  const supervisor = createRiskSupervisor({ config: instruments.accountRisk, instruments: [book], now: () => clock,
+    getCombinedDayPnlUsd: () => combined,
+    harvestStore: { async get(dayKey) { return rows.get(dayKey) ?? { dayKey, status: "READY" }; }, async save(row) { rows.set(row.dayKey, row); return row; } } });
+  return { supervisor, evaluate: () => supervisor.evaluate({ dayKey: "2026-10-10" }),
+    setTime: (time) => { clock = Date.parse(time); }, counts: () => ({ reads, closes, flattens }) };
+}
+
+for (const [time, eligible] of [["22:04:59.999", false], ["22:05:00.000", true], ["22:07:59.999", true], ["22:08:00.000", false], ["23:00:00.000", false]]) {
+  test(`new rollover plan eligibility at ${time} UTC matches the configured three-minute window`, async () => {
+    const f = await windowSupervisor({ time: `2026-10-09T${time}Z` });
+    await f.evaluate();
+    assert.equal(f.counts().closes, eligible ? 1 : 0);
+    if (!eligible) assert.equal(f.counts().reads, 0, "outside the window, do not build a plan");
+  });
+}
+
+test("candidate warm-up and a restart cannot reopen an expired rollover window", async () => {
+  const f = await windowSupervisor({ time: "2026-10-09T22:07:00Z", candidatesReady: false });
+  await f.evaluate();
+  assert.equal(f.counts().reads, 1);
+  f.setTime("2026-10-09T22:08:00Z");
+  await f.evaluate();
+  assert.deepEqual(f.counts(), { reads: 1, closes: 0, flattens: 0 });
+});
+
+test("a persisted pending proportional plan can finish after the initiation window expires", async () => {
+  const { buildProportionalRolloverHarvestPlan } = await import("../src/risk/rolloverHarvest.js");
+  const plan = buildProportionalRolloverHarvestPlan({ dayKey: "2026-10-10", thresholdUsd: 33,
+    candidates: [{ instrument: "SOL/USD", lotId: "ticket", positionCode: "local-test", virtualSide: "BUY", entryPrice: 100, markPrice: 110, remainingUnits: 4, lotStep: 0.01 }] });
+  const f = await windowSupervisor({ time: "2026-10-09T22:09:00Z", pending: { dayKey: "2026-10-10", status: "PENDING", mode: "ROLLOVER_PARTIAL", plan, triggerPnlUsd: 0 } });
+  await f.evaluate();
+  assert.equal(f.counts().closes, 1);
+  assert.equal(f.counts().reads, 0, "resume the exact saved plan");
+  assert.equal(f.supervisor.getSnapshot().harvest.status, "CONFIRMED");
+});
+
+test("ordinary full harvest remains eligible after window expiry and protective flatten remains available within it", async () => {
+  const harvest = await windowSupervisor({ time: "2026-10-09T23:00:00Z", combined: 35 });
+  await harvest.evaluate();
+  assert.equal(harvest.counts().closes, 0);
+  assert.equal(harvest.counts().flattens, 1);
+  assert.equal(harvest.supervisor.getSnapshot().harvest.status, "CONFIRMED");
+  const protection = await windowSupervisor({ time: "2026-10-09T22:06:00Z", combined: -250, loss: -250 });
+  await protection.evaluate();
+  assert.equal(protection.counts().flattens, 1);
+  assert.equal(protection.counts().closes, 0);
+});
+
+
+test("broker candidate reads crossing the deadline cannot start a new rollover plan", async () => {
+  const f = await windowSupervisor({ time: "2026-10-09T22:07:59Z", candidateDelayUntil: "2026-10-09T22:08:00Z" });
+  await f.evaluate();
+  assert.deepEqual(f.counts(), { reads: 1, closes: 0, flattens: 0 });
 });
